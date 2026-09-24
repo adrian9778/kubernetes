@@ -232,6 +232,45 @@ func TestStaticPolicyStart(t *testing.T) {
 	}
 }
 
+func TestStaticPolicyNUMANodesInitialization(t *testing.T) {
+	testCases := []struct {
+		description   string
+		topology      *topology.CPUTopology
+		expectedNUMAs []int
+	}{
+		{
+			description:   "single NUMA node",
+			topology:      topoSingleSocketHT,
+			expectedNUMAs: []int{0},
+		},
+		{
+			description:   "dual NUMA nodes",
+			topology:      topoDualSocketHT,
+			expectedNUMAs: []int{0, 1},
+		},
+		{
+			description:   "quad socket topology",
+			topology:      topoQuadSocketFourWayHT,
+			expectedNUMAs: []int{0, 1, 2, 3},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			logger, _ := ktesting.NewTestContext(t)
+			policy, err := NewStaticPolicy(logger, tc.topology, 1, cpuset.New(0), topologymanager.NewFakeManagerWithHint(logger, nil), nil)
+			if err != nil {
+				t.Fatalf("NewStaticPolicy failed: %v", err)
+			}
+
+			p := policy.(*staticPolicy)
+			if !reflect.DeepEqual(p.numaNodes, tc.expectedNUMAs) {
+				t.Errorf("expected numaNodes %v, got %v", tc.expectedNUMAs, p.numaNodes)
+			}
+		})
+	}
+}
+
 func TestStaticPolicyAdd(t *testing.T) {
 	var largeTopoCPUids []int
 	var largeTopoSock0CPUids []int
@@ -2207,6 +2246,71 @@ func TestPolicyWithAlignBySocketAndDistributeCPUsAcrossNUMAEnabled(t *testing.T)
 	}
 }
 
+func TestPolicyWithDistributeCPUsAcrossNUMAAndFullPCPUsOnly(t *testing.T) {
+	testCases := []staticPolicyTest{
+		{
+			description: "DistributeCPUsAcrossNUMA and FullPCPUsOnly with fragmented per-NUMA availability",
+			topo:        topoDualSocketMultiNumaPerSocketHT,
+			options: map[string]string{
+				DistributeCPUsAcrossNUMAOption: "true",
+				FullPCPUsOnlyOption:            "true",
+			},
+			numReservedCPUs: 0,
+			stAssignments:   state.ContainerCPUAssignments{},
+			stDefaultCPUSet: mustParseCPUSet(t, "0-4,10-14,20-24,30-34"),
+			pod:             makePod("fakePod", "fakeContainer", "14000m", "14000m"),
+			topologyHint:    &topologymanager.TopologyHint{},
+			expErr:          nil,
+			expCPUAlloc:     true,
+			expCSet:         mustParseCPUSet(t, "0-3,10-13,20-23,30-31"),
+		},
+		{
+			// --reserved-cpus takes one thread of a core on each NUMA node,
+			// leaving 19 CPUs free per node.
+			description: "GuPodManyCores, DualSocketMultiNumaPerSocketHT, PartialCoreReserved, ExpectAllocDistributed",
+			topo:        topoDualSocketMultiNumaPerSocketHT,
+			options: map[string]string{
+				DistributeCPUsAcrossNUMAOption: "true",
+				FullPCPUsOnlyOption:            "true",
+			},
+			numReservedCPUs: 4,
+			reservedCPUs:    newCPUSetPtr(0, 10, 20, 30),
+			stAssignments:   state.ContainerCPUAssignments{},
+			stDefaultCPUSet: mustParseCPUSet(t, "1-9,11-19,21-29,31-39,40-79"),
+			pod:             makePod("fakePod", "fakeContainer", "70000m", "70000m"),
+			topologyHint:    &topologymanager.TopologyHint{},
+			expErr:          nil,
+			expCPUAlloc:     true,
+			expCSet:         mustParseCPUSet(t, "1-9,11-19,21-29,31-38,41-49,51-59,61-69,71-78"),
+		},
+		{
+			// Shared pool fragmented before FullPCPUsOnly was enabled: a
+			// container holding half cores leaves 17 CPUs free per NUMA node.
+			description: "GuPodManyCores, DualSocketMultiNumaPerSocketHT, PreexistingPartialCores, ExpectAllocDistributed",
+			topo:        topoDualSocketMultiNumaPerSocketHT,
+			options: map[string]string{
+				DistributeCPUsAcrossNUMAOption: "true",
+				FullPCPUsOnlyOption:            "true",
+			},
+			numReservedCPUs: 0,
+			stAssignments: state.ContainerCPUAssignments{
+				"legacyPod": map[string]cpuset.CPUSet{
+					"legacyContainer": mustParseCPUSet(t, "0-2,10-12,20-22,30-32"),
+				},
+			},
+			stDefaultCPUSet: mustParseCPUSet(t, "3-9,13-19,23-29,33-39,40-79"),
+			pod:             makePod("fakePod", "fakeContainer", "62000m", "62000m"),
+			topologyHint:    &topologymanager.TopologyHint{},
+			expErr:          nil,
+			expCPUAlloc:     true,
+			expCSet:         mustParseCPUSet(t, "3-9,13-19,23-29,33-41,43-51,53-61,63-69,73-79"),
+		},
+	}
+	for _, testCase := range testCases {
+		runStaticPolicyTestCaseWithFeatureGate(t, testCase)
+	}
+}
+
 type staticPolicyAllocatePodTest struct {
 	description                     string
 	topo                            *topology.CPUTopology
@@ -2627,6 +2731,64 @@ func TestStaticPolicyAllocatePod(t *testing.T) {
 				expPodSharedPoolAssignments: 0,
 			},
 		},
+		{
+			description: "scope: pod, DistributeCPUsAcrossNUMA with multi-NUMA hint should distribute container CPUs across all hinted NUMA nodes",
+			topo:        topoDualSocketHT,
+			options: map[string]string{
+				DistributeCPUsAcrossNUMAOption: "true",
+			},
+			numReservedCPUs: 2,
+			reservedCPUs:    cpuset.New(0, 1),
+			stAssignments:   state.ContainerCPUAssignments{},
+			stDefaultCPUSet: cpuset.New(2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+			pod:             makePodWithPodLevelResources("pod-single-container-distributed", "4", "4", "workload", "4", "4"),
+			topologyHint:    topologymanager.TopologyHint{NUMANodeAffinity: newNUMAAffinity(0, 1), Preferred: true},
+			expErr:          nil,
+			expPodAssignments: state.ContainerCPUAssignments{
+				"pod-single-container-distributed": map[string]cpuset.CPUSet{
+					"workload": cpuset.New(2, 3, 8, 9),
+				},
+			},
+			expDefaultCPUSet:                cpuset.New(4, 5, 6, 7, 10, 11),
+			podLevelResourcesEnabled:        true,
+			podLevelResourceManagersEnabled: true,
+			requiredMetrics: requiredMetrics{
+				expTotalAllocs:              1,
+				expExclusiveAssignments:     1,
+				expPodSharedPoolAssignments: 0,
+			},
+		},
+		{
+			description: "scope: pod, DistributeCPUsAcrossNUMA with multi-NUMA hint should distribute multiple containers across all hinted NUMA nodes",
+			topo:        topoDualSocketHT,
+			options: map[string]string{
+				DistributeCPUsAcrossNUMAOption: "true",
+			},
+			numReservedCPUs: 2,
+			reservedCPUs:    cpuset.New(0, 1),
+			stAssignments:   state.ContainerCPUAssignments{},
+			stDefaultCPUSet: cpuset.New(2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+			pod: makePodWithContainersAndPodLevelResources("pod-multi-container-distributed", "6", "6", []containerSpec{}, []containerSpec{
+				{name: "workload", request: "4", limit: "4"},
+				{name: "sidecar", request: "2", limit: "2"},
+			}),
+			topologyHint: topologymanager.TopologyHint{NUMANodeAffinity: newNUMAAffinity(0, 1), Preferred: true},
+			expErr:       nil,
+			expPodAssignments: state.ContainerCPUAssignments{
+				"pod-multi-container-distributed": map[string]cpuset.CPUSet{
+					"workload": cpuset.New(2, 3, 8, 9),
+					"sidecar":  cpuset.New(6, 7),
+				},
+			},
+			expDefaultCPUSet:                cpuset.New(4, 5, 10, 11),
+			podLevelResourcesEnabled:        true,
+			podLevelResourceManagersEnabled: true,
+			requiredMetrics: requiredMetrics{
+				expTotalAllocs:              2,
+				expExclusiveAssignments:     2,
+				expPodSharedPoolAssignments: 0,
+			},
+		},
 	}
 
 	for _, testCase := range testCases {
@@ -2639,7 +2801,7 @@ func TestStaticPolicyAllocatePod(t *testing.T) {
 			metrics.ResourceManagerAllocationErrorsTotal.Reset()
 			metrics.ResourceManagerContainerAssignments.Reset()
 
-			policy, err := NewStaticPolicy(logger, testCase.topo, testCase.numReservedCPUs, testCase.reservedCPUs, topologymanager.NewFakeManager(logger), testCase.options)
+			policy, err := NewStaticPolicy(logger, testCase.topo, testCase.numReservedCPUs, testCase.reservedCPUs, topologymanager.NewFakeManagerWithHint(logger, &testCase.topologyHint), testCase.options)
 			if err != nil {
 				t.Fatalf("NewStaticPolicy() failed: %v", err)
 			}

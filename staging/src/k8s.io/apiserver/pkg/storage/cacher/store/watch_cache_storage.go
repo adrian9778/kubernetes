@@ -18,6 +18,7 @@ package store
 
 import (
 	"fmt"
+	"iter"
 	"sort"
 	"sync/atomic"
 
@@ -58,13 +59,6 @@ type WatchCacheStorage struct {
 	// Stores previous snapshots of orderedLister to allow serving requests from previous revisions.
 	snapshots           Snapshotter
 	snapshottingEnabled atomic.Bool
-}
-
-// StoreLocked returns the live store as a Snapshot.
-// Unlike GetExactSnapshotLocked this is not an immutable point-in-time copy.
-// The caller must hold the lock for the duration of use.
-func (w *WatchCacheStorage) StoreLocked() Snapshot {
-	return w.store
 }
 
 func (w *WatchCacheStorage) SnapshottingEnabled() bool {
@@ -113,11 +107,7 @@ func (w *WatchCacheStorage) GetLatestSnapshotOrBuildLocked(key, continueKey stri
 		return snap, nil
 	}
 	// TODO: Consider using Indexer Clone() after benchmarking.
-	return orderedSnapshotResponseFromIndexer(w.store, key, continueKey)
-}
-
-func orderedSnapshotResponseFromIndexer(indexer Indexer, key, continueKey string) (Snapshot, error) {
-	items, err := indexer.OrderedListPrefix(key, continueKey)
+	items, err := w.OrderedListPrefix(key, continueKey)
 	if err != nil {
 		return nil, err
 	}
@@ -144,6 +134,30 @@ func (o orderedListSnapshot) OrderedListPrefix(prefix, continueKey string) ([]in
 	return o.Items, nil
 }
 
+func (o orderedListSnapshot) RangePrefix(prefix, continueKey string) Range {
+	return prefixRange{o, prefix, continueKey}
+}
+
+func (o orderedListSnapshot) rangePrefix(prefix, continueKey string) iter.Seq2[*Element, error] {
+	return func(yield func(*Element, error) bool) {
+		for _, item := range o.Items {
+			elem, ok := item.(*Element)
+			if !ok {
+				yield(nil, fmt.Errorf("non *Element returned from storage: %v", item))
+				return
+			}
+			if !yield(elem, nil) {
+				return
+			}
+		}
+	}
+}
+
+func (o orderedListSnapshot) countPrefix(prefix, continueKey string) int {
+	return len(o.Items)
+}
+
+// listSnapshot serves an unordered index bucket.
 type listSnapshot struct {
 	Items []interface{}
 }
@@ -167,7 +181,7 @@ func (l listSnapshot) OrderedListPrefix(prefix string, continueKey string) ([]in
 		if !ok {
 			return nil, fmt.Errorf("non *Element returned from storage: %v", item)
 		}
-		if len(continueKey) > 0 && continueKey >= elem.Key {
+		if len(continueKey) > 0 && continueKey > elem.Key {
 			continue
 		}
 		if !key.HasPathPrefix(elem.Key, prefix) {
@@ -177,6 +191,29 @@ func (l listSnapshot) OrderedListPrefix(prefix string, continueKey string) ([]in
 	}
 	sort.Sort(sortableStoreElements(result))
 	return result, nil
+}
+
+func (l listSnapshot) RangePrefix(prefix, continueKey string) Range {
+	items, err := l.OrderedListPrefix(prefix, continueKey)
+	if err != nil {
+		return failedRange{err}
+	}
+	elems := make(elements, 0, len(items))
+	for _, item := range items {
+		// OrderedListPrefix has already checked every item is an *Element.
+		elems = append(elems, item.(*Element))
+	}
+	return elems
+}
+
+type failedRange struct{ err error }
+
+func (r failedRange) All() iter.Seq2[*Element, error] {
+	return func(yield func(*Element, error) bool) { yield(nil, r.err) }
+}
+
+func (r failedRange) Count() int {
+	return 0
 }
 
 type sortableStoreElements []interface{}
@@ -213,6 +250,10 @@ func (w *WatchCacheStorage) GetByKey(key string) (interface{}, bool, error) {
 	return w.store.GetByKey(key)
 }
 
+func (w *WatchCacheStorage) OrderedListPrefix(prefix, continueKey string) ([]interface{}, error) {
+	return w.store.OrderedListPrefix(prefix, continueKey)
+}
+
 func (w *WatchCacheStorage) ListKeys() []string {
 	return w.store.ListKeys()
 }
@@ -238,7 +279,7 @@ func (w *WatchCacheStorage) UpdateStoreLocked(eventType watch.EventType, elem *E
 		return err
 	}
 	if w.snapshots != nil && w.snapshottingEnabled.Load() {
-		w.snapshots.Add(resourceVersion, w.store)
+		w.snapshots.Add(resourceVersion, w.store.Clone())
 	}
 	return nil
 }
@@ -258,7 +299,7 @@ func (w *WatchCacheStorage) ReplaceLocked(toReplace []interface{}, resourceVersi
 	if w.snapshots != nil {
 		w.snapshots.Reset()
 		if w.snapshottingEnabled.Load() {
-			w.snapshots.Add(version, w.store)
+			w.snapshots.Add(version, w.store.Clone())
 		}
 	}
 	w.listResourceVersion = version

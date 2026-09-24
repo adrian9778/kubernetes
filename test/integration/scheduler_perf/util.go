@@ -32,11 +32,8 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	resourceapi "k8s.io/api/resource/v1"
-	resourcealpha "k8s.io/api/resource/v1alpha3"
-	resourcev1beta1 "k8s.io/api/resource/v1beta1"
-	resourcev1beta2 "k8s.io/api/resource/v1beta2"
-	schedulingapi "k8s.io/api/scheduling/v1beta1"
+	schedulingapiv1alpha3 "k8s.io/api/scheduling/v1alpha3"
+	schedulingapiv1beta1 "k8s.io/api/scheduling/v1beta1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -94,19 +91,18 @@ func newDefaultComponentConfig() (*config.KubeSchedulerConfiguration, error) {
 //   - client rate limit is set to 5000.
 func mustSetupCluster(tCtx ktesting.TContext, config *config.KubeSchedulerConfiguration, enabledFeatures map[featuregate.Feature]bool, opts *schedulerPerfOptions) (*scheduler.Scheduler, informers.SharedInformerFactory, <-chan struct{}, ktesting.TContext) {
 	var runtimeConfig []string
-	if enabledFeatures[features.DynamicResourceAllocation] {
-		runtimeConfig = append(runtimeConfig, fmt.Sprintf("%s=true", resourceapi.SchemeGroupVersion))
-		runtimeConfig = append(runtimeConfig, fmt.Sprintf("%s=true", resourcev1beta2.SchemeGroupVersion))
-		runtimeConfig = append(runtimeConfig, fmt.Sprintf("%s=true", resourcev1beta1.SchemeGroupVersion))
-		runtimeConfig = append(runtimeConfig, fmt.Sprintf("%s=true", resourcealpha.SchemeGroupVersion))
-	}
 	if enabledFeatures[features.GenericWorkload] {
-		runtimeConfig = append(runtimeConfig, fmt.Sprintf("%s=true", schedulingapi.SchemeGroupVersion))
+		runtimeConfig = append(runtimeConfig, fmt.Sprintf("%s=true", schedulingapiv1beta1.SchemeGroupVersion))
+	}
+	if enabledFeatures[features.CompositePodGroup] {
+		runtimeConfig = append(runtimeConfig, fmt.Sprintf("%s=true", schedulingapiv1alpha3.SchemeGroupVersion))
 	}
 	customFlags := []string{
 		// Disable ServiceAccount admission plugin as we don't have serviceaccount controller running.
 		"--disable-admission-plugins=ServiceAccount,TaintNodesByCondition,Priority",
-		"--runtime-config=" + strings.Join(runtimeConfig, ","),
+	}
+	if len(runtimeConfig) > 0 {
+		customFlags = append(customFlags, "--runtime-config="+strings.Join(runtimeConfig, ","))
 	}
 	serverOpts := apiservertesting.NewDefaultTestServerOptions()
 	// Timeout sufficiently long to handle deleting pods of the largest test cases.
@@ -119,9 +115,6 @@ func mustSetupCluster(tCtx ktesting.TContext, config *config.KubeSchedulerConfig
 	// child context, then the server.
 	tCtx.Cleanup(server.TearDownFn)
 	tCtx = tCtx.WithCancel()
-	tCtx.Cleanup(func() {
-		tCtx.Cancel("test is done")
-	})
 
 	// TODO: client connection configuration, such as QPS or Burst is configurable in theory, this could be derived from the `config`, need to
 	// support this when there is any testcase that depends on such configuration.
@@ -146,12 +139,9 @@ func mustSetupCluster(tCtx ktesting.TContext, config *config.KubeSchedulerConfig
 	util.StartFakePVController(tCtx, tCtx.Client(), informerFactory)
 	runGC := util.CreateGCController(tCtx, tCtx, *cfg, informerFactory)
 	runNS := util.CreateNamespaceController(tCtx, tCtx, *cfg, informerFactory)
-	runResourceClaimController := func() {}
-	if enabledFeatures[features.DynamicResourceAllocation] {
-		// Testing of DRA with inline resource claims depends on this
-		// controller for creating and removing ResourceClaims.
-		runResourceClaimController = util.CreateResourceClaimController(tCtx, tCtx, tCtx.Client(), informerFactory)
-	}
+	// Testing of DRA with inline resource claims depends on this
+	// controller for creating and removing ResourceClaims.
+	runResourceClaimController := util.CreateResourceClaimController(tCtx, tCtx, tCtx.Client(), informerFactory)
 
 	informerFactory.Start(tCtx.Done())
 	informerFactory.WaitForCacheSync(tCtx.Done())

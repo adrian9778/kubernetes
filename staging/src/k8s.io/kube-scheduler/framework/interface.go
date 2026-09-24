@@ -37,6 +37,7 @@ import (
 	"k8s.io/client-go/tools/events"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	extenderv1 "k8s.io/kube-scheduler/extender/v1"
 )
 
 // Code is the Status code/type which is returned from plugins.
@@ -74,7 +75,10 @@ const (
 	// When the scheduling queue requeues Pods, which was rejected with UnschedulableAndUnresolvable in the last scheduling,
 	// the Pod goes through backoff.
 	UnschedulableAndUnresolvable
-	// Wait is used when a Permit plugin finds a pod scheduling should wait.
+	// Wait is used in the following scenarios:
+	// - when a Permit plugin finds a pod scheduling should wait.
+	// - when a PlacementFeasible plugin finds a pod group cannot be scheduled in the current partially evaluated placement,
+	//   but may become schedulable once more pods are evaluated.
 	Wait
 	// Skip is used in the following scenarios:
 	// - when a Bind plugin chooses to skip binding.
@@ -466,14 +470,14 @@ type QueueSortPlugin interface {
 
 // EnqueueExtensions is an optional interface that plugins can implement to efficiently
 // move unschedulable Pods in internal scheduling queues.
-// In the scheduler, Pods can be unschedulable by PreEnqueue, PreFilter, Filter, Reserve, and Permit plugins,
+// In the scheduler, Pods can be unschedulable by PreEnqueue, PreFilter, Filter, Reserve, Permit and PlacementFeasible plugins,
 // and Pods rejected by these plugins are requeued based on this extension point.
 // Failures from other extension points are regarded as temporal errors (e.g., network failure),
 // and the scheduler requeue Pods without this extension point - always requeue Pods to activeQ after backoff.
 // This is because such temporal errors cannot be resolved by specific cluster events,
 // and we have no choose but keep retrying scheduling until the failure is resolved.
 //
-// Plugins that make pod unschedulable (PreEnqueue, PreFilter, Filter, Reserve, and Permit plugins) must implement this interface,
+// Plugins that make pod unschedulable (PreEnqueue, PreFilter, Filter, Reserve, Permit and PlacementFeasible plugins) must implement this interface,
 // otherwise the default implementation will be used, which is less efficient in requeueing Pods rejected by the plugin.
 //
 // Also, if EventsToRegister returns an empty list, that means the Pods failed by the plugin are not requeued by any events,
@@ -838,6 +842,33 @@ type PlacementScorePlugin interface {
 	PlacementScoreExtensions() PlacementScoreExtensions
 }
 
+// PlacementFeasiblePlugin is an interface for plugins that are called after each pod in a pod group is evaluated.
+// It is used to determine if a pod group is schedulable, may become schedulable or will not become schedulable regardless of the scheduling result of the remaining pods in the pod group.
+type PlacementFeasiblePlugin interface {
+	Plugin
+
+	// PlacementFeasible is called after each pod in a pod group is evaluated.
+	// placementProgress contains information that plugins might additionally need when determining whether pod group scheduling placement is feasible.
+	// Return Wait status if the pod group cannot be scheduled in the current partially evaluated placement, but may become schedulable once more pods are evaluated.
+	// Return Unschedulable status if the pod group cannot be scheduled in the current placement.
+	// The scheduler will give up this placement and won't even evaluate remaining pods. The placement will remain eligible for preemption.
+	// Return Success status if the pod group can be scheduled in the current partially evaluated placement.
+	// After returning Success, the plugin should keep returning Success for the remaining pods.
+	PlacementFeasible(ctx context.Context, placementCycleState PlacementCycleState, podGroupInfo PodGroupInfo, placementProgress PlacementProgress) *Status
+}
+
+// PlacementProgress contains information that plugins implementing the PlacementFeasiblePlugin
+// can use when determining whether pod group scheduling placement is feasible.
+// It contains information about the children evaluation progress for the current pod group placement.
+type PlacementProgress struct {
+	// Remaining is the number of children that have not been evaluated yet in the current scheduling cycle. For pod groups, this is the number of unscheduled pods.
+	Remaining int
+	// Scheduled is the number of children scheduled so far in the current pod group scheduling cycle
+	// for a particular (composite) pod group and placement. For a pod group the field includes the pods that are assigned
+	// or assumed in the current PodGroup scheduling cycle.
+	Scheduled int
+}
+
 // Handle provides data and some tools that plugins can use. It is
 // passed to the plugin factories at the time of plugin initialization. Plugins
 // must store and use this handle to call framework functions.
@@ -932,6 +963,58 @@ type Handle interface {
 
 	// SignPod creates a PodSignature for a pod.
 	SignPod(ctx context.Context, pod *v1.Pod) PodSignature
+
+	// PreemptionManager returns PreemptionManager that can be used to customize preemption logic.
+	PreemptionManager() PreemptionManager
+}
+
+// PreemptionManager is an interface that allows customization of the preemption logic.
+type PreemptionManager interface {
+	// GenerateVictims generates candidate victims for the PodGroup preemption.
+	// The preemption algorithm attempts to reprieve victims in reverse order, from last to first.
+	// The preemption algorithm will pass through unsuccessful status to the caller.
+	GenerateVictims(ctx context.Context, pgInfo PodGroupInfo) ([]PreemptionVictim, *Status)
+	// Executor returns a PreemptionExecutor that can be used to actuate preemption or check preemption status.
+	Executor() PreemptionExecutor
+}
+
+// PreemptionVictim represents a preemption unit that abstracts individual Pods and PodGroups,
+// ensuring that atomic entities are treated as a single unit during eviction.
+type PreemptionVictim interface {
+	// Pods returns the list of all Pods that belong to this preemption unit.
+	// Evicting this unit implies evicting all Pods in this list.
+	Pods() []PodInfo
+
+	// NumPDBViolations returns the number of PDB violations that evicting this victim would cause.
+	// This value is used for metrics and doesn't impact victim selection.
+	NumPDBViolations() int
+}
+
+// PreemptionExecutor is an interface that provides preemption actuation and tracking operations.
+type PreemptionExecutor interface {
+	// IsPodRunningPreemption returns true if the pod is currently triggering preemption asynchronously.
+	IsPodRunningPreemption(podUID types.UID) bool
+	// IsPodGroupRunningPreemption returns true if the pod group is currently triggering preemption asynchronously.
+	IsPodGroupRunningPreemption(podGroupUID types.UID) bool
+	// IsPodGroupWaitingForVictims returns true if the pod group is currently waiting for victims to be removed.
+	// This function is called within snapshot context.
+	IsPodGroupWaitingForVictims(pgInfo PodGroupInfo) bool
+	// ActuatePodPreemption actuates preemption for a single pod given the selected candidate.
+	ActuatePodPreemption(ctx context.Context, candidate PreemptionCandidate, pod *v1.Pod, pluginName string) *Status
+	// ActuatePodGroupPreemption actuates preemption for a pod group given the selected candidate.
+	ActuatePodGroupPreemption(ctx context.Context, candidate PreemptionCandidate, pgInfo PodGroupInfo, pluginName string) *Status
+}
+
+// PreemptionCandidate represents the final set of victims that should be evicted for the preemptor to fit the node.
+type PreemptionCandidate interface {
+	// Victims wraps a list of to-be-preempted Pods and the number of PDB violations.
+	Victims() *extenderv1.Victims
+	// Name returns the target node name (or "cluster" for pod group preemption) where the preemptor gets nominated to run.
+	Name() string
+	// NumPodGroupDisruptions returns the number of preemption units that affect pod groups.
+	// A single preemption unit can be all pods in a pod group (for DisruptionMode=all) or a single pod (for DisruptionMode=single).
+	// This value is used for metrics and doesn't impact victim actuation.
+	NumPodGroupDisruptions() int
 }
 
 // Parallelizer helps run scheduling operations in parallel chunks where possible, to improve performance and CPU utilization.

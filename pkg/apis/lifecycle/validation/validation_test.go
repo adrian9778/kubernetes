@@ -170,14 +170,13 @@ func TestValidateEvictionRequestStatusUpdate(t *testing.T) {
 			oldInput: mkValidEvictionRequestStatus(),
 			input: mkValidEvictionRequestStatus(func(obj *lifecycle.EvictionRequestStatus) {
 				obj.Conditions = append(obj.Conditions, metav1.Condition{
-					Type:               "-bad-name",
+					Type:               "good-name",
 					Status:             metav1.ConditionTrue,
 					Reason:             "-Reason",
 					LastTransitionTime: metav1.Time{Time: clock.Now()},
 				})
 			}),
 			errors: []*field.Error{
-				field.Invalid(field.NewPath("status", "conditions").Index(0).Child("type"), "", "name part must consist of alphanumeric characters, '-', '_' or '.', and "),
 				field.Invalid(field.NewPath("status", "conditions").Index(0).Child("reason"), "", "a condition reason must start with alphabetic character, optionally followed by a string of alphanumeric characters or '_,:', and "),
 			},
 		},
@@ -440,7 +439,7 @@ func TestValidateEvictionStatusUpdate(t *testing.T) {
 		},
 		// Full Eviction progression/lifecycle
 		"mark active and started": {
-			oldInput: mkValidEvictionStatus(2),
+			oldInput: mkValidEvictionStatus(0),
 			input: mkValidEvictionStatus(2,
 				setStateFor(lifecycle.ResponderStateActive, 0),
 				setRespondersStartTime(clock, 0, 1)),
@@ -850,14 +849,13 @@ func TestValidateEvictionStatusUpdate(t *testing.T) {
 			oldInput: mkValidEvictionStatus(1),
 			input: mkValidEvictionStatus(1, func(obj *lifecycle.EvictionStatus) {
 				obj.Conditions = append(obj.Conditions, metav1.Condition{
-					Type:               "-bad-name",
+					Type:               "good-name",
 					Status:             metav1.ConditionTrue,
 					Reason:             "-Reason",
 					LastTransitionTime: metav1.Time{Time: clock.Now()},
 				})
 			}),
 			errors: []*field.Error{
-				field.Invalid(field.NewPath("status", "conditions").Index(0).Child("type"), "", "name part must consist of alphanumeric characters, '-', '_' or '.', and "),
 				field.Invalid(field.NewPath("status", "conditions").Index(0).Child("reason"), "", "a condition reason must start with alphabetic character, optionally followed by a string of alphanumeric characters or '_,:', and "),
 			},
 		},

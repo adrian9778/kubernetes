@@ -257,10 +257,18 @@ func newControllerWithClock(ctx context.Context, kubeClient clientset.Interface,
 			Recorder:   eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "job-controller"}),
 			OnWrite:    podWriteCallback,
 		},
-		expectations:            controller.NewControllerExpectations(),
-		finalizerExpectations:   newUIDTrackingExpectations(),
-		queue:                   workqueue.NewTypedRateLimitingQueueWithConfig(workqueue.NewTypedItemExponentialFailureRateLimiter[string](DefaultJobApiBackOff, MaxJobApiBackOff), workqueue.TypedRateLimitingQueueConfig[string]{Name: "job", Clock: clock}),
-		orphanQueue:             workqueue.NewTypedRateLimitingQueueWithConfig(workqueue.NewTypedItemExponentialFailureRateLimiter[orphanPodKey](DefaultJobApiBackOff, MaxJobApiBackOff), workqueue.TypedRateLimitingQueueConfig[orphanPodKey]{Name: "job_orphan_pod", Clock: clock}),
+		expectations:          controller.NewControllerExpectations(),
+		finalizerExpectations: newUIDTrackingExpectations(),
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(workqueue.NewTypedItemExponentialFailureRateLimiter[string](DefaultJobApiBackOff, MaxJobApiBackOff), workqueue.TypedRateLimitingQueueConfig[string]{
+			Logger: new(klog.FromContext(ctx)),
+			Name:   "job",
+			Clock:  clock,
+		}),
+		orphanQueue: workqueue.NewTypedRateLimitingQueueWithConfig(workqueue.NewTypedItemExponentialFailureRateLimiter[orphanPodKey](DefaultJobApiBackOff, MaxJobApiBackOff), workqueue.TypedRateLimitingQueueConfig[orphanPodKey]{
+			Logger: new(klog.FromContext(ctx)),
+			Name:   "job_orphan_pod",
+			Clock:  clock,
+		}),
 		broadcaster:             eventBroadcaster,
 		recorder:                eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "job-controller"}),
 		clock:                   clock,
@@ -269,7 +277,7 @@ func newControllerWithClock(ctx context.Context, kubeClient clientset.Interface,
 		consistencyStore:        consistencyStore,
 	}
 
-	if _, err := jobInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	if _, err := jobInformer.Informer().AddEventHandlerWithOptions(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			jm.addJob(logger, obj)
 		},
@@ -279,13 +287,13 @@ func newControllerWithClock(ctx context.Context, kubeClient clientset.Interface,
 		DeleteFunc: func(obj interface{}) {
 			jm.deleteJob(logger, obj)
 		},
-	}); err != nil {
+	}, cache.HandlerOptions{Logger: &logger}); err != nil {
 		return nil, fmt.Errorf("adding Job event handler: %w", err)
 	}
 	jm.jobLister = jobInformer.Lister()
 	jm.jobStoreSynced = jobInformer.Informer().HasSynced
 
-	if _, err := podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+	if _, err := podInformer.Informer().AddEventHandlerWithOptions(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			jm.addPod(logger, obj)
 		},
@@ -295,7 +303,7 @@ func newControllerWithClock(ctx context.Context, kubeClient clientset.Interface,
 		DeleteFunc: func(obj interface{}) {
 			jm.deletePod(logger, obj, true)
 		},
-	}); err != nil {
+	}, cache.HandlerOptions{Logger: &logger}); err != nil {
 		return nil, fmt.Errorf("adding Pod event handler: %w", err)
 	}
 	jm.podStore = podInformer.Lister()
@@ -323,7 +331,7 @@ func newControllerWithClock(ctx context.Context, kubeClient clientset.Interface,
 
 // Run the main goroutine responsible for watching and syncing jobs.
 func (jm *Controller) Run(ctx context.Context, workers int) {
-	defer utilruntime.HandleCrash()
+	defer utilruntime.HandleCrashWithContext(ctx)
 
 	// Start events processing pipeline.
 	jm.broadcaster.StartStructuredLogging(3)
@@ -428,7 +436,7 @@ func (jm *Controller) addPod(logger klog.Logger, obj interface{}) {
 	// Otherwise, it's an orphan.
 	// Clean the finalizer.
 	if hasJobTrackingFinalizer(pod) {
-		jm.enqueueOrphanPod(pod)
+		jm.enqueueOrphanPod(pod, false)
 	}
 	// Get a list of all matching controllers and sync
 	// them to see if anyone wants to adopt it.
@@ -501,7 +509,7 @@ func (jm *Controller) updatePod(logger klog.Logger, old, cur interface{}) {
 	// Otherwise, it's an orphan.
 	// Clean the finalizer.
 	if hasJobTrackingFinalizer(curPod) {
-		jm.enqueueOrphanPod(curPod)
+		jm.enqueueOrphanPod(curPod, false)
 	}
 	// If anything changed, sync matching controllers
 	// to see if anyone wants to adopt it now.
@@ -544,7 +552,7 @@ func (jm *Controller) deletePod(logger klog.Logger, obj interface{}, final bool)
 		// No controller should care about orphans being deleted.
 		// But this pod might have belonged to a Job and the GC removed the reference.
 		if hasFinalizer {
-			jm.enqueueOrphanPod(pod)
+			jm.enqueueOrphanPod(pod, false)
 		}
 		return
 	}
@@ -552,7 +560,7 @@ func (jm *Controller) deletePod(logger klog.Logger, obj interface{}, final bool)
 	if job == nil || util.IsJobFinished(job) {
 		// syncJob will not remove this finalizer.
 		if hasFinalizer {
-			jm.enqueueOrphanPod(pod)
+			jm.enqueueOrphanPod(pod, false)
 		}
 		return
 	}
@@ -715,13 +723,17 @@ func (jm *Controller) enqueueSyncJobInternal(logger klog.Logger, obj interface{}
 	jm.queue.AddAfter(key, delay)
 }
 
-func (jm *Controller) enqueueOrphanPod(obj *v1.Pod) {
+func (jm *Controller) enqueueOrphanPod(obj *v1.Pod, backoff bool) {
 	orphanPodKey := orphanPodKey{
 		kind:      OrphanPodKeyKindName,
 		namespace: obj.Namespace,
 		value:     obj.Name,
 	}
-	jm.orphanQueue.Add(orphanPodKey)
+	if backoff {
+		jm.orphanQueue.AddRateLimited(orphanPodKey)
+	} else {
+		jm.orphanQueue.Add(orphanPodKey)
+	}
 }
 
 // worker runs a worker thread that just dequeues items, processes them, and marks them done.
@@ -816,6 +828,7 @@ func (jm *Controller) syncOrphanPodsBySelector(ctx context.Context, namespace st
 	for _, pod := range pods {
 		if err := jm.handleSingleOrphanPod(ctx, pod); err != nil {
 			logger.Error(err, "syncing orphan pod failed", "pod", klog.KObj(pod))
+			jm.enqueueOrphanPod(pod, true)
 		}
 	}
 	return nil
@@ -2228,10 +2241,8 @@ func recordJobPodsCreationTotal(job *batch.Job, jobCtx *syncJobCtx, succeeded, f
 }
 
 func managedByExternalController(jobObj *batch.Job) *string {
-	if feature.DefaultFeatureGate.Enabled(features.JobManagedBy) {
-		if controllerName := jobObj.Spec.ManagedBy; controllerName != nil && *controllerName != batch.JobControllerName {
-			return controllerName
-		}
+	if controllerName := jobObj.Spec.ManagedBy; controllerName != nil && *controllerName != batch.JobControllerName {
+		return controllerName
 	}
 	return nil
 }

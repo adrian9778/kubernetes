@@ -21,6 +21,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -99,7 +100,7 @@ func TestValidateCertificateSigningRequestCreate(t *testing.T) {
 				},
 			},
 			errs: field.ErrorList{
-				field.Required(specPath.Child("usages"), ""),
+				field.Required(specPath.Child("usages"), "").MarkCoveredByDeclarative(),
 			},
 		},
 		"CSR with no signerName set should fail": {
@@ -347,7 +348,7 @@ func TestValidateCertificateSigningRequestCreate(t *testing.T) {
 				},
 			},
 			errs: field.ErrorList{
-				field.Required(specPath.Child("usages"), ""),
+				field.Required(specPath.Child("usages"), "").MarkCoveredByDeclarative(),
 			},
 		},
 		"unknown and duplicate usages": {
@@ -360,8 +361,8 @@ func TestValidateCertificateSigningRequestCreate(t *testing.T) {
 				},
 			},
 			errs: field.ErrorList{
-				field.NotSupported(specPath.Child("usages").Index(0), capi.KeyUsage("unknown"), allValidUsages.List()),
-				field.NotSupported(specPath.Child("usages").Index(1), capi.KeyUsage("unknown"), allValidUsages.List()),
+				field.NotSupported(specPath.Child("usages").Index(0), capi.KeyUsage("unknown"), allValidUsages.List()).MarkCoveredByDeclarative(),
+				field.NotSupported(specPath.Child("usages").Index(1), capi.KeyUsage("unknown"), allValidUsages.List()).MarkCoveredByDeclarative(),
 				field.Duplicate(specPath.Child("usages").Index(1), capi.KeyUsage("unknown")),
 			},
 		},
@@ -592,7 +593,9 @@ func TestValidateCertificateSigningRequestUpdate(t *testing.T) {
 		}},
 		oldCSR: &capi.CertificateSigningRequest{ObjectMeta: validUpdateMetaWithFinalizers, Spec: validSpec},
 		errs: []string{
-			`status.conditions: Forbidden: updates may not add a condition of type "Approved"`,
+			field.Invalid(field.NewPath("status"), capi.CertificateSigningRequestStatus{
+				Conditions: []capi.CertificateSigningRequestCondition{{Type: capi.CertificateApproved, Status: core.ConditionTrue}},
+			}, "field is immutable").Error(),
 		},
 	}, {
 		name:   "remove Approved condition",
@@ -601,7 +604,7 @@ func TestValidateCertificateSigningRequestUpdate(t *testing.T) {
 			Conditions: []capi.CertificateSigningRequestCondition{{Type: capi.CertificateApproved, Status: core.ConditionTrue}},
 		}},
 		errs: []string{
-			`status.conditions: Forbidden: updates may not remove a condition of type "Approved"`,
+			field.Invalid(field.NewPath("status"), capi.CertificateSigningRequestStatus{}, "field is immutable").Error(),
 		},
 	}, {
 		name: "add Denied condition",
@@ -610,7 +613,9 @@ func TestValidateCertificateSigningRequestUpdate(t *testing.T) {
 		}},
 		oldCSR: &capi.CertificateSigningRequest{ObjectMeta: validUpdateMetaWithFinalizers, Spec: validSpec},
 		errs: []string{
-			`status.conditions: Forbidden: updates may not add a condition of type "Denied"`,
+			field.Invalid(field.NewPath("status"), capi.CertificateSigningRequestStatus{
+				Conditions: []capi.CertificateSigningRequestCondition{{Type: capi.CertificateDenied, Status: core.ConditionTrue}},
+			}, "field is immutable").Error(),
 		},
 	}, {
 		name:   "remove Denied condition",
@@ -619,7 +624,7 @@ func TestValidateCertificateSigningRequestUpdate(t *testing.T) {
 			Conditions: []capi.CertificateSigningRequestCondition{{Type: capi.CertificateDenied, Status: core.ConditionTrue}},
 		}},
 		errs: []string{
-			`status.conditions: Forbidden: updates may not remove a condition of type "Denied"`,
+			field.Invalid(field.NewPath("status"), capi.CertificateSigningRequestStatus{}, "field is immutable").Error(),
 		},
 	}, {
 		name: "add Failed condition",
@@ -627,7 +632,11 @@ func TestValidateCertificateSigningRequestUpdate(t *testing.T) {
 			Conditions: []capi.CertificateSigningRequestCondition{{Type: capi.CertificateFailed, Status: core.ConditionTrue}},
 		}},
 		oldCSR: &capi.CertificateSigningRequest{ObjectMeta: validUpdateMetaWithFinalizers, Spec: validSpec},
-		errs:   []string{},
+		errs: []string{
+			field.Invalid(field.NewPath("status"), capi.CertificateSigningRequestStatus{
+				Conditions: []capi.CertificateSigningRequestCondition{{Type: capi.CertificateFailed, Status: core.ConditionTrue}},
+			}, "field is immutable").Error(),
+		},
 	}, {
 		name:   "remove Failed condition",
 		newCSR: &capi.CertificateSigningRequest{ObjectMeta: validUpdateMeta, Spec: validSpec},
@@ -635,7 +644,7 @@ func TestValidateCertificateSigningRequestUpdate(t *testing.T) {
 			Conditions: []capi.CertificateSigningRequestCondition{{Type: capi.CertificateFailed, Status: core.ConditionTrue}},
 		}},
 		errs: []string{
-			`status.conditions: Forbidden: updates may not remove a condition of type "Failed"`,
+			field.Invalid(field.NewPath("status"), capi.CertificateSigningRequestStatus{}, "field is immutable").Error(),
 		},
 	}, {
 		name: "set certificate",
@@ -644,7 +653,9 @@ func TestValidateCertificateSigningRequestUpdate(t *testing.T) {
 		}},
 		oldCSR: &capi.CertificateSigningRequest{ObjectMeta: validUpdateMetaWithFinalizers, Spec: validSpec},
 		errs: []string{
-			`status.certificate: Forbidden: updates may not set certificate content`,
+			field.Invalid(field.NewPath("status"), capi.CertificateSigningRequestStatus{
+				Certificate: validCertificate,
+			}, "field is immutable").Error(),
 		},
 	}, {
 		name: "add both approved and denied conditions",
@@ -663,9 +674,12 @@ func TestValidateCertificateSigningRequestUpdate(t *testing.T) {
 			Spec:       validSpec,
 		},
 		errs: []string{
-			`status.conditions: Forbidden: updates may not add a condition of type "Approved"`,
-			`status.conditions: Forbidden: updates may not add a condition of type "Denied"`,
-			`status.conditions: Invalid value: "Denied": Approved and Denied conditions are mutually exclusive`,
+			field.Invalid(field.NewPath("status"), capi.CertificateSigningRequestStatus{
+				Conditions: []capi.CertificateSigningRequestCondition{
+					{Type: capi.CertificateApproved, Status: core.ConditionTrue},
+					{Type: capi.CertificateDenied, Status: core.ConditionTrue},
+				},
+			}, "field is immutable").Error(),
 		},
 	}}
 
@@ -699,6 +713,8 @@ func TestValidateCertificateSigningRequestStatusUpdate(t *testing.T) {
 		SignerName: "example.com/something",
 	}
 
+	staticCSRPEM := newCSRPEM(t)
+
 	tests := []struct {
 		name   string
 		newCSR *capi.CertificateSigningRequest
@@ -716,12 +732,12 @@ func TestValidateCertificateSigningRequestStatusUpdate(t *testing.T) {
 		name: "finalizer change with duplicate and unknown usages",
 		newCSR: &capi.CertificateSigningRequest{ObjectMeta: validUpdateMeta, Spec: capi.CertificateSigningRequestSpec{
 			Usages:     []capi.KeyUsage{"unknown", "unknown"},
-			Request:    newCSRPEM(t),
+			Request:    staticCSRPEM,
 			SignerName: validSignerName,
 		}},
 		oldCSR: &capi.CertificateSigningRequest{ObjectMeta: validUpdateMetaWithFinalizers, Spec: capi.CertificateSigningRequestSpec{
 			Usages:     []capi.KeyUsage{"unknown", "unknown"},
-			Request:    newCSRPEM(t),
+			Request:    staticCSRPEM,
 			SignerName: validSignerName,
 		}},
 	}, {
@@ -950,30 +966,38 @@ func Test_validateCertificateSigningRequestOptions(t *testing.T) {
 		{
 			name: "no status",
 			csr:  &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec},
-		}, {
+		},
+		{
 			name: "approved condition",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions: []capi.CertificateSigningRequestCondition{{Type: capi.CertificateApproved, Status: core.ConditionTrue}},
 				},
 			},
-		}, {
+		},
+		{
 			name: "denied condition",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions: []capi.CertificateSigningRequestCondition{{Type: capi.CertificateDenied, Status: core.ConditionTrue}},
 				},
 			},
-		}, {
+		},
+		{
 			name: "failed condition",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions: []capi.CertificateSigningRequestCondition{{Type: capi.CertificateFailed, Status: core.ConditionTrue}},
 				},
 			},
-		}, {
+		},
+		{
 			name: "approved+issued",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions:  []capi.CertificateSigningRequestCondition{{Type: capi.CertificateApproved, Status: core.ConditionTrue}},
 					Certificate: validCertificate,
@@ -999,25 +1023,30 @@ func Test_validateCertificateSigningRequestOptions(t *testing.T) {
 		// invalid condition cases
 		{
 			name: "empty condition type",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions: []capi.CertificateSigningRequestCondition{{Status: core.ConditionTrue}},
 				},
 			},
 			lenientOpts: certificateValidationOptions{allowEmptyConditionType: true},
 			strictErrs:  []string{`status.conditions[0].type: Required value`},
-		}, {
+		},
+		{
 			name: "approved and denied",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions: []capi.CertificateSigningRequestCondition{{Type: capi.CertificateApproved, Status: core.ConditionTrue}, {Type: capi.CertificateDenied, Status: core.ConditionTrue}},
 				},
 			},
 			lenientOpts: certificateValidationOptions{allowBothApprovedAndDenied: true},
 			strictErrs:  []string{`status.conditions: Invalid value: "Denied": Approved and Denied conditions are mutually exclusive`},
-		}, {
+		},
+		{
 			name: "duplicate condition",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions: []capi.CertificateSigningRequestCondition{{Type: capi.CertificateApproved, Status: core.ConditionTrue}, {Type: capi.CertificateApproved, Status: core.ConditionTrue}},
 				},
@@ -1029,7 +1058,8 @@ func Test_validateCertificateSigningRequestOptions(t *testing.T) {
 		// invalid allowArbitraryCertificate cases
 		{
 			name: "status.certificate, no PEM",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions:  []capi.CertificateSigningRequestCondition{{Type: capi.CertificateApproved, Status: core.ConditionTrue}},
 					Certificate: invalidCertificateNoPEM,
@@ -1037,9 +1067,11 @@ func Test_validateCertificateSigningRequestOptions(t *testing.T) {
 			},
 			lenientOpts: certificateValidationOptions{allowArbitraryCertificate: true},
 			strictErrs:  []string{`status.certificate: Invalid value: "<certificate data>": must contain at least one CERTIFICATE PEM block`},
-		}, {
+		},
+		{
 			name: "status.certificate, non-CERTIFICATE PEM",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions:  []capi.CertificateSigningRequestCondition{{Type: capi.CertificateApproved, Status: core.ConditionTrue}},
 					Certificate: invalidCertificateNonCertificatePEM,
@@ -1047,9 +1079,11 @@ func Test_validateCertificateSigningRequestOptions(t *testing.T) {
 			},
 			lenientOpts: certificateValidationOptions{allowArbitraryCertificate: true},
 			strictErrs:  []string{`status.certificate: Invalid value: "<certificate data>": only CERTIFICATE PEM blocks are allowed, found "CERTIFICATE1"`},
-		}, {
+		},
+		{
 			name: "status.certificate, PEM headers",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions:  []capi.CertificateSigningRequestCondition{{Type: capi.CertificateApproved, Status: core.ConditionTrue}},
 					Certificate: invalidCertificatePEMHeaders,
@@ -1057,9 +1091,11 @@ func Test_validateCertificateSigningRequestOptions(t *testing.T) {
 			},
 			lenientOpts: certificateValidationOptions{allowArbitraryCertificate: true},
 			strictErrs:  []string{`status.certificate: Invalid value: "<certificate data>": no PEM block headers are permitted`},
-		}, {
+		},
+		{
 			name: "status.certificate, non-base64 PEM",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions:  []capi.CertificateSigningRequestCondition{{Type: capi.CertificateApproved, Status: core.ConditionTrue}},
 					Certificate: invalidCertificateNonBase64PEM,
@@ -1067,9 +1103,11 @@ func Test_validateCertificateSigningRequestOptions(t *testing.T) {
 			},
 			lenientOpts: certificateValidationOptions{allowArbitraryCertificate: true},
 			strictErrs:  []string{`status.certificate: Invalid value: "<certificate data>": must contain at least one CERTIFICATE PEM block`},
-		}, {
+		},
+		{
 			name: "status.certificate, empty PEM block",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions:  []capi.CertificateSigningRequestCondition{{Type: capi.CertificateApproved, Status: core.ConditionTrue}},
 					Certificate: invalidCertificateEmptyPEM,
@@ -1077,9 +1115,11 @@ func Test_validateCertificateSigningRequestOptions(t *testing.T) {
 			},
 			lenientOpts: certificateValidationOptions{allowArbitraryCertificate: true},
 			strictErrs:  []string{`status.certificate: Invalid value: "<certificate data>": found CERTIFICATE PEM block containing 0 certificates`},
-		}, {
+		},
+		{
 			name: "status.certificate, non-ASN1 data",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions:  []capi.CertificateSigningRequestCondition{{Type: capi.CertificateApproved, Status: core.ConditionTrue}},
 					Certificate: invalidCertificateNonASN1Data,
@@ -1087,9 +1127,11 @@ func Test_validateCertificateSigningRequestOptions(t *testing.T) {
 			},
 			lenientOpts:   certificateValidationOptions{allowArbitraryCertificate: true},
 			strictRegexes: []regexp.Regexp{*regexp.MustCompile(`status.certificate: Invalid value: "\<certificate data\>": (asn1: structure error: sequence tag mismatch|x509: invalid RDNSequence)`)},
-		}, {
+		},
+		{
 			name: "approved and denied",
-			csr: &capi.CertificateSigningRequest{ObjectMeta: validObjectMeta, Spec: validSpec,
+			csr: &capi.CertificateSigningRequest{
+				ObjectMeta: validObjectMeta, Spec: validSpec,
 				Status: capi.CertificateSigningRequestStatus{
 					Conditions: []capi.CertificateSigningRequestCondition{{Type: capi.CertificateApproved, Status: core.ConditionTrue}, {Type: capi.CertificateDenied, Status: core.ConditionTrue}},
 				},
@@ -1247,7 +1289,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			wantErrors: field.ErrorList{
 				field.Invalid(field.NewPath("metadata", "name"), "k8s.io:bar:foo", "ClusterTrustBundle without signer name must not have \":\" in its name"),
 			},
-		}, {
+		},
+		{
 			description: "valid, with signer name",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1258,7 +1301,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 					TrustBundle: goodCert1Block,
 				},
 			},
-		}, {
+		},
+		{
 			description: "invalid, with signer name, missing name prefix",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1272,7 +1316,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			wantErrors: field.ErrorList{
 				field.Invalid(field.NewPath("metadata", "name"), "look-ma-no-prefix", "ClusterTrustBundle for signerName k8s.io/foo must be named with prefix k8s.io:foo:"),
 			},
-		}, {
+		},
+		{
 			description: "invalid, with signer name, empty name suffix",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1286,7 +1331,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			wantErrors: field.ErrorList{
 				field.Invalid(field.NewPath("metadata", "name"), "k8s.io:foo:", `a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')`),
 			},
-		}, {
+		},
+		{
 			description: "invalid, with signer name, bad name suffix",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1300,7 +1346,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			wantErrors: field.ErrorList{
 				field.Invalid(field.NewPath("metadata", "name"), "k8s.io:foo:123notvalidDNSSubdomain", `a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character (e.g. 'example.com', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*')`),
 			},
-		}, {
+		},
+		{
 			description: "valid, with signer name, with inter-block garbage",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1311,7 +1358,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 					TrustBundle: "garbage\n" + goodCert1Block + "\ngarbage\n" + goodCert2Block,
 				},
 			},
-		}, {
+		},
+		{
 			description: "invalid, no signer name, no trust anchors",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1322,7 +1370,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			wantErrors: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "trustBundle"), "<value omitted>", "at least one trust anchor must be provided"),
 			},
-		}, {
+		},
+		{
 			description: "invalid, no trust anchors",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1335,7 +1384,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			wantErrors: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "trustBundle"), "<value omitted>", "at least one trust anchor must be provided"),
 			},
-		}, {
+		},
+		{
 			description: "invalid, bad signer name",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1349,7 +1399,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			wantErrors: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "signerName"), "invalid", "must be a fully qualified domain and path of the form 'example.com/signer-name'"),
 			},
-		}, {
+		},
+		{
 			description: "invalid, no blocks",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1362,7 +1413,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			wantErrors: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "trustBundle"), "<value omitted>", "at least one trust anchor must be provided"),
 			},
-		}, {
+		},
+		{
 			description: "invalid, bad block type",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1375,7 +1427,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			wantErrors: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "trustBundle"), "<value omitted>", "entry 1 has bad block type: NOTACERTIFICATE"),
 			},
-		}, {
+		},
+		{
 			description: "invalid, block with headers",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1388,7 +1441,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			wantErrors: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "trustBundle"), "<value omitted>", "entry 1 has PEM block headers"),
 			},
-		}, {
+		},
+		{
 			description: "invalid, cert is not a CA cert",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1401,7 +1455,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			wantErrors: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "trustBundle"), "<value omitted>", "entry 0 does not have the CA bit set"),
 			},
-		}, {
+		},
+		{
 			description: "invalid, duplicated blocks",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1414,7 +1469,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			wantErrors: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "trustBundle"), "<value omitted>", "duplicate trust anchor (indices [0 1])"),
 			},
-		}, {
+		},
+		{
 			description: "invalid, non-certificate entry",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1427,7 +1483,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			wantErrors: field.ErrorList{
 				field.Invalid(field.NewPath("spec", "trustBundle"), "<value omitted>", "entry 1 does not parse as X.509"),
 			},
-		}, {
+		},
+		{
 			description: "allow any old garbage in the PEM field if we suppress parsing",
 			bundle: &capi.ClusterTrustBundle{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1440,7 +1497,8 @@ func TestValidateClusterTrustBundle(t *testing.T) {
 			opts: ValidateClusterTrustBundleOptions{
 				SuppressBundleParsing: true,
 			},
-		}}
+		},
+	}
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
 			gotErrors := ValidateClusterTrustBundle(tc.bundle, tc.opts)
@@ -1614,6 +1672,9 @@ func TestValidatePodCertificateRequestCreate(t *testing.T) {
 	_, _, rsa3072PubPKIX1, rsa3072Proof1 := mustMakeRSAKeyAndProof(t, 3072, []byte(podUID1))
 	_, _, rsa4096PubPKIX1, rsa4096Proof1 := mustMakeRSAKeyAndProof(t, 4096, []byte(podUID1))
 	_, _, rsaWrongProofPKIX, rsaWrongProof := mustMakeRSAKeyAndProof(t, 3072, []byte("other-value"))
+	_, _, _, _, mldsa44CSR := mustMakeMLDSAKeyAndProof(t, mldsa.MLDSA44(), []byte(podUID1), []string{})
+	_, _, _, _, mldsa65CSR := mustMakeMLDSAKeyAndProof(t, mldsa.MLDSA65(), []byte(podUID1), []string{})
+	_, _, _, _, mldsa87CSR := mustMakeMLDSAKeyAndProof(t, mldsa.MLDSA87(), []byte(podUID1), []string{})
 
 	podUIDEmpty := ""
 	_, _, pubPKIXEmpty, proofEmpty, _ := mustMakeEd25519KeyAndProof(t, []byte(podUIDEmpty), []string{})
@@ -2331,6 +2392,66 @@ func TestValidatePodCertificateRequestCreate(t *testing.T) {
 				field.TooLong(field.NewPath("spec", "unverifiedUserAnnotations"), "", apimachineryvalidation.TotalAnnotationSizeLimitB),
 			},
 		},
+		{
+			description: "valid ML-DSA-44 PCR (using PKCS#10)",
+			pcr: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					StubPKCS10Request:    mldsa44CSR,
+				},
+			},
+		},
+		{
+			description: "valid ML-DSA-65 PCR (using PKCS#10)",
+			pcr: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					StubPKCS10Request:    mldsa65CSR,
+				},
+			},
+		},
+		{
+			description: "valid ML-DSA-87 PCR (using PKCS#10)",
+			pcr: &capi.PodCertificateRequest{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "foo",
+					Name:      "bar",
+				},
+				Spec: capi.PodCertificateRequestSpec{
+					SignerName:           "foo.com/abc",
+					PodName:              "pod-1",
+					PodUID:               types.UID(podUID1),
+					ServiceAccountName:   "sa-1",
+					ServiceAccountUID:    "sa-uid-1",
+					NodeName:             "node-1",
+					NodeUID:              "node-uid-1",
+					MaxExpirationSeconds: ptr.To[int32](86400),
+					StubPKCS10Request:    mldsa87CSR,
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -2353,7 +2474,6 @@ func TestValidatePodCertificateRequestUpdate(t *testing.T) {
 		oldPCR, newPCR *capi.PodCertificateRequest
 		wantErrors     field.ErrorList
 	}{
-
 		{
 			description: "changing spec fields disallowed",
 			oldPCR: &capi.PodCertificateRequest{
@@ -2542,7 +2662,7 @@ func TestValidatePodCertificateRequestStatusUpdate(t *testing.T) {
 				},
 			},
 			wantErrors: field.ErrorList{
-				field.NotSupported(field.NewPath("status", "conditions", "[0]", "type"), "Unknown", []string{capi.PodCertificateRequestConditionTypeIssued, capi.PodCertificateRequestConditionTypeDenied, capi.PodCertificateRequestConditionTypeFailed}),
+				field.NotSupported(field.NewPath("status", "conditions").Index(0).Child("type"), "Unknown", []string{capi.PodCertificateRequestConditionTypeIssued, capi.PodCertificateRequestConditionTypeDenied, capi.PodCertificateRequestConditionTypeFailed}),
 			},
 		},
 		{
@@ -2595,7 +2715,7 @@ func TestValidatePodCertificateRequestStatusUpdate(t *testing.T) {
 				},
 			},
 			wantErrors: field.ErrorList{
-				field.NotSupported(field.NewPath("status", "conditions", "[0]", "status"), metav1.ConditionFalse, []metav1.ConditionStatus{metav1.ConditionTrue}),
+				field.NotSupported(field.NewPath("status", "conditions").Index(0).Child("status"), metav1.ConditionFalse, []metav1.ConditionStatus{metav1.ConditionTrue}),
 			},
 		},
 		{
@@ -2648,7 +2768,7 @@ func TestValidatePodCertificateRequestStatusUpdate(t *testing.T) {
 				},
 			},
 			wantErrors: field.ErrorList{
-				field.NotSupported(field.NewPath("status", "conditions", "[0]", "status"), metav1.ConditionFalse, []metav1.ConditionStatus{metav1.ConditionTrue}),
+				field.NotSupported(field.NewPath("status", "conditions").Index(0).Child("status"), metav1.ConditionFalse, []metav1.ConditionStatus{metav1.ConditionTrue}),
 			},
 		},
 		{
@@ -2701,7 +2821,7 @@ func TestValidatePodCertificateRequestStatusUpdate(t *testing.T) {
 				},
 			},
 			wantErrors: field.ErrorList{
-				field.NotSupported(field.NewPath("status", "conditions", "[0]", "status"), metav1.ConditionFalse, []metav1.ConditionStatus{metav1.ConditionTrue}),
+				field.NotSupported(field.NewPath("status", "conditions").Index(0).Child("status"), metav1.ConditionFalse, []metav1.ConditionStatus{metav1.ConditionTrue}),
 			},
 		},
 		{
@@ -3157,7 +3277,7 @@ func TestValidatePodCertificateRequestStatusUpdate(t *testing.T) {
 				},
 			},
 			wantErrors: field.ErrorList{
-				field.Invalid(field.NewPath("status", "conditions", "[1]", "type"), "Failed", `There may be at most one condition with type "Issued", "Denied", or "Failed"`),
+				field.Invalid(field.NewPath("status", "conditions").Index(1).Child("type"), "Failed", `There may be at most one condition with type "Issued", "Denied", or "Failed"`),
 			},
 		},
 		{
@@ -3221,7 +3341,7 @@ func TestValidatePodCertificateRequestStatusUpdate(t *testing.T) {
 				},
 			},
 			wantErrors: field.ErrorList{
-				field.Invalid(field.NewPath("status", "conditions", "[1]", "type"), "Denied", `There may be at most one condition with type "Issued", "Denied", or "Failed"`),
+				field.Invalid(field.NewPath("status", "conditions").Index(1).Child("type"), "Denied", `There may be at most one condition with type "Issued", "Denied", or "Failed"`),
 			},
 		},
 		{
@@ -3285,7 +3405,7 @@ func TestValidatePodCertificateRequestStatusUpdate(t *testing.T) {
 				},
 			},
 			wantErrors: field.ErrorList{
-				field.Invalid(field.NewPath("status", "conditions", "[1]", "type"), "Failed", `There may be at most one condition with type "Issued", "Denied", or "Failed"`),
+				field.Invalid(field.NewPath("status", "conditions").Index(1).Child("type"), "Failed", `There may be at most one condition with type "Issued", "Denied", or "Failed"`),
 			},
 		},
 		{
@@ -4525,6 +4645,28 @@ func mustMakeRSAKeyAndProof(t *testing.T, modulusSize int, toBeSigned []byte) (*
 		t.Fatalf("Error while making proof of possession: %v", err)
 	}
 	return priv, &priv.PublicKey, pubPKIX, sig
+}
+
+func mustMakeMLDSAKeyAndProof(t *testing.T, params mldsa.Parameters, toBeSigned []byte, pkcs10DNSSANS []string) (*mldsa.PrivateKey, *mldsa.PublicKey, []byte, []byte, []byte) {
+	priv, err := mldsa.GenerateKey(params)
+	if err != nil {
+		t.Fatalf("Error while generating RSA key: %v", err)
+	}
+	pubPKIX, err := x509.MarshalPKIXPublicKey(priv.PublicKey())
+	if err != nil {
+		t.Fatalf("Error while marshaling public key: %v", err)
+	}
+	sig, err := priv.Sign(nil, toBeSigned, nil)
+	if err != nil {
+		t.Fatalf("Error while making proof of possession: %v", err)
+	}
+
+	pkcs10DER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{DNSNames: pkcs10DNSSANS}, priv)
+	if err != nil {
+		t.Fatalf("Error while creating PKCS#10 certificate signing request: %v", err)
+	}
+
+	return priv, priv.PublicKey(), pubPKIX, sig, pkcs10DER
 }
 
 func mustSignCertForPublicKey(t *testing.T, validity time.Duration, subjectPublicKey crypto.PublicKey, caCertDER []byte, caPrivateKey crypto.PrivateKey, usebadDNSName bool, badDNSName, badEmailAddress string) string {

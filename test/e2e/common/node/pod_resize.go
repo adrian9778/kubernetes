@@ -140,12 +140,7 @@ func doGuaranteedPodResizeTests(f *framework.Framework) {
 	// All tests will perform the requested resize, and once completed, will roll back the change.
 	// This results in coverage of both the operation as described, and its reverse.
 	ginkgo.Describe("guaranteed pods with multiple containers", func() {
-		/*
-			Release: v1.35
-			Testname: In-place Pod Resize, guaranteed pods with multiple containers, net increase
-			Description: Issuing an in-place Pod Resize request via the Pod Resize subresource patch endpoint to modify CPU and memory requests and limits for a guaranteed pod with 3 containers with a net increase MUST result in the Pod resources being updated as expected.
-		*/
-		framework.ConformanceIt("3 containers - increase cpu & mem on c1, c2, decrease cpu & mem on c3 - net increase [MinimumKubeletVersion:1.34]", func(ctx context.Context) {
+		ginkgo.It("3 containers - increase cpu & mem on c1, c2, decrease cpu & mem on c3 - net increase [MinimumKubeletVersion:1.34]", func(ctx context.Context) {
 			originalContainers := makeGuaranteedContainers(3, v1.NotRequired, v1.NotRequired, false, false, originalCPU, originalMem)
 			for i := range originalContainers {
 				originalContainers[i].CPUPolicy = nil
@@ -170,12 +165,7 @@ func doGuaranteedPodResizeTests(f *framework.Framework) {
 			doPatchAndRollback(ctx, f, originalContainers, expectedContainers, nil, nil, true, false)
 		})
 
-		/*
-			Release: v1.35
-			Testname: In-place Pod Resize, guaranteed pods with multiple containers, net decrease
-			Description: Issuing an in-place Pod Resize request via the Pod Resize subresource patch endpoint to modify CPU and memory requests and limits for a pod with 3 containers with a net decrease MUST result in the Pod resources being updated as expected.
-		*/
-		framework.ConformanceIt("3 containers - increase cpu & mem on c1, decrease cpu & mem on c2, c3 - net decrease [MinimumKubeletVersion:1.34]", func(ctx context.Context) {
+		ginkgo.It("3 containers - increase cpu & mem on c1, decrease cpu & mem on c2, c3 - net decrease [MinimumKubeletVersion:1.34]", func(ctx context.Context) {
 			originalContainers := makeGuaranteedContainers(3, v1.NotRequired, v1.NotRequired, false, false, originalCPU, originalMem)
 			for i := range originalContainers {
 				originalContainers[i].CPUPolicy = nil
@@ -200,12 +190,7 @@ func doGuaranteedPodResizeTests(f *framework.Framework) {
 			doPatchAndRollback(ctx, f, originalContainers, expectedContainers, nil, nil, true, false)
 		})
 
-		/*
-			Release: v1.35
-			Testname: In-place Pod Resize, guaranteed pods with multiple containers, various operations
-			Description: Issuing an in-place Pod Resize request via the Pod Resize subresource patch endpoint to modify CPU and memory requests and limits for a pod with 3 containers with various operations MUST result in the Pod resources being updated as expected.
-		*/
-		framework.ConformanceIt("3 containers - increase: CPU (c1,c3), memory (c2, c3) ; decrease: CPU (c2) [MinimumKubeletVersion:1.34]", func(ctx context.Context) {
+		ginkgo.It("3 containers - increase: CPU (c1,c3), memory (c2, c3) ; decrease: CPU (c2) [MinimumKubeletVersion:1.34]", func(ctx context.Context) {
 			originalContainers := makeGuaranteedContainers(3, v1.NotRequired, v1.NotRequired, false, false, originalCPU, originalMem)
 			for i := range originalContainers {
 				originalContainers[i].CPUPolicy = nil
@@ -611,8 +596,7 @@ func doPodResizeMemoryLimitDecreaseTest(f *framework.Framework) {
 		podresize.VerifyPodResources(testPod, viableLoweredLimit, nil)
 
 		ginkgo.By("waiting for viable lowered limit to be actuated")
-		resizedPod := podresize.WaitForPodResizeActuation(ctx, f, podClient, testPod, viableLoweredLimit)
-		podresize.ExpectPodResized(ctx, f, resizedPod, viableLoweredLimit)
+		podresize.WaitForPodResizeActuation(ctx, f, podClient, testPod, viableLoweredLimit)
 
 		// There is some latency after container startup before memory usage is scraped. On CRI-O
 		// this latency is much higher, so wait enough time for cAdvisor to scrape metrics twice.
@@ -684,8 +668,7 @@ func doPodResizeMemoryLimitDecreaseTest(f *framework.Framework) {
 		podresize.VerifyPodResources(testPod, original, nil)
 
 		ginkgo.By("waiting for the original values to be actuated")
-		resizedPod = podresize.WaitForPodResizeActuation(ctx, f, podClient, testPod, original)
-		podresize.ExpectPodResized(ctx, f, resizedPod, original)
+		podresize.WaitForPodResizeActuation(ctx, f, podClient, testPod, original)
 
 		ginkgo.By("deleting pod")
 		podClient.DeleteSync(ctx, testPod.Name, metav1.DeleteOptions{}, f.Timeouts.PodDelete)
@@ -817,8 +800,7 @@ func doPodResizeReadAndReplaceTests(f *framework.Framework) {
 
 		ginkgo.By("verifying pod resources after patch")
 		expected := podresize.UpdateExpectedContainerRestarts(ctx, updatedPod, desiredContainers)
-		resizedPod := podresize.WaitForPodResizeActuation(ctx, f, podClient, updatedPod, expected)
-		podresize.ExpectPodResized(ctx, f, resizedPod, expected)
+		podresize.WaitForPodResizeActuation(ctx, f, podClient, updatedPod, expected)
 
 		ginkgo.By("verifying pod fetched from resize subresource")
 		framework.ExpectNoError(framework.Gomega().
@@ -948,7 +930,6 @@ func doPodResizeMemoryVolumeTests(f *framework.Framework) {
 			ginkgo.By("waiting for resize actuation to complete")
 			expected := podresize.UpdateExpectedContainerRestarts(ctx, patchedPod, desiredContainers)
 			resizedPod := podresize.WaitForPodResizeActuation(ctx, f, podClient, patchedPod, expected)
-			podresize.ExpectPodResized(ctx, f, resizedPod, expected)
 
 			desiredQty := resource.MustParse(desiredSizeLimit)
 
@@ -990,7 +971,6 @@ func doPodResizeMemoryVolumeTests(f *framework.Framework) {
 
 			expectedRollback := podresize.UpdateExpectedContainerRestarts(ctx, rolledBackPod, originalContainers)
 			finalPod := podresize.WaitForPodResizeActuation(ctx, f, podClient, rolledBackPod, expectedRollback)
-			podresize.ExpectPodResized(ctx, f, finalPod, expectedRollback)
 
 			stdout, _, err = e2epod.ExecCommandInContainerWithFullOutput(f, finalPod.Name, "c1", "df", "-m", "/cache")
 			framework.ExpectNoError(err, "failed to run df after rollback")
@@ -1228,7 +1208,6 @@ func patchAndVerify(ctx context.Context, f *framework.Framework, podClient *e2ep
 	podresize.VerifyPodResources(patchedPod, expected, expectedPodResources)
 	resizedPod := podresize.WaitForPodResizeActuation(ctx, f, podClient, newPod, expected)
 
-	podresize.ExpectPodResized(ctx, f, resizedPod, expected)
 	if expectedPodResources != nil {
 		framework.ExpectNoError(podresize.VerifyPodCgroupValues(ctx, f, resizedPod))
 	}

@@ -77,7 +77,6 @@ import (
 	"k8s.io/kubernetes/test/integration/framework"
 	"k8s.io/kubernetes/test/utils/client-go/ktesting"
 	imageutils "k8s.io/kubernetes/test/utils/image"
-	"k8s.io/utils/ptr"
 )
 
 // ShutdownFunc represents the function handle to be called, typically in a defer handler, to shutdown a running module
@@ -279,6 +278,9 @@ type TestContext struct {
 	DynInformerFactory dynamicinformer.DynamicSharedInformerFactory
 	Scheduler          *scheduler.Scheduler
 	// This is the top context when initializing the test environment.
+	// Note that this will be canceled at the time that cleanup callbacks
+	// run! Use [TContext.CleanupCtx] to schedule callbacks which have
+	// their own fresh context.
 	Ctx context.Context
 	// CloseFn will stop the apiserver and clean up the resources
 	// after itself, including shutting down its storage layer.
@@ -356,13 +358,14 @@ func SyncSchedulerInformerFactory(testCtx *TestContext) {
 	}
 }
 
-// CleanupTest cleans related resources which were created during integration test
-func CleanupTest(t *testing.T, testCtx *TestContext) {
+// CleanupTest cleans related resources which were created during integration test.
+// May only be called once and with a tCtx which is not already canceled.
+func CleanupTest(tCtx ktesting.TContext, testCtx *TestContext) {
 	// Cleanup nodes and namespaces.
-	if err := testCtx.ClientSet.CoreV1().Nodes().DeleteCollection(testCtx.Ctx, *metav1.NewDeleteOptions(0), metav1.ListOptions{}); err != nil {
-		t.Errorf("error while cleaning up nodes, error: %v", err)
+	if err := testCtx.ClientSet.CoreV1().Nodes().DeleteCollection(tCtx, *metav1.NewDeleteOptions(0), metav1.ListOptions{}); err != nil {
+		tCtx.Errorf("error while cleaning up nodes, error: %v", err)
 	}
-	framework.DeleteNamespaceOrDie(testCtx.ClientSet, testCtx.NS, t)
+	framework.DeleteNamespaceOrDie(testCtx.ClientSet, testCtx.NS, tCtx)
 	// Terminate the scheduler and apiserver.
 	testCtx.CloseFn()
 }
@@ -519,7 +522,21 @@ func UpdateNodeStatus(cs clientset.Interface, node *v1.Node) error {
 // no need to do this again.
 func InitTestAPIServer(t *testing.T, nsPrefix string, admission admission.Interface) *TestContext {
 	tCtx := ktesting.Init(t)
-	testCtx := &TestContext{Ctx: tCtx}
+	// We need to intercept context cancellation, otherwise
+	// CleanupTest cannot succeed. CleanupTest calls
+	// testCtx.CloseFn, which then explicitly shuts down
+	// the server and cancels the context. The latter is
+	// important because the caller might start more goroutines
+	// which use the context.
+	//
+	// Cancellation gets propagated to the test server only during the startup
+	// phase.
+	parentCtx := tCtx
+	tCtx = tCtx.WithoutCancel()
+	stopCtxPropagation := context.AfterFunc(parentCtx, func() {
+		tCtx.CancelBecause(context.Cause(parentCtx))
+	})
+	testCtx := &TestContext{Ctx: parentCtx}
 
 	testCtx.ClientSet, testCtx.KubeConfig, testCtx.CloseFn = framework.StartTestServer(tCtx, t, framework.TestServerSetup{
 		ModifyServerRunOptions: func(options *options.ServerRunOptions) {
@@ -527,13 +544,11 @@ func InitTestAPIServer(t *testing.T, nsPrefix string, admission admission.Interf
 			if options.APIEnablement.RuntimeConfig == nil {
 				options.APIEnablement.RuntimeConfig = cliflag.ConfigurationMap{}
 			}
-			if utilfeature.DefaultFeatureGate.Enabled(features.DynamicResourceAllocation) {
-				options.APIEnablement.RuntimeConfig[resourceapi.SchemeGroupVersion.String()] = "true"
-				if utilfeature.DefaultMutableFeatureGate.EmulationVersion().LessThan(version.MustParse("v1.34.0")) {
-					// Cannot enable the resourceapi.SchemeGroupVersion when emulating < 1.34 unless
-					// we enable --runtime-config-emulation-forward-compatible.
-					options.GenericServerRunOptions.RuntimeConfigEmulationForwardCompatible = true
-				}
+			options.APIEnablement.RuntimeConfig[resourceapi.SchemeGroupVersion.String()] = "true"
+			if utilfeature.DefaultMutableFeatureGate.EmulationVersion().LessThan(version.MustParse("v1.34.0")) {
+				// Cannot enable the resourceapi.SchemeGroupVersion when emulating < 1.34 unless
+				// we enable --runtime-config-emulation-forward-compatible.
+				options.GenericServerRunOptions.RuntimeConfigEmulationForwardCompatible = true
 			}
 			if utilfeature.DefaultFeatureGate.Enabled(features.GenericWorkload) {
 				options.APIEnablement.RuntimeConfig[schedulingapiv1beta1.SchemeGroupVersion.String()] = "true"
@@ -561,7 +576,11 @@ func InitTestAPIServer(t *testing.T, nsPrefix string, admission admission.Interf
 
 	oldCloseFn := testCtx.CloseFn
 	testCtx.CloseFn = func() {
-		tCtx.Cancel("tearing down apiserver")
+		// Shutdown of additional goroutines and of the apiserver run in parallel.
+		// parentCtx (== testCtx.Ctx) is the context that callers and their
+		// goroutines were given, so it must be canceled here, not the
+		// detached tCtx which only governs the apiserver's own shutdown.
+		parentCtx.Cancel("must shut down, apiserver is being torn down")
 		oldCloseFn()
 	}
 
@@ -571,8 +590,9 @@ func InitTestAPIServer(t *testing.T, nsPrefix string, admission admission.Interf
 		testCtx.NS = framework.CreateNamespaceOrDie(testCtx.ClientSet, "default", t)
 	}
 
-	t.Cleanup(func() {
-		CleanupTest(t, testCtx)
+	stopCtxPropagation()
+	tCtx.CleanupCtx(func(tCtx ktesting.TContext) {
+		CleanupTest(tCtx, testCtx)
 	})
 
 	return testCtx
@@ -750,9 +770,9 @@ func InitTestSchedulerWithNS(t *testing.T, nsPrefix string, opts ...scheduler.Op
 func InitTestDisablePreemption(t *testing.T, nsPrefix string) *TestContext {
 	cfg := configtesting.V1ToInternalWithDefaults(t, kubeschedulerconfigv1.KubeSchedulerConfiguration{
 		Profiles: []kubeschedulerconfigv1.KubeSchedulerProfile{{
-			SchedulerName: ptr.To(v1.DefaultSchedulerName),
+			SchedulerName: new(v1.DefaultSchedulerName),
 			Plugins: &kubeschedulerconfigv1.Plugins{
-				PostFilter: kubeschedulerconfigv1.PluginSet{
+				MultiPoint: kubeschedulerconfigv1.PluginSet{
 					Disabled: []kubeschedulerconfigv1.Plugin{
 						{Name: defaultpreemption.Name},
 					},
@@ -915,9 +935,7 @@ func InitPausePod(conf *PausePodConfig) *v1.Pod {
 		}
 	}
 	if conf.PodGroupName != "" {
-		pod.Spec.SchedulingGroup = &v1.PodSchedulingGroup{
-			PodGroupName: &conf.PodGroupName,
-		}
+		pod.Spec.SchedulingGroup = &v1.PodSchedulingGroup{PodGroupName: new(conf.PodGroupName)}
 	}
 	return pod
 }

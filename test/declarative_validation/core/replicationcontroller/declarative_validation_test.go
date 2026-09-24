@@ -165,7 +165,7 @@ func TestDeclarativeValidate(t *testing.T) {
 				rc.Spec.Replicas = nil
 			}),
 			expectedErrs: field.ErrorList{
-				field.Required(field.NewPath("spec.replicas"), "").MarkBeta(),
+				field.Required(field.NewPath("spec.replicas"), ""),
 			},
 		},
 		"replicas: 0": {
@@ -177,7 +177,7 @@ func TestDeclarativeValidate(t *testing.T) {
 		"replicas: negative": {
 			input: mkValidReplicationController(setSpecReplicas(-1)),
 			expectedErrs: field.ErrorList{
-				field.Invalid(field.NewPath("spec.replicas"), nil, "").WithOrigin("minimum").MarkBeta(),
+				field.Invalid(field.NewPath("spec.replicas"), nil, "").WithOrigin("minimum"),
 			},
 		},
 		// spec.minReadySeconds
@@ -190,7 +190,7 @@ func TestDeclarativeValidate(t *testing.T) {
 		"minReadySeconds: negative": {
 			input: mkValidReplicationController(setSpecMinReadySeconds(-1)),
 			expectedErrs: field.ErrorList{
-				field.Invalid(field.NewPath("spec.minReadySeconds"), nil, "").WithOrigin("minimum").MarkBeta(),
+				field.Invalid(field.NewPath("spec.minReadySeconds"), nil, "").WithOrigin("minimum"),
 			},
 		},
 		// spec.template.spec.tolerations[*].key
@@ -204,6 +204,26 @@ func TestDeclarativeValidate(t *testing.T) {
 			input: mkValidReplicationController(setSpecTolerations(api.Toleration{Key: "invalid key", Operator: api.TolerationOpExists})),
 			expectedErrs: field.ErrorList{
 				field.Invalid(field.NewPath("spec.template.spec.tolerations").Index(0).Child("key"), nil, "").WithOrigin("format=k8s-label-key").MarkAlpha(),
+			},
+		},
+		"activeDeadlineSeconds minimum boundary violation": {
+			input: mkValidReplicationController(func(rc *api.ReplicationController) {
+				deadline := int64(0)
+				rc.Spec.Template.Spec.ActiveDeadlineSeconds = &deadline
+			}),
+			expectedErrs: field.ErrorList{
+				field.Forbidden(field.NewPath("spec", "template", "spec", "activeDeadlineSeconds"), "activeDeadlineSeconds in ReplicationController is not Supported").MarkFromImperative(),
+				field.Invalid(field.NewPath("spec.template.spec.activeDeadlineSeconds"), int64(0), "").WithOrigin("minimum").MarkAlpha(),
+			},
+		},
+		"activeDeadlineSeconds maximum boundary violation": {
+			input: mkValidReplicationController(func(rc *api.ReplicationController) {
+				deadline := int64(2147483648)
+				rc.Spec.Template.Spec.ActiveDeadlineSeconds = &deadline
+			}),
+			expectedErrs: field.ErrorList{
+				field.Forbidden(field.NewPath("spec", "template", "spec", "activeDeadlineSeconds"), "activeDeadlineSeconds in ReplicationController is not Supported").MarkFromImperative(),
+				field.Invalid(field.NewPath("spec.template.spec.activeDeadlineSeconds"), int64(2147483648), "").WithOrigin("maximum").MarkAlpha(),
 			},
 		},
 	}
@@ -266,7 +286,7 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 				rc.Spec.Replicas = nil
 			}),
 			expectedErrs: field.ErrorList{
-				field.Required(field.NewPath("spec.replicas"), "").MarkBeta(),
+				field.Required(field.NewPath("spec.replicas"), ""),
 			},
 		},
 		"replicas: 0": {
@@ -281,7 +301,7 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 			old:    mkValidReplicationController(),
 			update: mkValidReplicationController(setSpecReplicas(-1)),
 			expectedErrs: field.ErrorList{
-				field.Invalid(field.NewPath("spec.replicas"), nil, "").WithOrigin("minimum").MarkBeta(),
+				field.Invalid(field.NewPath("spec.replicas"), nil, "").WithOrigin("minimum"),
 			},
 		},
 		// spec.minReadySeconds
@@ -297,7 +317,7 @@ func TestDeclarativeValidateUpdate(t *testing.T) {
 			old:    mkValidReplicationController(),
 			update: mkValidReplicationController(setSpecMinReadySeconds(-1)),
 			expectedErrs: field.ErrorList{
-				field.Invalid(field.NewPath("spec.minReadySeconds"), nil, "").WithOrigin("minimum").MarkBeta(),
+				field.Invalid(field.NewPath("spec.minReadySeconds"), nil, "").WithOrigin("minimum"),
 			},
 		},
 	}

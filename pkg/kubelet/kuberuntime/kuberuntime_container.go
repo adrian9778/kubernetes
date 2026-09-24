@@ -1314,6 +1314,15 @@ func (m *kubeGenericRuntimeManager) GetContainerLogs(ctx context.Context, pod *v
 	if status == nil {
 		return remote.ErrContainerStatusNil
 	}
+	// Since v1.32, stdout may be nil if the stream is not requested.
+	if stdout != nil {
+		// Do a zero-byte write to stdout before handing off to the container runtime.
+		// This ensures at least one Write call is made to the writer when copying starts,
+		// even if we then block waiting for log output from the container.
+		if _, err := stdout.Write([]byte{}); err != nil {
+			return err
+		}
+	}
 	return m.ReadLogs(ctx, status.GetLogPath(), containerID.ID, logOptions, stdout, stderr)
 }
 
@@ -1349,15 +1358,6 @@ func (m *kubeGenericRuntimeManager) GetAttach(ctx context.Context, id kubecontai
 		return nil, err
 	}
 	return url.Parse(resp.Url)
-}
-
-// RunInContainer synchronously executes the command in the container, and returns the output.
-func (m *kubeGenericRuntimeManager) RunInContainer(ctx context.Context, id kubecontainer.ContainerID, cmd []string, timeout time.Duration) ([]byte, error) {
-	stdout, stderr, err := m.runtimeService.ExecSync(ctx, id.ID, cmd, timeout)
-	// NOTE(tallclair): This does not correctly interleave stdout & stderr, but should be sufficient
-	// for logging purposes. A combined output option will need to be added to the ExecSyncRequest
-	// if more precise output ordering is ever required.
-	return append(stdout, stderr...), err
 }
 
 // removeContainer removes the container and optionally the container logs.

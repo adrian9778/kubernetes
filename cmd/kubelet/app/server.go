@@ -1044,7 +1044,7 @@ func buildKubeletClientConfig(ctx context.Context, s *options.KubeletServer, tp 
 
 		kubeClientConfigOverrides(s, clientConfig)
 
-		clientCertificateManager, err := buildClientCertificateManager(certConfig, clientConfig, s.CertDirectory, nodeName)
+		clientCertificateManager, err := buildClientCertificateManager(logger, certConfig, clientConfig, s.CertDirectory, nodeName, s.ClientCertificateKeyAlgorithm)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1146,7 +1146,7 @@ func updateDialer(clientConfig *restclient.Config) (func(), error) {
 // buildClientCertificateManager creates a certificate manager that will use certConfig to request a client certificate
 // if no certificate is available, or the most recent clientConfig (which is assumed to point to the cert that the manager will
 // write out).
-func buildClientCertificateManager(certConfig, clientConfig *restclient.Config, certDir string, nodeName types.NodeName) (certificate.Manager, error) {
+func buildClientCertificateManager(logger klog.Logger, certConfig, clientConfig *restclient.Config, certDir string, nodeName types.NodeName, keyAlgorithm *kubeletconfiginternal.CertificateKeyAlgorithmType) (certificate.Manager, error) {
 	newClientsetFn := func(current *tls.Certificate) (clientset.Interface, error) {
 		// If we have a valid certificate, use that to fetch CSRs. Otherwise use the bootstrap
 		// credentials. In the future it would be desirable to change the behavior of bootstrap
@@ -1160,6 +1160,7 @@ func buildClientCertificateManager(certConfig, clientConfig *restclient.Config, 
 	}
 
 	return kubeletcertificate.NewKubeletClientCertificateManager(
+		logger,
 		certDir,
 		nodeName,
 
@@ -1172,6 +1173,7 @@ func buildClientCertificateManager(certConfig, clientConfig *restclient.Config, 
 		clientConfig.CertFile,
 		clientConfig.KeyFile,
 		newClientsetFn,
+		keyAlgorithm,
 	)
 }
 
@@ -1421,7 +1423,16 @@ func parseResourceList(m map[string]string) (v1.ResourceList, error) {
 				return nil, fmt.Errorf("resource quantity for %q cannot be negative: %v", k, v)
 			}
 			if v1.ResourceName(k) == v1.ResourceCPU {
-				q.SetMilli((q.ScaledValue(resource.Micro) + 500) / 1000)
+				// Round to the nearest milli while micro-cores fit an int64, where
+				// micro+500 used to wrap into a negative reservation. Past that the
+				// value is kept as parsed, so the cutoff is a step, not a no-op.
+				if micro, ok := q.AsScaledInt64(resource.Micro); ok {
+					milli := micro / 1000
+					if micro%1000 >= 500 {
+						milli++
+					}
+					q.SetMilli(milli)
+				}
 			}
 			rl[v1.ResourceName(k)] = q
 		default:

@@ -22,13 +22,13 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/mldsa"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"net/mail"
-	"strconv"
 	"strings"
 	"time"
 
@@ -188,12 +188,12 @@ func validateCertificateSigningRequest(csr *certificates.CertificateSigningReque
 		allErrs = append(allErrs, field.Invalid(specPath.Child("request"), csr.Spec.Request, fmt.Sprintf("%v", err)))
 	}
 	if len(csr.Spec.Usages) == 0 {
-		allErrs = append(allErrs, field.Required(specPath.Child("usages"), ""))
+		allErrs = append(allErrs, field.Required(specPath.Child("usages"), "").MarkCoveredByDeclarative())
 	}
 	if !opts.allowUnknownUsages {
 		for i, usage := range csr.Spec.Usages {
 			if !allValidUsages.Has(string(usage)) {
-				allErrs = append(allErrs, field.NotSupported(specPath.Child("usages").Index(i), usage, allValidUsages.List()))
+				allErrs = append(allErrs, field.NotSupported(specPath.Child("usages").Index(i), usage, allValidUsages.List()).MarkCoveredByDeclarative())
 			}
 		}
 	}
@@ -278,20 +278,24 @@ func validateConditions(fldPath *field.Path, csr *certificates.CertificateSignin
 }
 
 func ValidateCertificateSigningRequestUpdate(newCSR, oldCSR *certificates.CertificateSigningRequest) field.ErrorList {
-	opts := getValidationOptions(newCSR, oldCSR)
-	return validateCertificateSigningRequestUpdate(newCSR, oldCSR, opts)
+	allErrs := apivalidation.ValidateObjectMetaUpdate(&newCSR.ObjectMeta, &oldCSR.ObjectMeta, field.NewPath("metadata"))
+	allErrs = append(allErrs, apivalidation.ValidateImmutableField(&newCSR.Spec, &oldCSR.Spec, field.NewPath("spec")).WithOrigin("immutable").MarkCoveredByDeclarative()...)
+	allErrs = append(allErrs, apivalidation.ValidateImmutableField(&newCSR.Status, &oldCSR.Status, field.NewPath("status"))...)
+	return allErrs
 }
 
 func ValidateCertificateSigningRequestStatusUpdate(newCSR, oldCSR *certificates.CertificateSigningRequest) field.ErrorList {
+	allErrs := apivalidation.ValidateImmutableField(&newCSR.Spec, &oldCSR.Spec, field.NewPath("spec")).WithOrigin("immutable").MarkCoveredByDeclarative()
 	opts := getValidationOptions(newCSR, oldCSR)
 	opts.allowSettingCertificate = true
-	return validateCertificateSigningRequestUpdate(newCSR, oldCSR, opts)
+	return append(allErrs, validateCertificateSigningRequestUpdate(newCSR, oldCSR, opts)...)
 }
 
 func ValidateCertificateSigningRequestApprovalUpdate(newCSR, oldCSR *certificates.CertificateSigningRequest) field.ErrorList {
+	allErrs := apivalidation.ValidateImmutableField(&newCSR.Spec, &oldCSR.Spec, field.NewPath("spec")).WithOrigin("immutable").MarkCoveredByDeclarative()
 	opts := getValidationOptions(newCSR, oldCSR)
 	opts.allowSettingApprovalConditions = true
-	return validateCertificateSigningRequestUpdate(newCSR, oldCSR, opts)
+	return append(allErrs, validateCertificateSigningRequestUpdate(newCSR, oldCSR, opts)...)
 }
 
 func validateCertificateSigningRequestUpdate(newCSR, oldCSR *certificates.CertificateSigningRequest, opts certificateValidationOptions) field.ErrorList {
@@ -752,8 +756,14 @@ func validateStubPKCS10Request(req *certificates.PodCertificateRequest) field.Er
 			allErrors = append(allErrors, field.Invalid(pkcs10ReqPath, fmt.Sprintf("%d-bit modulus", pkcs10Pub.Size()*8), "RSA keys must have modulus size 3072 or 4096"))
 			return allErrors
 		}
+	case *mldsa.PublicKey:
+		keyParam := pkcs10Pub.Parameters().String()
+		if keyParam != mldsa.MLDSA44().String() && keyParam != mldsa.MLDSA65().String() && keyParam != mldsa.MLDSA87().String() {
+			allErrors = append(allErrors, field.Invalid(pkcs10ReqPath, fmt.Sprintf("key parameters %q", keyParam), fmt.Sprintf("ML-DSA keys must have key parameters of %s, %s, or %s", mldsa.MLDSA44().String(), mldsa.MLDSA65().String(), mldsa.MLDSA87().String())))
+			return allErrors
+		}
 	default:
-		allErrors = append(allErrors, field.Invalid(pkcs10ReqPath, field.OmitValueType{}, "unknown public key type; supported types are Ed25519, ECDSA, and RSA"))
+		allErrors = append(allErrors, field.Invalid(pkcs10ReqPath, field.OmitValueType{}, "unknown public key type; supported types are Ed25519, ECDSA, RSA, and ML-DSA"))
 		return allErrors
 	}
 
@@ -825,13 +835,13 @@ func ValidatePodCertificateRequestStatusUpdate(newReq, oldReq *certificates.PodC
 		case certificates.PodCertificateRequestConditionTypeIssued, certificates.PodCertificateRequestConditionTypeDenied, certificates.PodCertificateRequestConditionTypeFailed:
 			numKnownConditions++
 			if numKnownConditions > 1 {
-				allErrors = append(allErrors, field.Invalid(field.NewPath("status", "conditions", formatIndex(i), "type"), cond.Type, `There may be at most one condition with type "Issued", "Denied", or "Failed"`))
+				allErrors = append(allErrors, field.Invalid(field.NewPath("status", "conditions").Index(i).Child("type"), cond.Type, `There may be at most one condition with type "Issued", "Denied", or "Failed"`))
 			}
 			if cond.Status != metav1.ConditionTrue {
-				allErrors = append(allErrors, field.NotSupported(field.NewPath("status", "conditions", formatIndex(i), "status"), cond.Status, []metav1.ConditionStatus{metav1.ConditionTrue}))
+				allErrors = append(allErrors, field.NotSupported(field.NewPath("status", "conditions").Index(i).Child("status"), cond.Status, []metav1.ConditionStatus{metav1.ConditionTrue}))
 			}
 		default:
-			allErrors = append(allErrors, field.NotSupported(field.NewPath("status", "conditions", formatIndex(i), "type"), cond.Type, []string{certificates.PodCertificateRequestConditionTypeIssued, certificates.PodCertificateRequestConditionTypeDenied, certificates.PodCertificateRequestConditionTypeFailed}))
+			allErrors = append(allErrors, field.NotSupported(field.NewPath("status", "conditions").Index(i).Child("type"), cond.Type, []string{certificates.PodCertificateRequestConditionTypeIssued, certificates.PodCertificateRequestConditionTypeDenied, certificates.PodCertificateRequestConditionTypeFailed}))
 		}
 	}
 
@@ -931,6 +941,11 @@ func ValidatePodCertificateRequestStatusUpdate(newReq, oldReq *certificates.PodC
 				return allErrors
 			}
 		case *ecdsa.PublicKey:
+			if !wantPK.Equal(leafCert.PublicKey) {
+				allErrors = append(allErrors, field.Invalid(certChainPath, newReq.Status.CertificateChain, "leaf certificate was not issued to the requested public key"))
+				return allErrors
+			}
+		case *mldsa.PublicKey:
 			if !wantPK.Equal(leafCert.PublicKey) {
 				allErrors = append(allErrors, field.Invalid(certChainPath, newReq.Status.CertificateChain, "leaf certificate was not issued to the requested public key"))
 				return allErrors
@@ -1046,10 +1061,6 @@ func pcrIsFailed(pcr *certificates.PodCertificateRequest) bool {
 		}
 	}
 	return false
-}
-
-func formatIndex(i int) string {
-	return "[" + strconv.Itoa(i) + "]"
 }
 
 // Similar to apivalidation.ValidateImmutableField but we can supply our own detail string.

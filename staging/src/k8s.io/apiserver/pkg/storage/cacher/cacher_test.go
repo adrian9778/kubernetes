@@ -44,6 +44,7 @@ import (
 	"k8s.io/apiserver/pkg/storage/etcd3"
 	etcd3testing "k8s.io/apiserver/pkg/storage/etcd3/testing"
 	storagetesting "k8s.io/apiserver/pkg/storage/testing"
+	"k8s.io/apiserver/pkg/storage/testing/correctness"
 	"k8s.io/apiserver/pkg/storage/value"
 	"k8s.io/apiserver/pkg/storage/value/encrypt/identity"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
@@ -203,7 +204,8 @@ func TestDeleteWithConflictAndMissingExpectedTransformOrDecodeError(t *testing.T
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.AllowUnsafeMalformedObjectDeletion, true)
 
 	transformer := &testTransformer{Transformer: identity.NewEncryptCheckTransformer()}
-	ctx, s, _ := testSetup(t, withTransformer(transformer))
+	ctx, s, terminate := testSetup(t, withTransformer(transformer))
+	t.Cleanup(terminate)
 
 	storagetesting.RunTestDeleteWithConflictAndMissingExpectedTransformOrDecodeError(ctx, t, s, transformer.setFailing)
 }
@@ -800,4 +802,10 @@ func BenchmarkStoreStats(b *testing.B) {
 		}
 	}
 	storagetesting.RunBenchmarkStoreStats(ctx, b, cacher)
+}
+
+func TestCorrectness(t *testing.T) {
+	ctx, cacher, terminate := testSetup(t)
+	t.Cleanup(terminate)
+	correctness.RunTestCorrectness(ctx, t, cacher, etcd3testing.PathPrefix())
 }

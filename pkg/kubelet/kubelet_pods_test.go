@@ -54,10 +54,12 @@ import (
 	"k8s.io/cri-streaming/pkg/streaming/remotecommand"
 	_ "k8s.io/kubernetes/pkg/apis/core/install"
 	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/kubernetes/pkg/kubelet/cm"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	containertest "k8s.io/kubernetes/pkg/kubelet/container/testing"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
 	"k8s.io/kubernetes/pkg/kubelet/network/dns"
+	"k8s.io/kubernetes/pkg/kubelet/prober"
 	"k8s.io/kubernetes/pkg/kubelet/prober/results"
 	"k8s.io/kubernetes/pkg/kubelet/secret"
 	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
@@ -3959,6 +3961,50 @@ func TestConvertToAPIContainerStatuses(t *testing.T) {
 			},
 		},
 		{
+			name: "preserves Started for the same running container after kubelet restart",
+			pod: &v1.Pod{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{{Name: "containerA"}},
+				},
+			},
+			currentStatus: &kubecontainer.PodStatus{
+				ContainerStatuses: []*kubecontainer.Status{{
+					Name:  "containerA",
+					ID:    kubecontainer.ContainerID{Type: "test", ID: "old"},
+					State: kubecontainer.ContainerStateRunning,
+				}},
+			},
+			previousStatus: []v1.ContainerStatus{
+				withID(startedState("containerA"), "test://old"),
+			},
+			containers: []v1.Container{{Name: "containerA"}},
+			expected: []v1.ContainerStatus{
+				startedState("containerA"),
+			},
+		},
+		{
+			name: "does not preserve Started for a replacement container after kubelet restart",
+			pod: &v1.Pod{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{{Name: "containerA"}},
+				},
+			},
+			currentStatus: &kubecontainer.PodStatus{
+				ContainerStatuses: []*kubecontainer.Status{{
+					Name:  "containerA",
+					ID:    kubecontainer.ContainerID{Type: "test", ID: "new"},
+					State: kubecontainer.ContainerStateRunning,
+				}},
+			},
+			previousStatus: []v1.ContainerStatus{
+				withID(startedState("containerA"), "test://old"),
+			},
+			containers: []v1.Container{{Name: "containerA"}},
+			expected: []v1.ContainerStatus{
+				runningState("containerA"),
+			},
+		},
+		{
 			name: "containerB dies and triggers RestartAllContainers in place",
 			pod: &v1.Pod{
 				Spec: desiredState,
@@ -4193,9 +4239,10 @@ func TestConvertToAPIContainerStatuses(t *testing.T) {
 		},
 	}
 	featuregatetesting.SetFeatureGatesDuringTest(t, utilfeature.DefaultFeatureGate, featuregatetesting.FeatureOverrides{
-		features.ContainerRestartRules:                true,
-		features.NodeDeclaredFeatures:                 true,
-		features.RestartAllContainersOnContainerExits: true,
+		features.ChangeContainerStatusOnKubeletRestart: false,
+		features.ContainerRestartRules:                 true,
+		features.NodeDeclaredFeatures:                  true,
+		features.RestartAllContainersOnContainerExits:  true,
 	})
 
 	for _, test := range tests {
@@ -5834,6 +5881,149 @@ func Test_generateAPIPodStatus(t *testing.T) {
 	}
 }
 
+// Test_generateAPIPodStatusOnKubeletRestart verifies that a new container does not inherit
+// the readiness the API server still reports for the container it replaced. Readiness is
+// preserved across a kubelet restart only when the container the kubelet last observed from
+// the API server is the one the runtime reports.
+//
+// An e2e test could restart the kubelet, but it could not reliably create the stale API
+// server status this depends on. That status appears only when the container is replaced
+// while the kubelet cannot update the API server. An e2e test would have to race the
+// runtime or write the pod status behind the kubelet's back. This test instead builds the
+// same situation from an empty status manager cache and a CRI status whose container
+// differs from the one the pod status still reports.
+//
+// See https://github.com/kubernetes/kubernetes/issues/141473
+func Test_generateAPIPodStatusOnKubeletRestart(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.ChangeContainerStatusOnKubeletRestart, false)
+
+	const containerName = "containerA"
+	oldContainerID := kubecontainer.ContainerID{Type: "test", ID: "old_container_id"}
+	newContainerID := kubecontainer.ContainerID{Type: "test", ID: "new_container_id"}
+
+	tests := []struct {
+		name string
+		// apiContainerID is the container ID in the pod status the kubelet last
+		// observed from the API server, which may be outdated.
+		apiContainerID               kubecontainer.ContainerID
+		firstSyncAfterKubeletRestart bool
+		expectedReady                bool
+	}{
+		{
+			name:                         "the same container survived the kubelet restart, first sync",
+			apiContainerID:               newContainerID,
+			firstSyncAfterKubeletRestart: true,
+			expectedReady:                true,
+		},
+		{
+			name:           "the same container survived the kubelet restart",
+			apiContainerID: newContainerID,
+			expectedReady:  true,
+		},
+		{
+			name:                         "a new container was created while the API server was unreachable, first sync",
+			apiContainerID:               oldContainerID,
+			firstSyncAfterKubeletRestart: true,
+			expectedReady:                false,
+		},
+		{
+			name:           "a new container was created while the API server was unreachable",
+			apiContainerID: oldContainerID,
+			expectedReady:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, tCtx := ktesting.NewTestContext(t)
+
+			testKubelet := newTestKubelet(t, false /* controllerAttachDetachEnabled */)
+			defer testKubelet.Cleanup()
+			kl := testKubelet.kubelet
+
+			// newTestKubelet installs a fake probe manager.
+			// Use the real one so that the readiness preservation logic runs.
+			kl.probeManager = prober.NewManager(
+				kl.statusManager,
+				kl.livenessManager,
+				kl.readinessManager,
+				kl.startupManager,
+				kl.runner,
+				&record.FakeRecorder{},
+			)
+
+			// The pod as the kubelet last observed it from the API server. The status
+			// manager cache is empty after a kubelet restart, so generateAPIPodStatus
+			// falls back to this as the previous status.
+			pod := &v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					UID:       "12345678",
+					Name:      "probe-state-preservation",
+					Namespace: "foo",
+				},
+				Spec: v1.PodSpec{
+					NodeName:      "machine",
+					RestartPolicy: v1.RestartPolicyAlways,
+					Containers: []v1.Container{{
+						Name: containerName,
+						ReadinessProbe: &v1.Probe{
+							ProbeHandler:        v1.ProbeHandler{Exec: &v1.ExecAction{}},
+							InitialDelaySeconds: 3600,
+							PeriodSeconds:       1,
+						},
+					}},
+				},
+				Status: v1.PodStatus{
+					Phase: v1.PodRunning,
+					Conditions: []v1.PodCondition{{
+						Type:   v1.PodReady,
+						Status: v1.ConditionTrue,
+					}},
+					ContainerStatuses: []v1.ContainerStatus{{
+						Name:        containerName,
+						ContainerID: tc.apiContainerID.String(),
+						State:       v1.ContainerState{Running: &v1.ContainerStateRunning{}},
+						Ready:       true,
+					}},
+				},
+			}
+
+			// On the first sync after a kubelet restart there is no readiness worker yet,
+			// because SyncPod calls generateAPIPodStatus before probeManager.AddPod.
+			if !tc.firstSyncAfterKubeletRestart {
+				kl.probeManager.AddPod(tCtx, pod)
+				t.Cleanup(func() { kl.probeManager.RemovePod(pod) })
+			}
+
+			// The runtime reports a container that started long before the kubelet, so
+			// its start time alone makes it look like a container that survived the
+			// restart.
+			criStatus := &kubecontainer.PodStatus{
+				ID:        pod.UID,
+				Name:      pod.Name,
+				Namespace: pod.Namespace,
+				SandboxStatuses: []*runtimeapi.PodSandboxStatus{{
+					Metadata: &runtimeapi.PodSandboxMetadata{Attempt: uint32(0)},
+					State:    runtimeapi.PodSandboxState_SANDBOX_READY,
+				}},
+				ContainerStatuses: []*kubecontainer.Status{{
+					Name:      containerName,
+					ID:        newContainerID,
+					State:     kubecontainer.ContainerStateRunning,
+					StartedAt: time.Now().Add(-time.Hour),
+				}},
+			}
+
+			actual := kl.generateAPIPodStatus(tCtx, pod, criStatus, false /* podIsTerminal */)
+
+			require.Len(t, actual.ContainerStatuses, 1)
+			cStatus := actual.ContainerStatuses[0]
+			require.Equal(t, newContainerID.String(), cStatus.ContainerID, "the generated status should report the container the runtime runs")
+			assert.Equal(t, tc.expectedReady, cStatus.Ready, "unexpected readiness for container %q", containerName)
+		})
+	}
+}
+
 func Test_generateAPIPodStatusForInPlaceVPAEnabled(t *testing.T) {
 	if goruntime.GOOS != "linux" {
 		t.Skip("InPlacePodVerticalScaling cgroup resource reporting is only supported on Linux")
@@ -6657,7 +6847,6 @@ func TestConvertToAPIContainerStatusesDataRace(t *testing.T) {
 }
 
 func TestConvertToAPIContainerStatusesForResources(t *testing.T) {
-	logger, tCtx := ktesting.NewTestContext(t)
 	if goruntime.GOOS != "linux" {
 		t.Skip("InPlacePodVerticalScaling cgroup resource reporting is only supported on Linux")
 	}
@@ -6713,7 +6902,9 @@ func TestConvertToAPIContainerStatusesForResources(t *testing.T) {
 	}
 
 	CPU1AndMem1G := v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("1Gi")}
+	CPU1AndMem2G := v1.ResourceList{v1.ResourceCPU: resource.MustParse("1"), v1.ResourceMemory: resource.MustParse("2Gi")}
 	CPU2AndMem2G := v1.ResourceList{v1.ResourceCPU: resource.MustParse("2"), v1.ResourceMemory: resource.MustParse("2Gi")}
+	Mem2G := v1.ResourceList{v1.ResourceMemory: resource.MustParse("2Gi")}
 	CPU1AndMem1GAndStorage2G := CPU1AndMem1G.DeepCopy()
 	CPU1AndMem1GAndStorage2G[v1.ResourceEphemeralStorage] = resource.MustParse("2Gi")
 	CPU1AndMem1GAndStorage2G[v1.ResourceStorage] = resource.MustParse("2Gi")
@@ -6743,12 +6934,13 @@ func TestConvertToAPIContainerStatusesForResources(t *testing.T) {
 
 	idx := 0
 	for tdesc, tc := range map[string]struct {
-		State              kubecontainer.State // Defaults to Running
-		Resources          v1.ResourceRequirements
-		AllocatedResources *v1.ResourceRequirements          // Defaults to Resources
-		ActualResources    *kubecontainer.ContainerResources // Defaults to Resources equivalent
-		OldStatus          v1.ContainerStatus
-		Expected           v1.ContainerStatus
+		State                kubecontainer.State // Defaults to Running
+		Resources            v1.ResourceRequirements
+		AllocatedResources   *v1.ResourceRequirements          // Defaults to Resources
+		ActualResources      *kubecontainer.ContainerResources // Defaults to Resources equivalent
+		OldStatus            v1.ContainerStatus
+		Expected             v1.ContainerStatus
+		MockHasExclusiveCPUs bool // Defines what FakeContainerManager returns
 	}{
 		"GuaranteedQoSPod with CPU and memory CRI status": {
 			Resources: v1.ResourceRequirements{Limits: CPU1AndMem1G, Requests: CPU1AndMem1G},
@@ -7095,8 +7287,97 @@ func TestConvertToAPIContainerStatusesForResources(t *testing.T) {
 				Resources:          &v1.ResourceRequirements{Limits: CPU1AndMem1GAndStorage2G, Requests: CPU1AndMem1GAndStorage2G},
 			},
 		},
+		"resizing Pod with update of resources without exclusive CPUs": {
+			Resources:          v1.ResourceRequirements{Limits: CPU2AndMem2G, Requests: CPU2AndMem2G},
+			AllocatedResources: &v1.ResourceRequirements{Limits: CPU2AndMem2G, Requests: CPU2AndMem2G},
+			OldStatus: v1.ContainerStatus{
+				Name:      testContainerName,
+				Image:     "img",
+				ImageID:   "img1234",
+				State:     v1.ContainerState{Running: &v1.ContainerStateRunning{}},
+				Resources: &v1.ResourceRequirements{Limits: CPU1AndMem1G, Requests: CPU1AndMem1G},
+			},
+			Expected: v1.ContainerStatus{
+				Name:               testContainerName,
+				ContainerID:        testContainerID.String(),
+				Image:              "img",
+				ImageID:            "img1234",
+				State:              v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.NewTime(nowTime)}},
+				AllocatedResources: CPU2AndMem2G,
+				Resources:          &v1.ResourceRequirements{Limits: CPU2AndMem2G, Requests: CPU2AndMem2G},
+			},
+			MockHasExclusiveCPUs: false,
+		},
+		"resizing Pod with update of resources with exclusive CPUs": {
+			Resources:          v1.ResourceRequirements{Limits: CPU2AndMem2G, Requests: CPU2AndMem2G},
+			AllocatedResources: &v1.ResourceRequirements{Limits: CPU2AndMem2G, Requests: CPU2AndMem2G},
+			OldStatus: v1.ContainerStatus{
+				Name:      testContainerName,
+				Image:     "img",
+				ImageID:   "img1234",
+				State:     v1.ContainerState{Running: &v1.ContainerStateRunning{}},
+				Resources: &v1.ResourceRequirements{Limits: CPU1AndMem1G, Requests: CPU1AndMem1G},
+			},
+			Expected: v1.ContainerStatus{
+				Name:               testContainerName,
+				ContainerID:        testContainerID.String(),
+				Image:              "img",
+				ImageID:            "img1234",
+				State:              v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.NewTime(nowTime)}},
+				AllocatedResources: CPU2AndMem2G,
+				Resources:          &v1.ResourceRequirements{Limits: CPU2AndMem2G, Requests: CPU2AndMem2G},
+			},
+			MockHasExclusiveCPUs: true,
+		},
+		"resizing Pod with update of resources having no CPU limits without exclusive CPUs": {
+			Resources:          v1.ResourceRequirements{Limits: Mem2G, Requests: CPU2AndMem2G},
+			AllocatedResources: &v1.ResourceRequirements{Limits: CPU2AndMem2G, Requests: CPU2AndMem2G},
+			OldStatus: v1.ContainerStatus{
+				Name:        testContainerName,
+				ContainerID: testContainerID.String(),
+				Image:       "img",
+				ImageID:     "img1234",
+				State:       v1.ContainerState{Running: &v1.ContainerStateRunning{}},
+				Resources:   &v1.ResourceRequirements{Limits: CPU1AndMem1G, Requests: CPU1AndMem1G},
+			},
+			Expected: v1.ContainerStatus{
+				Name:               testContainerName,
+				ContainerID:        testContainerID.String(),
+				Image:              "img",
+				ImageID:            "img1234",
+				State:              v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.NewTime(nowTime)}},
+				AllocatedResources: CPU2AndMem2G,
+				// This is behavior expected in this test case: CPU Limit is not updated and preserves old status value (1 CPU).
+				Resources: &v1.ResourceRequirements{Limits: CPU1AndMem2G, Requests: CPU2AndMem2G},
+			},
+			MockHasExclusiveCPUs: false,
+		},
+		"resizing Pod with update of resources having no CPU limits with exclusive CPUs": {
+			Resources:          v1.ResourceRequirements{Limits: Mem2G, Requests: CPU2AndMem2G},
+			AllocatedResources: &v1.ResourceRequirements{Limits: CPU2AndMem2G, Requests: CPU2AndMem2G},
+			OldStatus: v1.ContainerStatus{
+				Name:        testContainerName,
+				ContainerID: testContainerID.String(),
+				Image:       "img",
+				ImageID:     "img1234",
+				State:       v1.ContainerState{Running: &v1.ContainerStateRunning{}},
+				Resources:   &v1.ResourceRequirements{Limits: CPU1AndMem1G, Requests: CPU1AndMem1G},
+			},
+			Expected: v1.ContainerStatus{
+				Name:               testContainerName,
+				ContainerID:        testContainerID.String(),
+				Image:              "img",
+				ImageID:            "img1234",
+				State:              v1.ContainerState{Running: &v1.ContainerStateRunning{StartedAt: metav1.NewTime(nowTime)}},
+				AllocatedResources: CPU2AndMem2G,
+				Resources:          &v1.ResourceRequirements{Limits: CPU2AndMem2G, Requests: CPU2AndMem2G},
+			},
+			MockHasExclusiveCPUs: true,
+		},
 	} {
 		t.Run(tdesc, func(t *testing.T) {
+			logger, tCtx := ktesting.NewTestContext(t)
+
 			tPod := testPod.DeepCopy()
 			tPod.Name = fmt.Sprintf("%s-%d", testPod.Name, idx)
 
@@ -7121,6 +7402,11 @@ func TestConvertToAPIContainerStatusesForResources(t *testing.T) {
 				state = tc.State
 			}
 			podStatus := testPodStatus(state, resources)
+			if fakeCM, ok := kubelet.containerManager.(*cm.FakeContainerManager); ok {
+				fakeCM.ExclusiveCPUs = tc.MockHasExclusiveCPUs
+				hasExclusiveCPUs := kubelet.containerManager.ContainerHasExclusiveCPUs(logger, tPod, &tPod.Spec.Containers[0])
+				assert.Equal(t, tc.MockHasExclusiveCPUs, hasExclusiveCPUs)
+			}
 			cStatuses := kubelet.convertToAPIContainerStatuses(tCtx, tPod, podStatus, []v1.ContainerStatus{tc.OldStatus}, tPod.Spec.Containers, nil, false, false, false)
 			actual := cStatuses[0]
 			// Explicitly test AllocatedResources and Resources separately for debuggability.
@@ -8567,6 +8853,64 @@ func TestParseGetSubIdsOutput(t *testing.T) {
 	}
 }
 
+func TestGetentUserExists(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("getent is a Linux tool")
+	}
+	tests := []struct {
+		name       string
+		getentExit string // shell script body for a fake "getent"; empty means no getent on PATH
+		wantFound  bool
+		wantErr    bool
+	}{
+		{
+			name:       "user found",
+			getentExit: "exit 0",
+			wantFound:  true,
+		},
+		{
+			name:       "user not found",
+			getentExit: "exit 2", // getent(1): 2 = key not found
+			wantFound:  false,
+		},
+		{
+			name:       "getent fails for another reason",
+			getentExit: "exit 1",
+			wantErr:    true,
+		},
+		{
+			name:      "getent not installed",
+			wantFound: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			if tc.getentExit != "" {
+				script := "#!/bin/sh\n" + tc.getentExit + "\n"
+				if err := os.WriteFile(filepath.Join(binDir, "getent"), []byte(script), 0o755); err != nil {
+					t.Fatalf("writing fake getent: %v", err)
+				}
+			}
+			t.Setenv("PATH", binDir)
+
+			found, err := getentUserExists("kubelet")
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("%s: expected error, got nil", tc.name)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("%s: unexpected error: %v", tc.name, err)
+			}
+			if found != tc.wantFound {
+				t.Errorf("%s: got found=%v, want %v", tc.name, found, tc.wantFound)
+			}
+		})
+	}
+}
+
 func TestResolveRecursiveReadOnly(t *testing.T) {
 	testCases := []struct {
 		m                  v1.VolumeMount
@@ -8732,7 +9076,7 @@ func TestMakeEnvironmentVariablesWithFileKeyRef(t *testing.T) {
 		return filePath
 	}
 
-	// Test cases for FileKeyRef feature gate
+	// Test cases for FileKeyRef
 	testCases := []struct {
 		name          string
 		container     *v1.Container
@@ -9050,8 +9394,6 @@ func TestMakeEnvironmentVariablesWithFileKeyRef(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.EnvFiles, true)
-
 			if tc.setupFiles != nil {
 				tc.setupFiles()
 			}

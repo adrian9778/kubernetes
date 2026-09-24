@@ -428,7 +428,7 @@ func TestGeneratePlacements(t *testing.T) {
 					nodePtrs[i] = &nodes[i]
 				}
 
-				snapshot := cache.NewTestSnapshotWithCompositePodGroups(pods, nodePtrs, pgPtrs, cpgPtrs)
+				snapshot := cache.NewTestSnapshotWithPodGroups(pods, nodePtrs, pgPtrs, cpgPtrs)
 
 				fh, _ := runtime.NewFramework(tCtx, nil, nil,
 					runtime.WithInformerFactory(informerFactory),
@@ -476,19 +476,13 @@ func TestGeneratePlacements(t *testing.T) {
 
 func makePodGroupInfoFromPG(pg *schedulingapi.PodGroup) fwk.PodGroupInfo {
 	return &framework.PodGroupInfo{
-		Name:      pg.Name,
-		Namespace: pg.Namespace,
-		PodGroup:  pg,
-		Type:      fwk.PodGroupKeyType,
+		GenericPodGroup: fwk.NewGenericPodGroup(pg),
 	}
 }
 
 func makePodGroupInfoFromCPG(cpg *schedulingv1alphav3.CompositePodGroup) fwk.PodGroupInfo {
 	return &framework.PodGroupInfo{
-		Name:              cpg.Name,
-		Namespace:         cpg.Namespace,
-		CompositePodGroup: cpg,
-		Type:              fwk.CompositePodGroupKeyType,
+		GenericPodGroup: fwk.NewGenericCompositePodGroup(cpg),
 	}
 }
 

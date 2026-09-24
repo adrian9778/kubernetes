@@ -21,11 +21,14 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/blang/semver/v4"
 	"github.com/onsi/gomega"
+	"github.com/onsi/gomega/format"
 	"github.com/onsi/gomega/gstruct"
 	"github.com/onsi/gomega/types"
 
@@ -51,7 +54,6 @@ type DeviceClassLister = internal.DeviceClassLister
 type Features = internal.Features
 type DeviceID = internal.DeviceID
 
-type SharedDeviceID = internal.SharedDeviceID
 type ConsumedCapacityCollection = internal.ConsumedCapacityCollection
 type ConsumedCapacity = internal.ConsumedCapacity
 type AllocatedState = internal.AllocatedState
@@ -98,8 +100,13 @@ const (
 	device4     = "device-4"
 	counterSet1 = "counter-set-1"
 	counterSet2 = "counter-set-2"
-	capacity0   = "capacity-0"
-	capacity1   = "capacity-1"
+	counter0    = "counter0"
+	counter1    = "counter1"
+	capacity0   = resourceapi.QualifiedName(driverA + "/capacity-0") // TODO (https://github.com/kubernetes/kubernetes/issues/140650): FullyQualifiedName
+	capacity1   = resourceapi.QualifiedName(driverA + "/capacity-1") // TODO (https://github.com/kubernetes/kubernetes/issues/140650): FullyQualifiedName
+	// TODO: when converting to FullyQualifiedName, add test cases where the ResourceSlice legitimately uses these unqualified names:
+	unqualifiedCapacity0 = resourceapi.QualifiedName("capacity-0")
+	unqualifiedCapacity1 = resourceapi.QualifiedName("capacity-1")
 )
 
 var (
@@ -295,9 +302,10 @@ func (in wrapDeviceRequest) obj() resourceapi.DeviceRequest {
 	return in.DeviceRequest
 }
 
-func (in wrapDeviceRequest) withCapacityRequest(quantity *resource.Quantity) wrapDeviceRequest {
+// TODO (https://github.com/kubernetes/kubernetes/issues/140650): should be a fully qualified name
+func (in wrapDeviceRequest) withCapacityRequest(name resourceapi.QualifiedName, quantity resource.Quantity) wrapDeviceRequest {
 	out := in.DeepCopy()
-	out.Exactly.Capacity = capacityRequests(quantity)
+	addCapacityRequest(&out.Exactly.Capacity, name, quantity)
 	return wrapDeviceRequest{*out}
 }
 
@@ -319,10 +327,21 @@ func (in wrapDeviceSubRequest) withAllocationMode(mode resourceapi.DeviceAllocat
 	return wrapDeviceSubRequest{*out}
 }
 
-func (in wrapDeviceSubRequest) withCapacityRequest(quantity *resource.Quantity) wrapDeviceSubRequest {
+// TODO (https://github.com/kubernetes/kubernetes/issues/140650): should be a fully qualified name
+func (in wrapDeviceSubRequest) withCapacityRequest(name resourceapi.QualifiedName, quantity resource.Quantity) wrapDeviceSubRequest {
 	out := in.DeepCopy()
-	out.Capacity = capacityRequests(quantity)
+	addCapacityRequest(&out.Capacity, name, quantity)
 	return wrapDeviceSubRequest{*out}
+}
+
+func addCapacityRequest(capacity **resourceapi.CapacityRequirements, name resourceapi.QualifiedName, quantity resource.Quantity) {
+	if *capacity == nil {
+		*capacity = &resourceapi.CapacityRequirements{}
+	}
+	if (*capacity).Requests == nil {
+		(*capacity).Requests = make(map[resourceapi.QualifiedName]resource.Quantity)
+	}
+	(*capacity).Requests[name] = quantity
 }
 
 // genereate a DeviceRequest with the given name and list of prioritized requests.
@@ -406,76 +425,100 @@ func deviceClaimConfig(requests []string, deviceConfig resourceapi.DeviceConfigu
 	}
 }
 
-const (
-	fromCounters = "fromCounters"
-)
-
-// generate a Device object with the given name, capacity and attributes.
-func device(name string, capacity any, attributes map[resourceapi.QualifiedName]resourceapi.DeviceAttribute) wrapDevice {
+// generate a Device object with the given name.
+func device(name string) wrapDevice {
 	device := resourceapi.Device{
-		Name:       name,
-		Attributes: attributes,
+		Name: name,
 	}
-
-	var capacityFromCounters bool
-	switch capacity := capacity.(type) {
-	case map[resourceapi.QualifiedName]resource.Quantity:
-		device.Capacity = toDeviceCapacity(capacity)
-	case map[resourceapi.QualifiedName]resourceapi.DeviceCapacity:
-		device.Capacity = capacity
-	case string:
-		if capacity == fromCounters {
-			capacityFromCounters = true
-		} else {
-			panic(fmt.Sprintf("unexpected capacity value %q", capacity))
-		}
-	case nil:
-		// nothing to do
-	default:
-		panic(fmt.Sprintf("unexpected capacity type %T: %+v", capacity, capacity))
-	}
-
-	return wrapDevice{Device: device, capacityFromCounters: capacityFromCounters}
+	return wrapDevice{Device: device}
 }
 
 type wrapDevice struct {
 	resourceapi.Device
-	capacityFromCounters bool
 }
 
 func (in wrapDevice) obj() resourceapi.Device {
 	return in.Device
 }
 
+// withAttribute adds or overwrites an attribute.
+// The value can be an int, int64, string, bool, semver, or a list of those.
+// A DeviceAttribute can be passed to create an invalid empty value.
+func (in wrapDevice) withAttribute(name resourceapi.QualifiedName, value any) wrapDevice {
+	device := in.Device.DeepCopy()
+	if device.Attributes == nil {
+		device.Attributes = make(map[resourceapi.QualifiedName]resourceapi.DeviceAttribute)
+	}
+	var attr resourceapi.DeviceAttribute
+	switch value := value.(type) {
+	case int:
+		attr.IntValue = new(int64(value))
+	case int64:
+		attr.IntValue = new(value)
+	case string:
+		attr.StringValue = new(value)
+	case bool:
+		attr.BoolValue = new(value)
+	case semver.Version:
+		attr.VersionValue = new(value.String())
+	case []int:
+		for _, value := range value {
+			attr.IntValues = append(attr.IntValues, int64(value))
+		}
+	case []int64:
+		attr.IntValues = slices.Clone(value)
+	case []string:
+		attr.StringValues = slices.Clone(value)
+	case []bool:
+		attr.BoolValues = slices.Clone(value)
+	case []semver.Version:
+		for _, value := range value {
+			attr.VersionValues = append(attr.VersionValues, value.String())
+		}
+	case resourceapi.DeviceAttribute:
+		attr = value
+	default:
+		panic(fmt.Sprintf("unexpected attribute %q value %T: %+v", name, value, value))
+	}
+	device.Attributes[name] = attr
+	return wrapDevice{Device: *device}
+}
+
+// withCapacity adds or overwrites a capacity.
+// The value can be a quantity, string (gets parsed as quantity).
+// A DeviceCapacity can be passed to create an invalid empty value.
+func (in wrapDevice) withCapacity(name resourceapi.QualifiedName, value any) wrapDevice {
+	device := in.Device.DeepCopy()
+	if device.Capacity == nil {
+		device.Capacity = make(map[resourceapi.QualifiedName]resourceapi.DeviceCapacity)
+	}
+	switch value := value.(type) {
+	case resource.Quantity:
+		device.Capacity[name] = resourceapi.DeviceCapacity{Value: value}
+	case resourceapi.DeviceCapacity:
+		device.Capacity[name] = value
+	case string:
+		device.Capacity[name] = resourceapi.DeviceCapacity{Value: resource.MustParse(value)}
+	default:
+		panic(fmt.Sprintf("unexpected capacity %q value %T: %+v", name, value, value))
+	}
+	return wrapDevice{Device: *device}
+}
+
 func (in wrapDevice) withTaints(taints ...resourceapi.DeviceTaint) wrapDevice {
-	inDevice := resourceapi.Device(in.Device)
-	device := inDevice.DeepCopy()
+	device := in.Device.DeepCopy()
 	device.Taints = append(device.Taints, taints...)
 	return wrapDevice{Device: *device}
 }
 
 func (in wrapDevice) withDeviceCounterConsumption(deviceCounterConsumption ...resourceapi.DeviceCounterConsumption) wrapDevice {
-	inDevice := in.Device
-	device := inDevice.DeepCopy()
+	device := in.Device.DeepCopy()
 	device.ConsumesCounters = append(device.ConsumesCounters, deviceCounterConsumption...)
-	if in.capacityFromCounters {
-		c := make(map[resourceapi.QualifiedName]resourceapi.DeviceCapacity)
-		for _, dcc := range device.ConsumesCounters {
-			for name, cap := range dcc.Counters {
-				ccap := resourceapi.DeviceCapacity{
-					Value: cap.Value,
-				}
-				c[resourceapi.QualifiedName(name)] = ccap
-			}
-		}
-		device.Capacity = c
-	}
 	return wrapDevice{Device: *device}
 }
 
 func (in wrapDevice) withNodeSelection(nodeSelection any) wrapDevice {
-	inDevice := in.Device
-	device := inDevice.DeepCopy()
+	device := in.Device.DeepCopy()
 	switch nodeSelection := nodeSelection.(type) {
 	case *v1.NodeSelector:
 		device.NodeSelector = nodeSelection
@@ -497,31 +540,27 @@ func (in wrapDevice) withNodeSelection(nodeSelection any) wrapDevice {
 }
 
 func (in wrapDevice) withBindingConditions(bindingConditions, bindingFailureConditions []string) wrapDevice {
-	inDevice := in.Device
-	device := inDevice.DeepCopy()
+	device := in.Device.DeepCopy()
 	device.BindingConditions = bindingConditions
 	device.BindingFailureConditions = bindingFailureConditions
 	return wrapDevice{Device: *device}
 }
 
 func (in wrapDevice) withBindsToNode(bindsToNode bool) wrapDevice {
-	inDevice := in.Device
-	device := inDevice.DeepCopy()
+	device := in.Device.DeepCopy()
 	device.BindsToNode = ptr.To(bindsToNode)
 	return wrapDevice{Device: *device}
 }
 
 func (in wrapDevice) withAllowMultipleAllocations() wrapDevice {
-	inDevice := in.Device
-	device := inDevice.DeepCopy()
+	device := in.Device.DeepCopy()
 	device.AllowMultipleAllocations = ptr.To(true)
 	return wrapDevice{Device: *device}
 }
 
 // withCapacityRequestPolicyRange adds capacity with default requestPolicy (2,2,4)
 func (in wrapDevice) withCapacityRequestPolicyRange(capacity map[resourceapi.QualifiedName]resource.Quantity) wrapDevice {
-	inDevice := in.Device
-	device := inDevice.DeepCopy()
+	device := in.Device.DeepCopy()
 	if device.Capacity == nil {
 		device.Capacity = make(map[resourceapi.QualifiedName]resourceapi.DeviceCapacity, len(capacity))
 	}
@@ -544,8 +583,7 @@ func (in wrapDevice) withCapacityRequestPolicyRange(capacity map[resourceapi.Qua
 // withFractionalCapacityRequestPolicyRange adds capacity with a fractional requestPolicy
 // (min=200m, step=100m, max=1, default=200m).
 func (in wrapDevice) withFractionalCapacityRequestPolicyRange(capacity map[resourceapi.QualifiedName]resource.Quantity) wrapDevice {
-	inDevice := in.Device
-	device := inDevice.DeepCopy()
+	device := in.Device.DeepCopy()
 	if device.Capacity == nil {
 		device.Capacity = make(map[resourceapi.QualifiedName]resourceapi.DeviceCapacity, len(capacity))
 	}
@@ -567,8 +605,7 @@ func (in wrapDevice) withFractionalCapacityRequestPolicyRange(capacity map[resou
 
 // withCapacityRequestPolicyValidValues adds capacity with default valid values (1)
 func (in wrapDevice) withCapacityRequestPolicyValidValues(defaultValue resource.Quantity, capacity map[resourceapi.QualifiedName]resource.Quantity, additionalValidValues []resource.Quantity) wrapDevice {
-	inDevice := in.Device
-	device := inDevice.DeepCopy()
+	device := in.Device.DeepCopy()
 	if device.Capacity == nil {
 		device.Capacity = make(map[resourceapi.QualifiedName]resourceapi.DeviceCapacity, len(capacity))
 	}
@@ -749,20 +786,6 @@ func (in wrapDeviceRequestAllocationResult) withConsumedCapacity(shareID *apityp
 	return *out
 }
 
-func capacityRequests(request *resource.Quantity) *resourceapi.CapacityRequirements {
-	return &resourceapi.CapacityRequirements{
-		Requests: requirements(request),
-	}
-}
-
-func requirements(request *resource.Quantity) map[resourceapi.QualifiedName]resource.Quantity {
-	r := make(map[resourceapi.QualifiedName]resource.Quantity, 0)
-	if request != nil {
-		r[capacity0] = *request
-	}
-	return r
-}
-
 func multipleDeviceAllocationResults(request, driver, pool string, count, startIndex int) []resourceapi.DeviceRequestAllocationResult {
 	var results []resourceapi.DeviceRequestAllocationResult
 	for i := startIndex; i < startIndex+count; i++ {
@@ -908,14 +931,14 @@ func sliceWithNoDevices(name string, nodeSelection, pool any, driver string) wra
 
 // generate a ResourceSlice object with the given parameters and one device "device-1"
 func sliceWithOneDevice(name string, nodeSelection, pool any, driver string) wrapResourceSliceWithDevices {
-	return sliceWithDevices(name, nodeSelection, pool, driver, device(device1, nil, nil))
+	return sliceWithDevices(name, nodeSelection, pool, driver, device(device1))
 }
 
 // generate a ResourceSclie object with the given parameters and the specified number of devices.
 func sliceWithMultipleDevices(name string, nodeSelection, pool any, driver string, count int) wrapResourceSliceWithDevices {
 	var devices []wrapDevice
 	for i := 0; i < count; i++ {
-		devices = append(devices, device(fmt.Sprintf("device-%d", i), nil, nil))
+		devices = append(devices, device(fmt.Sprintf("device-%d", i)))
 	}
 	return sliceWithDevices(name, nodeSelection, pool, driver, devices...)
 }
@@ -927,18 +950,10 @@ func counterSet(name string, counters map[string]resource.Quantity) resourceapi.
 	}
 }
 
-func toDeviceCapacity(capacity map[resourceapi.QualifiedName]resource.Quantity) map[resourceapi.QualifiedName]resourceapi.DeviceCapacity {
-	out := make(map[resourceapi.QualifiedName]resourceapi.DeviceCapacity, len(capacity))
-	for name, quantity := range capacity {
-		out[name] = resourceapi.DeviceCapacity{Value: quantity}
-	}
-	return out
-}
-
 func toCounters(counters map[string]resource.Quantity) map[string]resourceapi.Counter {
 	out := make(map[string]resourceapi.Counter, len(counters))
 	for name, quantity := range counters {
-		out[string(name)] = resourceapi.Counter{Value: quantity}
+		out[name] = resourceapi.Counter{Value: quantity}
 	}
 	return out
 }
@@ -962,7 +977,7 @@ type AllocatorTestCase struct {
 	features                 Features
 	claimsToAllocate         []wrapResourceClaim
 	allocatedDevices         []DeviceID
-	allocatedSharedDeviceIDs sets.Set[SharedDeviceID]
+	allocatedSharedDeviceIDs sets.Set[DeviceID]
 	allocatedCapacityDevices ConsumedCapacityCollection
 	classes                  []*resourceapi.DeviceClass
 	slices                   []*resourceapi.ResourceSlice
@@ -970,9 +985,10 @@ type AllocatorTestCase struct {
 
 	expectResults []any
 	expectError   types.GomegaMatcher // can be used to check for no error or match specific error
+	expectErrorIs error               // optional error to check with errors.Is
 
-	// Test case setting expectNumAllocateOneInvocations do not run against the "stable" variant of the allocator,
-	// which doesn't provide the stats and also falls over with excessive runtime for them.
+	// Expected allocateOne invocations, asserted for every variant. A variant
+	// that searches differently overrides this through the map below.
 	expectNumAllocateOneInvocations int64
 
 	// expectNumAllocateOneInvocationsByChannel overrides expectNumAllocateOneInvocations with
@@ -1057,15 +1073,15 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: two}, "mig"),
+					device(device1).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: two}, "mig"),
 					),
-					device(device2, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: two}, "mig"),
+					device(device2).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: two}, "mig"),
 					),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
-					counterSet(counterSet1, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet1, map[string]resource.Quantity{counter0: four}),
 				),
 			),
 			node: node(node1, region1),
@@ -1086,15 +1102,15 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: two}, "mig"),
+					device(device1).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: two}, "mig"),
 					),
-					device(device2, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: two}, "vgpu"),
+					device(device2).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: two}, "vgpu"),
 					),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
-					counterSet(counterSet1, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet1, map[string]resource.Quantity{counter0: four}),
 				),
 			),
 			node:          node(node1, region1),
@@ -1113,15 +1129,15 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withTaints(taintNoSchedule).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: two}, "mig"),
+					device(device1).withTaints(taintNoSchedule).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: two}, "mig"),
 					),
-					device(device2, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: two}, "vgpu"),
+					device(device2).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: two}, "vgpu"),
 					),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
-					counterSet(counterSet1, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet1, map[string]resource.Quantity{counter0: four}),
 				),
 			),
 			node: node(node1, region1),
@@ -1140,15 +1156,15 @@ func TestAllocator(t *testing.T,
 			classes:          objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "mig"),
+					device(device1).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "mig"),
 					),
-					device(device2, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "vgpu"),
+					device(device2).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "vgpu"),
 					),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
-					counterSet(counterSet1, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet1, map[string]resource.Quantity{counter0: four}),
 				),
 			),
 			node:          node(node1, region1),
@@ -1163,15 +1179,15 @@ func TestAllocator(t *testing.T,
 			classes:          objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "mig"),
+					device(device1).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "mig"),
 					),
-					device(device2, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "mig"),
+					device(device2).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "mig"),
 					),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
-					counterSet(counterSet1, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet1, map[string]resource.Quantity{counter0: four}),
 				),
 			),
 			node: node(node1, region1),
@@ -1199,20 +1215,20 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: two}, "mig"),
+					device(device1).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: two}, "mig"),
 					),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
-					counterSet(counterSet1, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet1, map[string]resource.Quantity{counter0: four}),
 				),
 				sliceWithDevices(slice3, node1, resourcePool(pool2, 2), driverA,
-					device(device2, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet2, map[string]resource.Quantity{capacity0: two}),
+					device(device2).withDeviceCounterConsumption(
+						deviceCounterConsumption(counterSet2, map[string]resource.Quantity{counter0: two}),
 					),
 				),
 				sliceWithCounterSets(slice4, node1, resourcePool(pool2, 2), driverA,
-					counterSet(counterSet2, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet2, map[string]resource.Quantity{counter0: four}),
 				),
 			),
 			node: node(node1, region1),
@@ -1234,17 +1250,17 @@ func TestAllocator(t *testing.T,
 			classes:          objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 3), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "mig"),
+					device(device1).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "mig"),
 					),
 				),
 				sliceWithDevices(slice2, node1, resourcePool(pool1, 3), driverA,
-					device(device2, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{capacity0: one}),
+					device(device2).withDeviceCounterConsumption(
+						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{counter0: one}),
 					),
 				),
 				sliceWithCounterSets(slice3, node1, resourcePool(pool1, 3), driverA,
-					counterSet(counterSet1, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet1, map[string]resource.Quantity{counter0: four}),
 				),
 			),
 			node:          node(node1, region1),
@@ -1262,16 +1278,16 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: two}, "mig"),
+					device(device1).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: two}, "mig"),
 					),
-					device(device2, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet2, map[string]resource.Quantity{capacity0: two}, "vgpu"),
+					device(device2).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet2, map[string]resource.Quantity{counter0: two}, "vgpu"),
 					),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
-					counterSet(counterSet1, map[string]resource.Quantity{capacity0: four}),
-					counterSet(counterSet2, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet1, map[string]resource.Quantity{counter0: four}),
+					counterSet(counterSet2, map[string]resource.Quantity{counter0: four}),
 				),
 			),
 			node: node(node1, region1),
@@ -1296,17 +1312,17 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "mig"),
+					device(device1).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "mig"),
 					),
-					device(device2, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "vgpu"),
-						deviceCounterConsumptionWithGroups(counterSet2, map[string]resource.Quantity{capacity0: one}, "vgpu"),
+					device(device2).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "vgpu"),
+						deviceCounterConsumptionWithGroups(counterSet2, map[string]resource.Quantity{counter0: one}, "vgpu"),
 					),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
-					counterSet(counterSet1, map[string]resource.Quantity{capacity0: four}),
-					counterSet(counterSet2, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet1, map[string]resource.Quantity{counter0: four}),
+					counterSet(counterSet2, map[string]resource.Quantity{counter0: four}),
 				),
 			),
 			node:          node(node1, region1),
@@ -1328,18 +1344,18 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "mig"),
+					device(device1).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "mig"),
 					),
-					device(device2, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "mig"),
+					device(device2).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "mig"),
 					),
-					device(device3, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "vgpu"),
+					device(device3).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "vgpu"),
 					),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
-					counterSet(counterSet1, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet1, map[string]resource.Quantity{counter0: four}),
 				),
 			),
 			node: node(node1, region1),
@@ -1356,31 +1372,33 @@ func TestAllocator(t *testing.T,
 		"compatibility-groups-with-consumable-capacity": {
 			features: Features{PartitionableDevices: true, CompatibilityGroups: true, ConsumableCapacity: true},
 			claimsToAllocate: objects(claim(claim0).withRequests(
-				deviceRequest(req0, classA, 1).withCapacityRequest(new(one)),
-				deviceRequest(req1, classA, 1).withCapacityRequest(new(one)),
+				deviceRequest(req0, classA, 1).withCapacityRequest(unqualifiedCapacity0, one),
+				deviceRequest(req1, classA, 1).withCapacityRequest(unqualifiedCapacity0, one),
 			)),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "mig"),
+					device(device1).withCapacity(unqualifiedCapacity0, "1").withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "mig"),
 					).withAllowMultipleAllocations(),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "vgpu"),
+					device(device2).withCapacity(unqualifiedCapacity0, "1").withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "vgpu"),
 					).withAllowMultipleAllocations(),
-					device(device3, fromCounters, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "mig"),
+					device(device3).withCapacity(unqualifiedCapacity0, "1").withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "mig"),
 					).withAllowMultipleAllocations(),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
-					counterSet(counterSet1, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet1, map[string]resource.Quantity{counter0: four}),
 				),
 			),
 			node: node(node1, region1),
 			expectResults: []any{allocationResult(
 				localNodeSelector(node1),
-				deviceRequestAllocationResult(req0, driverA, pool1, device1).withConsumedCapacity(&fixedShareID, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}),
-				deviceRequestAllocationResult(req1, driverA, pool1, device3).withConsumedCapacity(&fixedShareID, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}),
+				// TODO (https://github.com/kubernetes/kubernetes/issues/140650): unqualified is
+				// what the *current* code writes. This might change, but has to be handled carefully.
+				deviceRequestAllocationResult(req0, driverA, pool1, device1).withConsumedCapacity(&fixedShareID, map[resourceapi.QualifiedName]resource.Quantity{unqualifiedCapacity0: one}),
+				deviceRequestAllocationResult(req1, driverA, pool1, device3).withConsumedCapacity(&fixedShareID, map[resourceapi.QualifiedName]resource.Quantity{unqualifiedCapacity0: one}),
 			)},
 		},
 		// Two claims allocated in a single call must satisfy the constraint
@@ -1395,15 +1413,15 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "mig"),
+					device(device1).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "mig"),
 					),
-					device(device2, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "mig"),
+					device(device2).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "mig"),
 					),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
-					counterSet(counterSet1, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet1, map[string]resource.Quantity{counter0: four}),
 				),
 			),
 			node: node(node1, region1),
@@ -1426,15 +1444,15 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "mig"),
+					device(device1).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "mig"),
 					),
-					device(device2, nil, nil).withDeviceCounterConsumption(
-						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{capacity0: one}, "vgpu"),
+					device(device2).withDeviceCounterConsumption(
+						deviceCounterConsumptionWithGroups(counterSet1, map[string]resource.Quantity{counter0: one}, "vgpu"),
 					),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
-					counterSet(counterSet1, map[string]resource.Quantity{capacity0: four}),
+					counterSet(counterSet1, map[string]resource.Quantity{counter0: four}),
 				),
 			),
 			node:          node(node1, region1),
@@ -1501,12 +1519,8 @@ func TestAllocator(t *testing.T,
 			)),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, map[resourceapi.QualifiedName]resource.Quantity{
-					"memory": resource.MustParse("1Gi"),
-				}, nil),
-				device(device2, map[resourceapi.QualifiedName]resource.Quantity{
-					"memory": resource.MustParse("2Gi"),
-				}, nil),
+				device(device1).withCapacity("memory", "1Gi"),
+				device(device2).withCapacity("memory", "2Gi"),
 			)),
 			node: node(node1, region1),
 
@@ -1534,12 +1548,8 @@ func TestAllocator(t *testing.T,
 			// be allocated for the "small" request, leaving the "large" request unsatisfied.
 			// The initial decision needs to be undone before a solution is found.
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device2, map[resourceapi.QualifiedName]resource.Quantity{
-					"memory": resource.MustParse("2Gi"),
-				}, nil),
-				device(device1, map[resourceapi.QualifiedName]resource.Quantity{
-					"memory": resource.MustParse("1Gi"),
-				}, nil),
+				device(device2).withCapacity("memory", "2Gi"),
+				device(device1).withCapacity("memory", "1Gi"),
 			)),
 			node: node(node1, region1),
 
@@ -1571,12 +1581,8 @@ func TestAllocator(t *testing.T,
 			// be allocated for the "small" request, leaving the "large" request unsatisfied.
 			// The initial decision needs to be undone before a solution is found.
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device2, map[resourceapi.QualifiedName]resource.Quantity{
-					"memory": resource.MustParse("2Gi"),
-				}, nil),
-				device(device1, map[resourceapi.QualifiedName]resource.Quantity{
-					"memory": resource.MustParse("1Gi"),
-				}, nil),
+				device(device2).withCapacity("memory", "2Gi"),
+				device(device1).withCapacity("memory", "1Gi"),
 			)),
 			node: node(node1, region1),
 
@@ -1612,11 +1618,11 @@ func TestAllocator(t *testing.T,
 			classes:          objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices("slice-1-obsolete", node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil),
+					device(device1),
 				),
 				func() wrapResourceSliceWithDevices {
 					slice := sliceWithDevices("slice-1-obsolete", node1, resourcePool(pool1, 2), driverA,
-						device(device2, nil, nil),
+						device(device2),
 					)
 					// This makes the other slice obsolete.
 					slice.Spec.Pool.Generation++
@@ -1718,6 +1724,36 @@ func TestAllocator(t *testing.T,
 				deviceAllocationResult(req0, driverA, pool1, device1, false),
 			)},
 		},
+		"all-devices-of-invalid-pool": {
+			claimsToAllocate: objects(claimWithRequests(claim0, nil, resourceapi.DeviceRequest{
+				Name: req0,
+				Exactly: &resourceapi.ExactDeviceRequest{
+					AllocationMode:  resourceapi.DeviceAllocationModeAll,
+					DeviceClassName: classA,
+				},
+			})),
+			classes: objects(class(classA, driverA)),
+			slices: func() []*resourceapi.ResourceSlice {
+				// This simulates the problem that can
+				// (theoretically) occur when the resource
+				// slice controller wants to publish a pool
+				// with two slices but ends up creating some
+				// identical slices under different names
+				// because its informer cache was out-dated on
+				// another sync (see
+				// resourceslicecontroller.go).
+				sliceA := sliceWithOneDevice(slice1, node1, pool1, driverA).obj()
+				sliceA.Spec.Pool.ResourceSliceCount = 2
+				sliceB := sliceA.DeepCopy()
+				sliceB.Name += "-2"
+				return []*resourceapi.ResourceSlice{sliceA, sliceB}
+			}(),
+			node: node(node1, region1),
+
+			expectResults: nil,
+			expectError:   gomega.MatchError(gomega.ContainSubstring("claim claim-0, request req-0: asks for all devices, but resource pool driver-a/pool-1 is currently invalid")),
+			expectErrorIs: internal.ErrFailedAllocationOnNode,
+		},
 		"all-devices-with-consumed-counters": {
 			features: Features{
 				PartitionableDevices: true,
@@ -1732,7 +1768,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -1798,6 +1834,7 @@ func TestAllocator(t *testing.T,
 
 			expectResults: nil,
 			expectError:   gomega.MatchError(gomega.ContainSubstring("claim claim-0, request req-0: asks for all devices, but resource pool driver-a/pool-1 is currently being updated")),
+			expectErrorIs: internal.ErrFailedAllocationOnNode,
 		},
 		"all-devices-plus-another": {
 			claimsToAllocate: objects(
@@ -1901,8 +1938,8 @@ func TestAllocator(t *testing.T,
 			),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil),
-					device(device2, nil, nil),
+					device(device1),
+					device(device2),
 				),
 				sliceWithOneDevice(slice1, node1, pool1, driverB),
 			),
@@ -1944,8 +1981,8 @@ func TestAllocator(t *testing.T,
 			),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil),
-					device(device2, nil, nil),
+					device(device1),
+					device(device2),
 				),
 				sliceWithOneDevice(slice1, node1, pool1, driverB),
 			),
@@ -2056,7 +2093,7 @@ func TestAllocator(t *testing.T,
 			},
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
-				sliceWithDevices(slice1, node1, pool1, driverA, device(device1, nil, nil), device(device2, nil, nil)),
+				sliceWithDevices(slice1, node1, pool1, driverA, device(device1), device(device2)),
 			),
 			node:          node(node1, region1),
 			expectResults: nil,
@@ -2076,7 +2113,7 @@ func TestAllocator(t *testing.T,
 			},
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
-				sliceWithDevices(slice1, node1, pool1, driverA, device(device1, nil, nil), device(device2, nil, nil)),
+				sliceWithDevices(slice1, node1, pool1, driverA, device(device1), device(device2)),
 			),
 			node: node(node1, region1),
 			expectResults: []any{allocationResult(
@@ -2100,7 +2137,7 @@ func TestAllocator(t *testing.T,
 			}(),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
-				sliceWithDevices(slice1, node1, pool1, driverA, device(device1, nil, nil), device(device2, nil, nil)),
+				sliceWithDevices(slice1, node1, pool1, driverA, device(device1), device(device2)),
 			),
 			node:          node(node1, region1),
 			expectResults: nil,
@@ -2121,7 +2158,7 @@ func TestAllocator(t *testing.T,
 			},
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
-				sliceWithDevices(slice1, node1, pool1, driverA, device(device1, nil, nil), device(device2, nil, nil)),
+				sliceWithDevices(slice1, node1, pool1, driverA, device(device1), device(device2)),
 			),
 			node: node(node1, region1),
 			expectResults: []any{allocationResult(
@@ -2144,7 +2181,7 @@ func TestAllocator(t *testing.T,
 			}(),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
-				sliceWithDevices(slice1, node1, pool1, driverA, device(device1, nil, nil), device(device2, nil, nil)),
+				sliceWithDevices(slice1, node1, pool1, driverA, device(device1), device(device2)),
 			),
 			node: node(node1, region1),
 			expectResults: []any{
@@ -2169,7 +2206,7 @@ func TestAllocator(t *testing.T,
 			}(),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
-				sliceWithDevices(slice1, node1, pool1, driverA, device(device1, nil, nil), device(device2, nil, nil)),
+				sliceWithDevices(slice1, node1, pool1, driverA, device(device1), device(device2)),
 			),
 			node: node(node1, region1),
 			expectResults: []any{
@@ -2260,7 +2297,7 @@ func TestAllocator(t *testing.T,
 			},
 			classes: objects(class(classA, driverA), class(classB, driverB)),
 			slices: unwrapResourceSlices(
-				sliceWithDevices(slice1, node1, pool1, driverA, device(device1, nil, nil), device(device2, nil, nil)),
+				sliceWithDevices(slice1, node1, pool1, driverA, device(device1), device(device2)),
 				sliceWithOneDevice(slice2, node1, pool2, driverB),
 			),
 			node: node(node1, region1),
@@ -2340,8 +2377,8 @@ func TestAllocator(t *testing.T,
 			classes:          objects(class(classA, driverA), class(classB, driverB)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil),
-					device(device2, nil, nil),
+					device(device1),
+					device(device2),
 				),
 				sliceWithOneDevice(slice1, node1, pool1, driverB),
 			),
@@ -2416,18 +2453,16 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion":   {VersionValue: ptr.To("1.0.0")},
-					"numa":            {IntValue: ptr.To(int64(1))},
-					"stringAttribute": {StringValue: ptr.To("stringAttributeValue")},
-					"boolAttribute":   {BoolValue: ptr.To(true)},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion":   {VersionValue: ptr.To("1.0.0")},
-					"numa":            {IntValue: ptr.To(int64(1))},
-					"stringAttribute": {StringValue: ptr.To("stringAttributeValue")},
-					"boolAttribute":   {BoolValue: ptr.To(true)},
-				}),
+				device(device1).
+					withAttribute("driverVersion", semver.MustParse("1.0.0")).
+					withAttribute("numa", 1).
+					withAttribute("stringAttribute", "stringAttributeValue").
+					withAttribute("boolAttribute", true),
+				device(device2).
+					withAttribute("driverVersion", semver.MustParse("1.0.0")).
+					withAttribute("numa", 1).
+					withAttribute("stringAttribute", "stringAttributeValue").
+					withAttribute("boolAttribute", true),
 			)),
 			node: node(node1, region1),
 
@@ -2455,12 +2490,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA), class(classB, driverB)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"numa": {IntValue: ptr.To(int64(1))},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"numa": {IntValue: ptr.To(int64(2))},
-				}),
+				device(device1).withAttribute("numa", 1),
+				device(device2).withAttribute("numa", 2),
 			)),
 			node: node(node1, region1),
 
@@ -2480,12 +2511,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA), class(classB, driverB)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"numa": {IntValue: ptr.To(int64(1))},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"numa": {IntValue: ptr.To(int64(2))},
-				}),
+				device(device1).withAttribute("numa", 1),
+				device(device2).withAttribute("numa", 2),
 			)),
 			node: node(node1, region1),
 
@@ -2517,17 +2544,16 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numa": {IntValue: new(int64(1))},
-					}),
+					device(device1).
+						withAttribute("numa", 1),
 					// device2 mismatches the constraint and consumes the single
 					// counter, so it reserves the counter first and then fails the
 					// constraint, reaching the must-error path with state to undo.
-					device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numa": {IntValue: new(int64(2))},
-					}).withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
-					),
+					device(device2).
+						withAttribute("numa", 2).
+						withDeviceCounterConsumption(
+							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
+						),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
 					counterSet(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
@@ -2544,12 +2570,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA), class(classB, driverB)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: ptr.To("stringAttributeValue")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: ptr.To("stringAttributeValue2")},
-				}),
+				device(device1).withAttribute("stringAttribute", "stringAttributeValue"),
+				device(device2).withAttribute("stringAttribute", "stringAttributeValue2"),
 			)),
 			node: node(node1, region1),
 
@@ -2563,12 +2585,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA), class(classB, driverB)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"boolAttribute": {BoolValue: ptr.To(true)},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"boolAttribute": {BoolValue: ptr.To(false)},
-				}),
+				device(device1).withAttribute("boolAttribute", true),
+				device(device2).withAttribute("boolAttribute", false),
 			)),
 			node: node(node1, region1),
 
@@ -2582,12 +2600,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA), class(classB, driverB)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion": {VersionValue: ptr.To("1.0.0")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion": {VersionValue: ptr.To("2.0.0")},
-				}),
+				device(device1).withAttribute("driverVersion", semver.MustParse("1.0.0")),
+				device(device2).withAttribute("driverVersion", semver.MustParse("2.0.0")),
 			)),
 			node: node(node1, region1),
 
@@ -2607,12 +2621,8 @@ func TestAllocator(t *testing.T,
 			)),
 			classes: objects(class(classA, driverA), class(classB, driverB)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion": {VersionValue: ptr.To("1.0.0")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion": {VersionValue: ptr.To("2.0.0")},
-				}),
+				device(device1).withAttribute("driverVersion", semver.MustParse("1.0.0")),
+				device(device2).withAttribute("driverVersion", semver.MustParse("2.0.0")),
 			)),
 			node: node(node1, region1),
 
@@ -2642,18 +2652,15 @@ func TestAllocator(t *testing.T,
 				// This device does not satisfy the second
 				// match attribute, so the allocator must
 				// backtrack.
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion":   {VersionValue: ptr.To("1.0.0")},
-					"stringAttribute": {StringValue: ptr.To("a")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion":   {VersionValue: ptr.To("2.0.0")},
-					"stringAttribute": {StringValue: ptr.To("b")},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion":   {VersionValue: ptr.To("3.0.0")},
-					"stringAttribute": {StringValue: ptr.To("b")},
-				}),
+				device(device1).
+					withAttribute("driverVersion", semver.MustParse("1.0.0")).
+					withAttribute("stringAttribute", "a"),
+				device(device2).
+					withAttribute("driverVersion", semver.MustParse("2.0.0")).
+					withAttribute("stringAttribute", "b"),
+				device(device3).
+					withAttribute("driverVersion", semver.MustParse("3.0.0")).
+					withAttribute("stringAttribute", "b"),
 			)),
 			node: node(node1, region1),
 
@@ -2887,6 +2894,60 @@ func TestAllocator(t *testing.T,
 
 			expectError: gomega.MatchError(gomega.ContainSubstring("exceeds the claim limit")),
 		},
+		// Two counts that are each representable but together overflow the native
+		// int accumulator to a negative value, rejected before the sum is formed.
+		// The value comes from math.MaxInt so it also triggers on 32-bit builds.
+		"exact-count-total-overflows-claim-limit": {
+			claimsToAllocate: objects(claim(claim0).withRequests(
+				deviceRequest(req0, classA, int64(math.MaxInt/2+1)),
+				deviceRequest(req1, classA, int64(math.MaxInt/2+1)),
+			)),
+			classes:     objects(class(classA, driverA)),
+			expectError: gomega.MatchError(gomega.ContainSubstring("exceeds the claim limit")),
+		},
+		// Four counts that would wrap a naive int accumulator back to zero rather
+		// than negative; each is rejected against remaining capacity before summing.
+		"exact-count-total-would-wrap-to-zero": {
+			claimsToAllocate: objects(claim(claim0).withRequests(
+				deviceRequest(req0, classA, int64(math.MaxInt/2+1)),
+				deviceRequest(req1, classA, int64(math.MaxInt/2+1)),
+				deviceRequest(req2, classA, int64(math.MaxInt/2+1)),
+				deviceRequest(req3, classA, int64(math.MaxInt/2+1)),
+			)),
+			classes:     objects(class(classA, driverA)),
+			expectError: gomega.MatchError(gomega.ContainSubstring("exceeds the claim limit")),
+		},
+		// req0 fits on its own, so the rejection has to name req1 as the one
+		// that pushes the claim over.
+		"exact-count-sum-exceeds-claim-limit": {
+			claimsToAllocate: objects(claim(claim0).withRequests(
+				deviceRequest(req0, classA, 20),
+				deviceRequest(req1, classA, 20),
+			)),
+			classes: objects(class(classA, driverA)),
+			expectError: gomega.MatchError(gomega.And(
+				gomega.ContainSubstring("request "+req1),
+				gomega.ContainSubstring("exceeds the claim limit"),
+			)),
+		},
+		// Two counts whose sum exactly fills the per-claim limit both allocate;
+		// this pins the pre-flight comparison as > and not >=.
+		"exact-count-sum-exactly-fills-claim-limit": {
+			claimsToAllocate: objects(claim(claim0).withRequests(
+				deviceRequest(req0, classA, resourceapi.AllocationResultsMaxSize/2),
+				deviceRequest(req1, classA, resourceapi.AllocationResultsMaxSize/2),
+			)),
+			classes: objects(class(classA, driverA)),
+			slices:  unwrapResourceSlices(sliceWithMultipleDevices(slice1, node1, pool1, driverA, resourceapi.AllocationResultsMaxSize)),
+			node:    node(node1, region1),
+			expectResults: []any{allocationResult(
+				localNodeSelector(node1),
+				slices.Concat(
+					multipleDeviceAllocationResults(req0, driverA, pool1, resourceapi.AllocationResultsMaxSize/2, 0),
+					multipleDeviceAllocationResults(req1, driverA, pool1, resourceapi.AllocationResultsMaxSize/2, resourceapi.AllocationResultsMaxSize/2),
+				)...,
+			)},
+		},
 		"all-devices-invalid-CEL": {
 			claimsToAllocate: objects(claimWithRequests(claim0, nil, request(req0, classA, 500))),
 			classes:          objects(class(classA, driverA)),
@@ -2950,8 +3011,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA), class(classB, driverB)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverB,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{}),
+				device(device1),
+				device(device2),
 			)),
 			node: node(node1, region1),
 
@@ -2986,11 +3047,11 @@ func TestAllocator(t *testing.T,
 			),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverB,
-					device(device1, nil, nil),
-					device(device2, nil, nil),
+					device(device1),
+					device(device2),
 				),
 				sliceWithDevices(slice2, node1, pool2, driverA,
-					device(device3, nil, nil),
+					device(device3),
 				),
 			),
 			node: node(node1, region1),
@@ -3115,15 +3176,9 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, map[resourceapi.QualifiedName]resource.Quantity{
-					"memory": resource.MustParse("2Gi"),
-				}, nil),
-				device(device2, map[resourceapi.QualifiedName]resource.Quantity{
-					"memory": resource.MustParse("2Gi"),
-				}, nil),
-				device(device3, map[resourceapi.QualifiedName]resource.Quantity{
-					"memory": resource.MustParse("1Gi"),
-				}, nil),
+				device(device1).withCapacity("memory", "2Gi"),
+				device(device2).withCapacity("memory", "2Gi"),
+				device(device3).withCapacity("memory", "1Gi"),
 			)),
 			node: node(node1, region1),
 
@@ -3167,32 +3222,17 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1,
-						map[resourceapi.QualifiedName]resource.Quantity{
-							"memory": resource.MustParse("8Gi"),
-						},
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-							"driverVersion": {VersionValue: ptr.To("1.0.0")},
-						},
-					),
+					device(device1).
+						withCapacity("memory", "8Gi").
+						withAttribute("driverVersion", semver.MustParse("1.0.0")),
 				),
 				sliceWithDevices(slice2, node1, pool2, driverA,
-					device(device2,
-						map[resourceapi.QualifiedName]resource.Quantity{
-							"memory": resource.MustParse("2Gi"),
-						},
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-							"driverVersion": {VersionValue: ptr.To("2.0.0")},
-						},
-					),
-					device(device3,
-						map[resourceapi.QualifiedName]resource.Quantity{
-							"memory": resource.MustParse("1Gi"),
-						},
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-							"driverVersion": {VersionValue: ptr.To("1.0.0")},
-						},
-					),
+					device(device2).
+						withCapacity("memory", "2Gi").
+						withAttribute("driverVersion", semver.MustParse("2.0.0")),
+					device(device3).
+						withCapacity("memory", "1Gi").
+						withAttribute("driverVersion", semver.MustParse("1.0.0")),
 				),
 			),
 			node: node(node1, region1),
@@ -3236,24 +3276,14 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1,
-						map[resourceapi.QualifiedName]resource.Quantity{
-							"memory": resource.MustParse("8Gi"),
-						},
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-							"driverVersion": {VersionValue: ptr.To("1.0.0")},
-						},
-					),
+					device(device1).
+						withCapacity("memory", "8Gi").
+						withAttribute("driverVersion", semver.MustParse("1.0.0")),
 				),
 				sliceWithDevices(slice2, node1, pool2, driverA,
-					device(device2,
-						map[resourceapi.QualifiedName]resource.Quantity{
-							"memory": resource.MustParse("2Gi"),
-						},
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-							"driverVersion": {VersionValue: ptr.To("2.0.0")},
-						},
-					),
+					device(device2).
+						withCapacity("memory", "2Gi").
+						withAttribute("driverVersion", "2.0.0"),
 				),
 			),
 			node: node(node1, region1),
@@ -3284,8 +3314,8 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil),
-					device(device2, nil, nil),
+					device(device1),
+					device(device2),
 				),
 			),
 			allocatedDevices: []DeviceID{
@@ -3314,8 +3344,8 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil),
-					device(device2, nil, nil),
+					device(device1),
+					device(device2),
 				),
 			),
 			node: node(node1, region1),
@@ -3376,20 +3406,10 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1,
-						map[resourceapi.QualifiedName]resource.Quantity{
-							"memory": resource.MustParse("8Gi"),
-						},
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{},
-					),
+					device(device1).withCapacity("memory", "8Gi"),
 				),
 				sliceWithDevices(slice2, node1, pool2, driverA,
-					device(device2,
-						map[resourceapi.QualifiedName]resource.Quantity{
-							"memory": resource.MustParse("4Gi"),
-						},
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{},
-					),
+					device(device2).withCapacity("memory", "4Gi"),
 				),
 			),
 			node: node(node1, region1),
@@ -3428,20 +3448,10 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1,
-						map[resourceapi.QualifiedName]resource.Quantity{
-							"memory": resource.MustParse("8Gi"),
-						},
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{},
-					),
+					device(device1).withCapacity("memory", "8Gi"),
 				),
 				sliceWithDevices(slice2, node1, pool2, driverA,
-					device(device2,
-						map[resourceapi.QualifiedName]resource.Quantity{
-							"memory": resource.MustParse("4Gi"),
-						},
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{},
-					),
+					device(device2).withCapacity("memory", "4Gi"),
 				),
 			),
 			node: node(node1, region1),
@@ -3469,6 +3479,49 @@ func TestAllocator(t *testing.T,
 				deviceAllocationResult(req0SubReq1, driverA, pool1, device1, false),
 			)},
 		},
+		// A prioritized list is worth at least its smallest alternative, so the
+		// pre-flight check reads that. min(20, 24) leaves the claim over the
+		// limit before any device is looked at.
+		"prioritized-list-minimum-sum-exceeds-claim-limit": {
+			features: Features{PrioritizedList: true},
+			claimsToAllocate: objects(claim(claim0).withRequests(
+				deviceRequest(req0, classA, 20),
+				requestWithPrioritizedList(req1,
+					subRequest(subReq0, classA, 20),
+					subRequest(subReq1, classA, 24),
+				),
+			)),
+			classes: objects(class(classA, driverA)),
+			expectError: gomega.MatchError(gomega.And(
+				gomega.ContainSubstring("request "+req1),
+				gomega.ContainSubstring("exceeds the claim limit"),
+			)),
+		},
+		// The oversized alternative sits behind a device already allocated for the
+		// claim, which is what overflowed the per-request check. Only the pinned
+		// invocation count separates pruning it from descending into it.
+		"prioritized-list-overflowing-first-subrequest-is-pruned": {
+			features: Features{PrioritizedList: true},
+			claimsToAllocate: objects(claim(claim0).withRequests(
+				deviceRequest(req0, classA, 1),
+				requestWithPrioritizedList(req1,
+					subRequest(subReq0, classA, int64(math.MaxInt)),
+					subRequest(subReq1, classA, 1),
+				),
+			)),
+			classes: objects(class(classA, driverA)),
+			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
+				device(device1),
+				device(device2),
+			)),
+			node: node(node1, region1),
+			expectResults: []any{allocationResult(
+				localNodeSelector(node1),
+				deviceAllocationResult(req0, driverA, pool1, device1, false),
+				deviceAllocationResult(req1SubReq1, driverA, pool1, device2, false),
+			)},
+			expectNumAllocateOneInvocations: 8,
+		},
 		"partitionable-devices-single-device": {
 			features: Features{
 				PartitionableDevices: true,
@@ -3479,7 +3532,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -3514,10 +3567,10 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("9000000000000000000")}),
 					),
-					device(device2, nil, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
 					),
 				),
@@ -3543,7 +3596,7 @@ func TestAllocator(t *testing.T,
 			slices: unwrapResourceSlices(
 				// driverA / pool "pool-1": counterSet1 c:1, device1 consumes c:1.
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
 					),
 				),
@@ -3555,7 +3608,7 @@ func TestAllocator(t *testing.T,
 				// pool name alone fails this case: device2 would be checked against driverA's
 				// cached c:1 and wrongly rejected.
 				sliceWithDevices(slice3, node1, resourcePool(pool1, 2), driverB,
-					device(device2, nil, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("2")}),
 					),
 				),
@@ -3585,7 +3638,7 @@ func TestAllocator(t *testing.T,
 			slices: unwrapResourceSlices(
 				// driverA / pool "pool-1": counterSet1 with c:1, device1 consumes c:1 (valid).
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
 					),
 				),
@@ -3595,7 +3648,7 @@ func TestAllocator(t *testing.T,
 				// driverB / pool "pool-1": same pool name but a different counter set
 				// (counterSet2 with d:1). device2 over-consumes it (d:2) and must be rejected.
 				sliceWithDevices(slice3, node1, resourcePool(pool1, 2), driverB,
-					device(device2, nil, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet2, map[string]resource.Quantity{"d": resource.MustParse("2")}),
 					),
 				),
@@ -3621,10 +3674,10 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withTaints(taintNoSchedule).withDeviceCounterConsumption(
+					device(device1).withTaints(taintNoSchedule).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
 					),
-					device(device2, nil, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
 					),
 				),
@@ -3653,21 +3706,21 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"stringAttribute": {StringValue: new("red")},
-					}).withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
-					),
-					device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"stringAttribute": {StringValue: new("blue")},
-					}).withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
-					),
-					device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"stringAttribute": {StringValue: new("blue")},
-					}).withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
-					),
+					device(device1).
+						withAttribute("stringAttribute", "red").
+						withDeviceCounterConsumption(
+							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
+						),
+					device(device2).
+						withAttribute("stringAttribute", "blue").
+						withDeviceCounterConsumption(
+							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
+						),
+					device(device3).
+						withAttribute("stringAttribute", "blue").
+						withDeviceCounterConsumption(
+							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
+						),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
 					counterSet(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("2")}),
@@ -3706,23 +3759,23 @@ func TestAllocator(t *testing.T,
 					// device1 allows multiple allocations and consumes the single
 					// shared counter. It is listed first, so req0 reserves its counter
 					// on the first try.
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"kind": {StringValue: new("shared")},
-					}).withAllowMultipleAllocations().withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
-					),
+					device(device1).
+						withAttribute("kind", "shared").
+						withAllowMultipleAllocations().
+						withDeviceCounterConsumption(
+							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
+						),
 					// device2 consumes no counter and is the correct choice for req0
 					// once device1 has been backtracked.
-					device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"kind": {StringValue: new("shared")},
-					}),
+					device(device2).
+						withAttribute("kind", "shared"),
 					// device3 is the only device that satisfies req1 and needs the same
 					// counter device1 reserved.
-					device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"kind": {StringValue: new("counteronly")},
-					}).withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
-					),
+					device(device3).
+						withAttribute("kind", "counteronly").
+						withDeviceCounterConsumption(
+							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
+						),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
 					counterSet(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
@@ -3750,7 +3803,7 @@ func TestAllocator(t *testing.T,
 				// subject to claim1's constraint, so it does not set the reference value.
 				claim(claim0).withRequests(
 					deviceRequest(req0, classA, 1).
-						withCapacityRequest(new(two)).
+						withCapacityRequest(capacity0, two).
 						withSelectors(resourceapi.DeviceSelector{
 							CEL: &resourceapi.CELDeviceSelector{
 								Expression: fmt.Sprintf(`device.attributes["%s"].stringAttribute == "cap"`, driverA),
@@ -3769,7 +3822,7 @@ func TestAllocator(t *testing.T,
 								Expression: fmt.Sprintf(`device.attributes["%s"].stringAttribute == "cap"`, driverA),
 							}}).
 							withAllocationMode(resourceapi.DeviceAllocationModeAll).
-							withCapacityRequest(new(two)),
+							withCapacityRequest(capacity0, two),
 						subRequest(subReq1, classA, 1, resourceapi.DeviceSelector{
 							CEL: &resourceapi.CELDeviceSelector{
 								Expression: fmt.Sprintf(`device.attributes["%s"].stringAttribute == "fb"`, driverA),
@@ -3779,14 +3832,12 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity0: two},
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-							"stringAttribute": {StringValue: new("cap")},
-						}).withAllowMultipleAllocations(),
-					device(device2, nil,
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-							"stringAttribute": {StringValue: new("fb")},
-						}),
+					device(device1).
+						withCapacity(capacity0, two).
+						withAttribute("stringAttribute", "cap").
+						withAllowMultipleAllocations(),
+					device(device2).
+						withAttribute("stringAttribute", "fb"),
 				),
 			),
 			node: node(node1, region1),
@@ -3843,22 +3894,21 @@ func TestAllocator(t *testing.T,
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
 					// device1: allow-multiple, no capacity, consumes the single counter.
 					// kind steers the selectors; stringAttribute steers the constraint.
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"kind":            {StringValue: new("shared")},
-						"stringAttribute": {StringValue: new("red")},
-					}).withAllowMultipleAllocations().withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
-					),
+					device(device1).
+						withAttribute("kind", "shared").
+						withAttribute("stringAttribute", "red").
+						withAllowMultipleAllocations().
+						withDeviceCounterConsumption(
+							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
+						),
 					// device2: the fallback for req1, matching req2's stringAttribute.
-					device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"kind":            {StringValue: new("fallback")},
-						"stringAttribute": {StringValue: new("blue")},
-					}),
+					device(device2).
+						withAttribute("kind", "fallback").
+						withAttribute("stringAttribute", "blue"),
 					// device3: the only device req2 can take.
-					device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"kind":            {StringValue: new("gate")},
-						"stringAttribute": {StringValue: new("blue")},
-					}),
+					device(device3).
+						withAttribute("kind", "gate").
+						withAttribute("stringAttribute", "blue"),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
 					counterSet(counterSet1, map[string]resource.Quantity{"c": resource.MustParse("1")}),
@@ -3904,21 +3954,21 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withCapacity("memory", "4Gi").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
 							},
 						),
 					),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withCapacity("memory", "6Gi").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("6Gi"),
 							},
 						),
 					),
-					device(device3, fromCounters, nil).withDeviceCounterConsumption(
+					device(device3).withCapacity("memory", "4Gi").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -3954,21 +4004,21 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
 							},
 						),
 					),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("6Gi"),
 							},
 						),
 					),
-					device(device3, fromCounters, nil).withDeviceCounterConsumption(
+					device(device3).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -4016,7 +4066,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withCapacity("memory", "4Gi").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -4028,7 +4078,7 @@ func TestAllocator(t *testing.T,
 							},
 						),
 					),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withCapacity("memory", "6Gi").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("6Gi"),
@@ -4040,7 +4090,7 @@ func TestAllocator(t *testing.T,
 							},
 						),
 					),
-					device(device3, fromCounters, nil).withDeviceCounterConsumption(
+					device(device3).withCapacity("memory", "4Gi").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -4086,7 +4136,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -4100,7 +4150,7 @@ func TestAllocator(t *testing.T,
 							},
 						),
 					),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("6Gi"),
@@ -4114,7 +4164,7 @@ func TestAllocator(t *testing.T,
 							},
 						),
 					),
-					device(device3, fromCounters, nil).withDeviceCounterConsumption(
+					device(device3).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -4164,7 +4214,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"cpus":   resource.MustParse("6"),
@@ -4172,7 +4222,7 @@ func TestAllocator(t *testing.T,
 							},
 						),
 					),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"cpus":   resource.MustParse("4"),
@@ -4180,7 +4230,7 @@ func TestAllocator(t *testing.T,
 							},
 						),
 					),
-					device(device3, fromCounters, nil).withDeviceCounterConsumption(
+					device(device3).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"cpus":   resource.MustParse("4"),
@@ -4198,7 +4248,7 @@ func TestAllocator(t *testing.T,
 					),
 				),
 				sliceWithDevices(slice3, node1, resourcePool(pool2, 2), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"cpus":   resource.MustParse("6"),
@@ -4206,7 +4256,7 @@ func TestAllocator(t *testing.T,
 							},
 						),
 					),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"cpus":   resource.MustParse("1"),
@@ -4214,7 +4264,7 @@ func TestAllocator(t *testing.T,
 							},
 						),
 					),
-					device(device3, fromCounters, nil).withDeviceCounterConsumption(
+					device(device3).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"cpus":   resource.MustParse("1"),
@@ -4254,21 +4304,21 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("5Gi"),
 							},
 						),
 					),
-					device(device2, nil, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
 							},
 						),
 					),
-					device(device3, nil, nil).withDeviceCounterConsumption(
+					device(device3).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -4304,14 +4354,14 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
 							},
 						),
 					),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("16Gi"),
@@ -4345,14 +4395,14 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
 							},
 						),
 					),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("20Gi"),
@@ -4386,7 +4436,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -4417,14 +4467,14 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
 							},
 						),
 					),
-					device(device2, nil, nil),
+					device(device2),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
 					counterSet(counterSet1,
@@ -4452,7 +4502,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, nodeSelectionPerDevice, pool1, driverA,
-					device(device2, nil, nil).withNodeSelection(node1),
+					device(device2).withNodeSelection(node1),
 				),
 			),
 			node:          node(node1, region1),
@@ -4482,14 +4532,14 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, nodeSelectionPerDevice, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withCapacity("memory", "4Gi").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
 							},
 						),
 					).withNodeSelection(node1),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withCapacity("memory", "6Gi").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("6Gi"),
@@ -4522,7 +4572,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, nodeSelectionPerDevice, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -4564,21 +4614,21 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA), class(classB, driverB)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, nodeSelectionPerDevice, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
 							},
 						),
 					).withNodeSelection(nodeLabelSelector(regionKey, region1)),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
 							},
 						),
 					).withNodeSelection(node1),
-					device(device3, fromCounters, nil).withDeviceCounterConsumption(
+					device(device3).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -4594,21 +4644,21 @@ func TestAllocator(t *testing.T,
 					),
 				),
 				sliceWithDevices(slice3, node1, resourcePool(pool2, 2), driverB,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet2,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
 							},
 						),
 					),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet2,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
 							},
 						),
 					),
-					device(device3, fromCounters, nil).withDeviceCounterConsumption(
+					device(device3).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet2,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -4648,8 +4698,8 @@ func TestAllocator(t *testing.T,
 			claimsToAllocate: objects(claimWithRequest(claim0, req0, classA)),
 			classes:          objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withTaints(taintNoSchedule),
-				device(device2, nil, nil).withTaints(taintNoExecute),
+				device(device1).withTaints(taintNoSchedule),
+				device(device2).withTaints(taintNoExecute),
 			)),
 			node: node(node1, region1),
 		},
@@ -4660,7 +4710,7 @@ func TestAllocator(t *testing.T,
 			claimsToAllocate: objects(claimWithRequest(claim0, req0, classA)),
 			classes:          objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withTaints(taintNoSchedule, taintNoExecute),
+				device(device1).withTaints(taintNoSchedule, taintNoExecute),
 			)),
 			node: node(node1, region1),
 		},
@@ -4671,8 +4721,8 @@ func TestAllocator(t *testing.T,
 			claimsToAllocate: objects(claimWithRequest(claim0, req0, classA).withTolerations(tolerationNoExecute)),
 			classes:          objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withTaints(taintNoSchedule),
-				device(device2, nil, nil).withTaints(taintNoExecute),
+				device(device1).withTaints(taintNoSchedule),
+				device(device2).withTaints(taintNoExecute),
 			)),
 			node: node(node1, region1),
 			expectResults: []any{allocationResult(
@@ -4692,8 +4742,8 @@ func TestAllocator(t *testing.T,
 				))),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withTaints(taintNoSchedule),
-				device(device2, nil, nil).withTaints(taintNoExecute),
+				device(device1).withTaints(taintNoSchedule),
+				device(device2).withTaints(taintNoExecute),
 			)),
 			node: node(node1, region1),
 			expectResults: []any{allocationResult(
@@ -4708,7 +4758,7 @@ func TestAllocator(t *testing.T,
 			claimsToAllocate: objects(claimWithRequest(claim0, req0, classA)),
 			classes:          objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withTaints(taintNone),
+				device(device1).withTaints(taintNone),
 			)),
 			node: node(node1, region1),
 			expectResults: []any{allocationResult(
@@ -4723,7 +4773,7 @@ func TestAllocator(t *testing.T,
 			claimsToAllocate: objects(claimWithRequest(claim0, req0, classA).withTolerations(tolerationNoSchedule, tolerationNoExecute)),
 			classes:          objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withTaints(taintNoSchedule, taintNoExecute),
+				device(device1).withTaints(taintNoSchedule, taintNoExecute),
 			)),
 			node: node(node1, region1),
 			expectResults: []any{allocationResult(
@@ -4738,7 +4788,7 @@ func TestAllocator(t *testing.T,
 			claimsToAllocate: objects(claimWithRequest(claim0, req0, classA)),
 			classes:          objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withTaints(taintNoSchedule, taintNoExecute),
+				device(device1).withTaints(taintNoSchedule, taintNoExecute),
 			)),
 			node: node(node1, region1),
 			expectResults: []any{allocationResult(
@@ -4759,7 +4809,7 @@ func TestAllocator(t *testing.T,
 					))),
 			classes: objects(class(classA, driverA), class(classB, driverB)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withTaints(taintNoSchedule),
+				device(device1).withTaints(taintNoSchedule),
 			)),
 			node: node(node1, region1),
 		},
@@ -4776,7 +4826,7 @@ func TestAllocator(t *testing.T,
 					))),
 			classes: objects(class(classA, driverA), class(classB, driverB)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withTaints(taintNoSchedule),
+				device(device1).withTaints(taintNoSchedule),
 			)),
 			node: node(node1, region1),
 
@@ -4801,7 +4851,7 @@ func TestAllocator(t *testing.T,
 			},
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withTaints(taintNoSchedule),
+				device(device1).withTaints(taintNoSchedule),
 			)),
 			node: node(node1, region1),
 		},
@@ -4821,7 +4871,7 @@ func TestAllocator(t *testing.T,
 			},
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withTaints(taintNoSchedule),
+				device(device1).withTaints(taintNoSchedule),
 			)),
 			node: node(node1, region1),
 
@@ -4843,7 +4893,7 @@ func TestAllocator(t *testing.T,
 			})),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withTaints(taintNoSchedule),
+				device(device1).withTaints(taintNoSchedule),
 			)),
 			node: node(node1, region1),
 		},
@@ -4860,7 +4910,7 @@ func TestAllocator(t *testing.T,
 			})),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withTaints(taintNoSchedule),
+				device(device1).withTaints(taintNoSchedule),
 			)),
 			node: node(node1, region1),
 
@@ -4883,8 +4933,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil),
-				device(device2, nil, nil),
+				device(device1),
+				device(device2),
 			)),
 			allocatedDevices: []DeviceID{
 				MakeDeviceID(driverA, pool1, device2),
@@ -4920,9 +4970,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"generation": {StringValue: ptr.To("v5")},
-					}),
+					device(device1).withAttribute("generation", "v5"),
 				),
 			),
 			node: node(node1, region1),
@@ -4957,14 +5005,10 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"generation": {StringValue: ptr.To("v5")},
-					}),
+					device(device1).withAttribute("generation", "v5"),
 				),
 				sliceWithDevices(slice2, node1, pool2, driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"generation": {StringValue: ptr.To("v5")},
-					}),
+					device(device1).withAttribute("generation", "v5"),
 				),
 			),
 			node: node(node1, region1),
@@ -5003,17 +5047,11 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"generation": {StringValue: ptr.To("v5")},
-					}),
+					device(device1).withAttribute("generation", "v5"),
 				),
 				sliceWithDevices(slice2, node2, pool2, driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"generation": {StringValue: ptr.To("v5")},
-					}),
-					device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"generation": {StringValue: ptr.To("v6")},
-					}),
+					device(device1).withAttribute("generation", "v5"),
+					device(device2).withAttribute("generation", "v6"),
 				),
 			),
 			node: node(node1, region1),
@@ -5064,18 +5102,15 @@ func TestAllocator(t *testing.T,
 			),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"generation": {StringValue: ptr.To("v6")},
-						"selected":   {BoolValue: ptr.To(false)},
-					}),
-					device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"generation": {StringValue: ptr.To("v5")},
-						"selected":   {BoolValue: ptr.To(false)},
-					}),
-					device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"generation": {StringValue: ptr.To("v5")},
-						"selected":   {BoolValue: ptr.To(true)},
-					}),
+					device(device1).
+						withAttribute("generation", "v6").
+						withAttribute("selected", false),
+					device(device2).
+						withAttribute("generation", "v5").
+						withAttribute("selected", false),
+					device(device3).
+						withAttribute("generation", "v5").
+						withAttribute("selected", true),
 				),
 			),
 			node: node(node1, region1),
@@ -5119,60 +5154,48 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil,
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-							"special": {
-								BoolValue: ptr.To(true),
-							},
-						},
-					).withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet1,
-							map[string]resource.Quantity{
-								"cpu1": resource.MustParse("1"),
-							},
+					device(device1).
+						withAttribute("special", true).
+						withDeviceCounterConsumption(
+							deviceCounterConsumption(counterSet1,
+								map[string]resource.Quantity{
+									"cpu1": resource.MustParse("1"),
+								},
+							),
+							deviceCounterConsumption(counterSet2,
+								map[string]resource.Quantity{
+									"mem": resource.MustParse("10Gi"),
+								},
+							),
 						),
-						deviceCounterConsumption(counterSet2,
-							map[string]resource.Quantity{
-								"mem": resource.MustParse("10Gi"),
-							},
+					device(device2).
+						withAttribute("special", false).
+						withDeviceCounterConsumption(
+							deviceCounterConsumption(counterSet1,
+								map[string]resource.Quantity{
+									"cpu2": resource.MustParse("1"),
+								},
+							),
+							deviceCounterConsumption(counterSet2,
+								map[string]resource.Quantity{
+									"mem": resource.MustParse("10Gi"),
+								},
+							),
 						),
-					),
-					device(device2, nil,
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-							"special": {
-								BoolValue: ptr.To(false),
-							},
-						},
-					).withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet1,
-							map[string]resource.Quantity{
-								"cpu2": resource.MustParse("1"),
-							},
+					device(device3).
+						withAttribute("special", false).
+						withDeviceCounterConsumption(
+							deviceCounterConsumption(counterSet1,
+								map[string]resource.Quantity{
+									"cpu3": resource.MustParse("1"),
+								},
+							),
+							deviceCounterConsumption(counterSet2,
+								map[string]resource.Quantity{
+									"mem": resource.MustParse("10Gi"),
+								},
+							),
 						),
-						deviceCounterConsumption(counterSet2,
-							map[string]resource.Quantity{
-								"mem": resource.MustParse("10Gi"),
-							},
-						),
-					),
-					device(device3, nil,
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-							"special": {
-								BoolValue: ptr.To(false),
-							},
-						},
-					).withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet1,
-							map[string]resource.Quantity{
-								"cpu3": resource.MustParse("1"),
-							},
-						),
-						deviceCounterConsumption(counterSet2,
-							map[string]resource.Quantity{
-								"mem": resource.MustParse("10Gi"),
-							},
-						),
-					),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
 					counterSet(counterSet1,
@@ -5262,7 +5285,7 @@ func TestAllocator(t *testing.T,
 				claimWithRequests(claim0, nil, request(req0, classA, 1))),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withBindingConditions([]string{"IsPrepare"}, []string{"BindingFailed"}))),
+				device(device1).withBindingConditions([]string{"IsPrepare"}, []string{"BindingFailed"}))),
 			node: node(node1, region1),
 
 			expectResults: []any{
@@ -5286,9 +5309,9 @@ func TestAllocator(t *testing.T,
 					request(req1, classA, 1))),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withBindingConditions([]string{"IsPrepare"}, []string{"BindingFailed"}),
-				device(device2, nil, nil).withBindingConditions([]string{"IsPrepare2"}, []string{"BindingFailed2"}),
-				device(device3, nil, nil).withBindingConditions([]string{"IsPrepare3"}, []string{"BindingFailed3"}),
+				device(device1).withBindingConditions([]string{"IsPrepare"}, []string{"BindingFailed"}),
+				device(device2).withBindingConditions([]string{"IsPrepare2"}, []string{"BindingFailed2"}),
+				device(device3).withBindingConditions([]string{"IsPrepare3"}, []string{"BindingFailed3"}),
 			)),
 			node: node(node1, region1),
 			expectResults: []any{
@@ -5314,8 +5337,8 @@ func TestAllocator(t *testing.T,
 					request(req1, classA, 1))),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil),
-				device(device2, nil, nil).withBindingConditions([]string{"IsPrepare"}, []string{"BindingFailed"}),
+				device(device1),
+				device(device2).withBindingConditions([]string{"IsPrepare"}, []string{"BindingFailed"}),
 			)),
 			node: node(node1, region1),
 			expectResults: []any{
@@ -5338,7 +5361,7 @@ func TestAllocator(t *testing.T,
 				claimWithRequests(claim0, nil, request(req0, classA, 1))),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil).withBindingConditions([]string{"IsPrepare"}, []string{"BindingFailed"}))),
+				device(device1).withBindingConditions([]string{"IsPrepare"}, []string{"BindingFailed"}))),
 			node:          node(node1, region1),
 			expectResults: nil,
 		},
@@ -5349,7 +5372,7 @@ func TestAllocator(t *testing.T,
 			claimsToAllocate: objects(claimWithRequest(claim0, req0, classA)),
 			classes:          objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, nodeLabelSelector(planetKey, planetValueEarth), pool1, driverA,
-				device(device1, nil, nil).withBindsToNode(true))),
+				device(device1).withBindsToNode(true))),
 			node: node(node1, region1),
 			expectResults: []any{allocationResult(
 				localNodeSelector(node1),
@@ -5367,7 +5390,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).
+					device(device1).
 						withDeviceCounterConsumption(
 							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -5406,14 +5429,14 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).
+					device(device1).
 						withDeviceCounterConsumption(
 							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
 							}),
 						).
 						withBindingConditions([]string{"IsPrepare"}, []string{"BindingFailed"}),
-					device(device2, fromCounters, nil).
+					device(device2).
 						withDeviceCounterConsumption(
 							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -5453,20 +5476,20 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).
+					device(device1).
 						withDeviceCounterConsumption(
 							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 								"memory": resource.MustParse("2Gi"),
 							}),
 						).
 						withBindingConditions([]string{"IsPrepare"}, []string{"BindingFailed"}),
-					device(device2, fromCounters, nil).
+					device(device2).
 						withDeviceCounterConsumption(
 							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 								"memory": resource.MustParse("2Gi"),
 							}),
 						),
-					device(device3, fromCounters, nil).
+					device(device3).
 						withDeviceCounterConsumption(
 							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -5505,7 +5528,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice4, node1, resourcePool(pool1, 4), driverA,
-					device(device1, fromCounters, nil).
+					device(device1).
 						withDeviceCounterConsumption(
 							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -5519,7 +5542,7 @@ func TestAllocator(t *testing.T,
 					}),
 				),
 				sliceWithDevices(slice2, node1, resourcePool(pool1, 4), driverA,
-					device(device2, fromCounters, nil).
+					device(device2).
 						withDeviceCounterConsumption(
 							deviceCounterConsumption(counterSet2, map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -5557,7 +5580,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, fromCounters, nil).
+					device(device1).
 						withDeviceCounterConsumption(
 							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -5569,7 +5592,7 @@ func TestAllocator(t *testing.T,
 							Value:  "value1",
 							Effect: resourceapi.DeviceTaintEffectNoSchedule,
 						}),
-					device(device2, fromCounters, nil).
+					device(device2).
 						withDeviceCounterConsumption(
 							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -5597,7 +5620,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).
+					device(device1).
 						withDeviceCounterConsumption(
 							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -5609,7 +5632,7 @@ func TestAllocator(t *testing.T,
 							Value:  "value1",
 							Effect: resourceapi.DeviceTaintEffectNoSchedule,
 						}),
-					device(device2, fromCounters, nil).
+					device(device2).
 						withDeviceCounterConsumption(
 							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -5640,7 +5663,7 @@ func TestAllocator(t *testing.T,
 				DeviceBindingAndStatus: true, // add to forcefully use experimenting allocator
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
 			),
 			classes:       objects(class(classA, driverA)),
 			slices:        unwrap(sliceWithOneDevice(slice1, node1, pool1, driverA)),
@@ -5657,8 +5680,8 @@ func TestAllocator(t *testing.T,
 				claim(claim0).withRequests(
 					requestWithPrioritizedList(
 						req0,
-						subRequest(subReq0, classA, 1).withCapacityRequest(ptr.To(one)),
-						subRequest(subReq1, classA, 1).withCapacityRequest(ptr.To(one)),
+						subRequest(subReq0, classA, 1).withCapacityRequest(capacity0, one),
+						subRequest(subReq1, classA, 1).withCapacityRequest(capacity0, one),
 					),
 				),
 			),
@@ -5673,12 +5696,12 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity1: one}, nil).withAllowMultipleAllocations(),
+					device(device1).withCapacity(capacity1, one).withAllowMultipleAllocations(),
 				),
 			),
 			node:          node(node1, region1),
@@ -5689,12 +5712,12 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(allDeviceRequest(req0, classA).withCapacityRequest(ptr.To(one))),
+				claim(claim0).withRequests(allDeviceRequest(req0, classA).withCapacityRequest(capacity0, one)),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity1: one}, nil).withAllowMultipleAllocations(),
+					device(device1).withCapacity(capacity1, one).withAllowMultipleAllocations(),
 				),
 			),
 			node:          node(node1, region1),
@@ -5711,7 +5734,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations(),
+					device(device1).withAllowMultipleAllocations(),
 				),
 			),
 			node: node(node1, region1),
@@ -5737,8 +5760,8 @@ func TestAllocator(t *testing.T,
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil).withAllowMultipleAllocations(),
-					device(device2, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil).withAllowMultipleAllocations(),
+					device(device1).withCapacity(capacity0, one).withAllowMultipleAllocations(),
+					device(device2).withCapacity(capacity0, one).withAllowMultipleAllocations(),
 				),
 			),
 			node: node(node1, region1),
@@ -5764,7 +5787,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}, nil).withAllowMultipleAllocations(),
+					device(device1).withCapacity(capacity0, two).withAllowMultipleAllocations(),
 				),
 			),
 			node:          node(node1, region1),
@@ -5775,13 +5798,13 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
-				claim(claim1).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
+				claim(claim1).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}, nil).withAllowMultipleAllocations(),
+					device(device1).withCapacity(capacity0, two).withAllowMultipleAllocations(),
 				),
 			),
 			node: node(node1, region1),
@@ -5807,7 +5830,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
 				),
 			),
 			node: node(node1, region1),
@@ -5834,7 +5857,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyValidValues(zero, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyValidValues(zero, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil),
 				),
 			),
 			node: node(node1, region1),
@@ -5855,12 +5878,12 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyValidValues(zero, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyValidValues(zero, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil),
 				),
 			),
 			node: node(node1, region1),
@@ -5872,13 +5895,13 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
-				claim(claim1).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
+				claim(claim1).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
 				),
 			),
 			node: node(node1, region1),
@@ -5900,12 +5923,12 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(resource.NewQuantity(3, resource.BinarySI))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, *resource.NewQuantity(3, resource.BinarySI))),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
 				),
 			),
 			node: node(node1, region1),
@@ -5925,12 +5948,12 @@ func TestAllocator(t *testing.T,
 			// without reading it through Quantity.Value(), which wraps. The request is not
 			// representable, so allocation aborts with a specific error instead of skipping.
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(new(resource.MustParse("18446744073709551616")))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, resource.MustParse("18446744073709551616"))),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
 				),
 			),
 			node:        node(node1, region1),
@@ -5944,12 +5967,12 @@ func TestAllocator(t *testing.T,
 			// would wrap to a negative value. The rounded value is not representable, so
 			// allocation aborts with a specific error instead of acting on the wrapped read.
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(new(resource.MustParse("9223372036854775807")))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, resource.MustParse("9223372036854775807"))),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
 				),
 			),
 			node:        node(node1, region1),
@@ -5966,13 +5989,13 @@ func TestAllocator(t *testing.T,
 			// overflowing device is what stops the backtracking a user-controlled
 			// out-of-range request would otherwise force.
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(new(resource.MustParse("18446744073709551616")))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, resource.MustParse("18446744073709551616"))),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
-					device(device2, map[resourceapi.QualifiedName]resource.Quantity{capacity0: resource.MustParse("36893488147419103232")}, nil).withAllowMultipleAllocations(),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
+					device(device2).withCapacity(capacity0, "36893488147419103232").withAllowMultipleAllocations(),
 				),
 			),
 			node:        node(node1, region1),
@@ -5987,12 +6010,12 @@ func TestAllocator(t *testing.T,
 			// device from the set and allocate whatever remains. The count-mode cases above
 			// exercise allocateOne; this one exercises the AllocationModeAll pre-scan.
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(allDeviceRequest(req0, classA).withCapacityRequest(new(resource.MustParse("18446744073709551616")))),
+				claim(claim0).withRequests(allDeviceRequest(req0, classA).withCapacityRequest(capacity0, resource.MustParse("18446744073709551616"))),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
 				),
 			),
 			node:        node(node1, region1),
@@ -6007,12 +6030,12 @@ func TestAllocator(t *testing.T,
 			// negative value must abort rather than record negative consumed capacity and
 			// over-allocate the device.
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(new(resource.MustParse("-5")))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, resource.MustParse("-5"))),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity0: resource.MustParse("10")}, nil).withAllowMultipleAllocations(),
+					device(device1).withCapacity(capacity0, "10").withAllowMultipleAllocations(),
 				),
 			),
 			node:        node(node1, region1),
@@ -6023,12 +6046,12 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(resource.NewQuantity(2, resource.BinarySI))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, *resource.NewQuantity(2, resource.BinarySI))),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyValidValues(one, map[resourceapi.QualifiedName]resource.Quantity{capacity0: four},
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyValidValues(one, map[resourceapi.QualifiedName]resource.Quantity{capacity0: four},
 						[]resource.Quantity{two}),
 				),
 			),
@@ -6045,12 +6068,12 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(resource.NewQuantity(2, resource.BinarySI))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, *resource.NewQuantity(2, resource.BinarySI))),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyValidValues(one, map[resourceapi.QualifiedName]resource.Quantity{capacity0: three},
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyValidValues(one, map[resourceapi.QualifiedName]resource.Quantity{capacity0: three},
 						[]resource.Quantity{three}), // capacity value must be explicitly added
 				),
 			),
@@ -6067,13 +6090,13 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
-				claim(claim1).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(two))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
+				claim(claim1).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, two)),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
 				),
 			),
 			node: node(node1, region1),
@@ -6085,12 +6108,12 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(resource.NewQuantity(6, resource.BinarySI))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, *resource.NewQuantity(6, resource.BinarySI))),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: *resource.NewQuantity(10, resource.BinarySI)}),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: *resource.NewQuantity(10, resource.BinarySI)}),
 				),
 			),
 			node: node(node1, region1),
@@ -6102,7 +6125,7 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(two))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, two)),
 			),
 			allocatedCapacityDevices: map[DeviceID]ConsumedCapacity{
 				MakeDeviceID(driverA, pool1, device1): {
@@ -6112,7 +6135,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
 				),
 			),
 			node: node(node1, region1),
@@ -6129,7 +6152,7 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(two))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, two)),
 			),
 			allocatedCapacityDevices: map[DeviceID]ConsumedCapacity{
 				MakeDeviceID(driverA, pool1, device1): {
@@ -6139,8 +6162,8 @@ func TestAllocator(t *testing.T,
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
-					device(device2, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
+					device(device2).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
 				),
 			),
 			node: node(node1, region1),
@@ -6159,22 +6182,22 @@ func TestAllocator(t *testing.T,
 			claimsToAllocate: objects(
 				// 2 requests with two per each
 				claim(claim0).withConstraints(resourceapi.DeviceConstraint{MatchAttribute: &stringAttribute}).withRequests(
-					deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(two)),
-					deviceRequest(req1, classA, 1).withCapacityRequest(ptr.To(two)),
+					deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, two),
+					deviceRequest(req1, classA, 1).withCapacityRequest(capacity0, two),
 				),
-				claim(claim1).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(two))),
+				claim(claim1).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, two)),
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device2, nil,
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-							"stringAttribute": {StringValue: ptr.To("stringAttributeValue1")},
-						}).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
-					device(device1, nil,
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-							"stringAttribute": {StringValue: ptr.To("stringAttributeValue2")},
-						}).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
+					device(device2).
+						withAttribute("stringAttribute", "stringAttributeValue1").
+						withAllowMultipleAllocations().
+						withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
+					device(device1).
+						withAttribute("stringAttribute", "stringAttributeValue2").
+						withAllowMultipleAllocations().
+						withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
 				),
 			),
 			node: node(node1, region1),
@@ -6194,8 +6217,8 @@ func TestAllocator(t *testing.T,
 			claimsToAllocate: objects(
 				claim(claim0).withRequests(
 					requestWithPrioritizedList(req0,
-						subRequest(subReq0, classA, 1).withCapacityRequest(ptr.To(four)),
-						subRequest(subReq1, classA, 1).withCapacityRequest(ptr.To(two)),
+						subRequest(subReq0, classA, 1).withCapacityRequest(capacity0, four),
+						subRequest(subReq1, classA, 1).withCapacityRequest(capacity0, two),
 						subRequest(subReq1, classA, 1),
 					),
 				),
@@ -6203,7 +6226,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
 				),
 			),
 			node: node(node1, region1),
@@ -6219,7 +6242,7 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(two))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, two)),
 			),
 			allocatedCapacityDevices: map[DeviceID]ConsumedCapacity{
 				MakeDeviceID(driverA, pool1, device1): {
@@ -6229,7 +6252,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
 				),
 			),
 			node: node(node1, region1),
@@ -6241,13 +6264,13 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(allDeviceRequest(req0, classA).withCapacityRequest(ptr.To(two))),
+				claim(claim0).withRequests(allDeviceRequest(req0, classA).withCapacityRequest(capacity0, two)),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}, nil).withAllowMultipleAllocations(),
-					device(device2, nil, nil).withAllowMultipleAllocations(),
+					device(device1).withCapacity(capacity0, two).withAllowMultipleAllocations(),
+					device(device2).withAllowMultipleAllocations(),
 				),
 			),
 			node: node(node1, region1),
@@ -6263,13 +6286,13 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(allDeviceRequest(req0, classA).withCapacityRequest(ptr.To(two))),
+				claim(claim0).withRequests(allDeviceRequest(req0, classA).withCapacityRequest(capacity0, two)),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}, nil).withAllowMultipleAllocations(),
-					device(device2, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil).withAllowMultipleAllocations(),
+					device(device1).withCapacity(capacity0, two).withAllowMultipleAllocations(),
+					device(device2).withCapacity(capacity0, one).withAllowMultipleAllocations(),
 				),
 			),
 			node: node(node1, region1),
@@ -6286,15 +6309,15 @@ func TestAllocator(t *testing.T,
 			},
 			claimsToAllocate: objects(
 				claim(claim0).withRequests(
-					deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one)),
-					allDeviceRequest(req1, classA).withCapacityRequest(ptr.To(one)),
+					deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one),
+					allDeviceRequest(req1, classA).withCapacityRequest(capacity0, one),
 				),
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}, nil).withAllowMultipleAllocations(),
-					device(device2, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil).withAllowMultipleAllocations(),
+					device(device1).withCapacity(capacity0, two).withAllowMultipleAllocations(),
+					device(device2).withCapacity(capacity0, one).withAllowMultipleAllocations(),
 				),
 			),
 			node: node(node1, region1),
@@ -6318,14 +6341,14 @@ func TestAllocator(t *testing.T,
 			},
 			claimsToAllocate: objects(
 				claim(claim0).withRequests(
-					allDeviceRequest(req0, classA).withCapacityRequest(ptr.To(one)),
+					allDeviceRequest(req0, classA).withCapacityRequest(capacity0, one),
 				),
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}, nil).withAllowMultipleAllocations(),
-					device(device2, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil).withAllowMultipleAllocations(),
+					device(device1).withCapacity(capacity0, two).withAllowMultipleAllocations(),
+					device(device2).withCapacity(capacity0, one).withAllowMultipleAllocations(),
 				),
 			),
 			node: node(node1, region1),
@@ -6343,15 +6366,15 @@ func TestAllocator(t *testing.T,
 			},
 			claimsToAllocate: objects(
 				claim(claim0).withRequests(
-					deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one)),
-					allDeviceRequest(req1, classA).withCapacityRequest(ptr.To(one)),
+					deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one),
+					allDeviceRequest(req1, classA).withCapacityRequest(capacity0, one),
 				),
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil).withAllowMultipleAllocations(),
-					device(device2, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil).withAllowMultipleAllocations(),
+					device(device1).withCapacity(capacity0, one).withAllowMultipleAllocations(),
+					device(device2).withCapacity(capacity0, one).withAllowMultipleAllocations(),
 				),
 			),
 			node:          node(node1, region1),
@@ -6368,14 +6391,14 @@ func TestAllocator(t *testing.T,
 			},
 			claimsToAllocate: objects(
 				claim(claim0).withRequests(
-					allDeviceRequest(req0, classA).withCapacityRequest(ptr.To(one)),
+					allDeviceRequest(req0, classA).withCapacityRequest(capacity0, one),
 				),
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil).withAllowMultipleAllocations(),
-					device(device2, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil).withAllowMultipleAllocations(),
+					device(device1).withCapacity(capacity0, one).withAllowMultipleAllocations(),
+					device(device2).withCapacity(capacity0, one).withAllowMultipleAllocations(),
 				),
 			),
 			node:          node(node1, region1),
@@ -6386,12 +6409,12 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, false)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil),
+					device(device1).withCapacity(capacity0, one),
 				),
 			),
 			node: node(node1, region1),
@@ -6408,13 +6431,13 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
-				claim(claim1).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
+				claim(claim1).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, false)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
+					device(device1).withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
 				),
 			),
 			node:          node(node1, region1),
@@ -6426,15 +6449,15 @@ func TestAllocator(t *testing.T,
 			},
 			claimsToAllocate: objects(
 				claim(claim0).withRequests(
-					deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(two)),
-					deviceRequest(req1, classA, 1).withCapacityRequest(ptr.To(resource.MustParse("1000000000000000000000"))),
+					deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, two),
+					deviceRequest(req1, classA, 1).withCapacityRequest(capacity0, resource.MustParse("1000000000000000000000")),
 				),
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
-						capacity0: {
+					device(device1).
+						withCapacity(capacity0, resourceapi.DeviceCapacity{
 							Value: resource.MustParse("1000000000000000000002"),
 							RequestPolicy: &resourceapi.CapacityRequestPolicy{
 								Default: ptr.To(resource.MustParse("1000000000000000000000")),
@@ -6442,8 +6465,8 @@ func TestAllocator(t *testing.T,
 									Min: &two,
 								},
 							},
-						},
-					}, nil).withAllowMultipleAllocations(),
+						}).
+						withAllowMultipleAllocations(),
 				),
 			),
 			node: node(node1, region1),
@@ -6458,12 +6481,12 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, false)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one}, nil).withAllowMultipleAllocations(),
+					device(device1).withCapacity(capacity0, one).withAllowMultipleAllocations(),
 				),
 			),
 			node: node(node1, region1),
@@ -6478,12 +6501,12 @@ func TestAllocator(t *testing.T,
 				MakeDeviceID(driverA, pool1, device1),
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
+					device(device1).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
 				),
 			),
 			node: node(node1, region1),
@@ -6495,7 +6518,7 @@ func TestAllocator(t *testing.T,
 				ConsumableCapacity: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one))),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one)),
 			),
 			allocatedCapacityDevices: map[DeviceID]ConsumedCapacity{
 				MakeDeviceID(driverA, pool1, device1): {
@@ -6505,7 +6528,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
+					device(device1).withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
 				),
 			),
 			node: node(node1, region1),
@@ -6538,21 +6561,21 @@ func TestAllocator(t *testing.T,
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withCapacity("memory", "4Gi").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
 							},
 						),
 					).withAllowMultipleAllocations(),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withCapacity("memory", "6Gi").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("6Gi"),
 							},
 						),
 					).withAllowMultipleAllocations(),
-					device(device3, fromCounters, nil).withDeviceCounterConsumption(
+					device(device3).withCapacity("memory", "4Gi").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
 								"memory": resource.MustParse("4Gi"),
@@ -6571,6 +6594,8 @@ func TestAllocator(t *testing.T,
 			node: node(node1, region1),
 			expectResults: []any{allocationResult(
 				localNodeSelector(node1),
+				// TODO (https://github.com/kubernetes/kubernetes/issues/140650): unqualified is
+				// what the *current* code writes. This might change, but has to be handled carefully.
 				deviceRequestAllocationResult(req0, driverA, pool1, device1).withConsumedCapacity(&fixedShareID, map[resourceapi.QualifiedName]resource.Quantity{"memory": resource.MustParse("4Gi")}),
 				deviceRequestAllocationResult(req1SubReq1, driverA, pool1, device3).withConsumedCapacity(&fixedShareID, map[resourceapi.QualifiedName]resource.Quantity{"memory": resource.MustParse("4Gi")}),
 			)},
@@ -6583,7 +6608,7 @@ func TestAllocator(t *testing.T,
 			claimsToAllocate: objects(
 				claim(claim0).withRequests(
 					deviceRequest(req0, classA, 1).
-						withCapacityRequest(ptr.To(one)).
+						withCapacityRequest(capacity0, one).
 						withSelectors(resourceapi.DeviceSelector{
 							CEL: &resourceapi.CELDeviceSelector{
 								Expression: fmt.Sprintf(`device.attributes["%s"].mode == "b"`, driverA),
@@ -6592,7 +6617,7 @@ func TestAllocator(t *testing.T,
 				),
 			),
 			allocatedSharedDeviceIDs: sets.New(
-				internal.MakeSharedDeviceID(MakeDeviceID(driverA, pool1, device1), &fixedShareID),
+				MakeDeviceID(driverA, pool1, device1),
 			),
 			allocatedCapacityDevices: ConsumedCapacityCollection{
 				MakeDeviceID(driverA, pool1, device1): ConsumedCapacity{
@@ -6602,24 +6627,24 @@ func TestAllocator(t *testing.T,
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"mode": {StringValue: ptr.To("a")},
-					}).withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
-							capacity0: one,
-						}),
-					).withAllowMultipleAllocations(),
-					device(device2, fromCounters, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"mode": {StringValue: ptr.To("b")},
-					}).withDeviceCounterConsumption(
-						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
-							capacity0: one,
-						}),
-					).withAllowMultipleAllocations(),
+					device(device1).
+						withAttribute("mode", "a").
+						withDeviceCounterConsumption(
+							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
+								counter0: one,
+							})).
+						withAllowMultipleAllocations(),
+					device(device2).
+						withAttribute("mode", "b").
+						withDeviceCounterConsumption(
+							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
+								counter0: one,
+							})).
+						withAllowMultipleAllocations(),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
 					counterSet(counterSet1, map[string]resource.Quantity{
-						capacity0: one,
+						counter0: one,
 					}),
 				),
 			),
@@ -6634,7 +6659,7 @@ func TestAllocator(t *testing.T,
 			// device1 already has a persisted shared allocation. It is represented
 			// only by a share ID, with no AggregatedCapacity entry.
 			allocatedSharedDeviceIDs: sets.New(
-				internal.MakeSharedDeviceID(MakeDeviceID(driverA, pool1, device1), &fixedShareID),
+				MakeDeviceID(driverA, pool1, device1),
 			),
 			claimsToAllocate: objects(
 				claimWithRequests(claim0, nil, request(req0, classA, 1)),
@@ -6642,7 +6667,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).
+					device(device1).
 						withAllowMultipleAllocations().
 						withDeviceCounterConsumption(
 							deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
@@ -6662,6 +6687,88 @@ func TestAllocator(t *testing.T,
 				deviceRequestAllocationResult(req0, driverA, pool1, device1).withConsumedCapacity(&fixedShareID, nil),
 			)},
 		},
+		"consumable-capacity-dedicated-request-blocked-by-persisted-share": {
+			// device1 still carries a live share after allowMultipleAllocations flipped to false,
+			// so a dedicated request must not be handed the device on top of it.
+			features: Features{ConsumableCapacity: true},
+			allocatedSharedDeviceIDs: sets.New(
+				MakeDeviceID(driverA, pool1, device1),
+			),
+			claimsToAllocate: objects(claimWithRequests(claim0, nil, request(req0, classA, 1))),
+			classes:          objects(class(classA, driverA)),
+			slices: unwrapResourceSlices(
+				sliceWithDevices(slice1, node1, resourcePool(pool1, 1), driverA,
+					device(device1),
+				),
+			),
+			node:          node(node1, region1),
+			expectResults: []any{},
+		},
+		"consumable-capacity-dedicated-request-falls-back-past-persisted-share": {
+			// The guard drops device1 without aborting the search, so the request still lands on device2.
+			features: Features{ConsumableCapacity: true},
+			allocatedSharedDeviceIDs: sets.New(
+				MakeDeviceID(driverA, pool1, device1),
+			),
+			claimsToAllocate: objects(claimWithRequests(claim0, nil, request(req0, classA, 1))),
+			classes:          objects(class(classA, driverA)),
+			slices: unwrapResourceSlices(
+				sliceWithDevices(slice1, node1, resourcePool(pool1, 1), driverA,
+					device(device1),
+					device(device2),
+				),
+			),
+			node: node(node1, region1),
+			expectResults: []any{allocationResult(
+				localNodeSelector(node1),
+				deviceAllocationResult(req0, driverA, pool1, device2, false),
+			)},
+		},
+		"consumable-capacity-dedicated-request-falls-back-past-multiple-persisted-shares": {
+			// The guard drops device1 and device2 without aborting the search, so the request lands on device3.
+			features: Features{ConsumableCapacity: true},
+			allocatedSharedDeviceIDs: sets.New(
+				MakeDeviceID(driverA, pool1, device1),
+				MakeDeviceID(driverA, pool1, device2),
+			),
+			claimsToAllocate: objects(claimWithRequests(claim0, nil, request(req0, classA, 1))),
+			classes:          objects(class(classA, driverA)),
+			slices: unwrapResourceSlices(
+				sliceWithDevices(slice1, node1, resourcePool(pool1, 1), driverA,
+					device(device1),
+					device(device2),
+					device(device3),
+				),
+			),
+			node: node(node1, region1),
+			expectResults: []any{allocationResult(
+				localNodeSelector(node1),
+				deviceAllocationResult(req0, driverA, pool1, device3, false),
+			)},
+		},
+		"consumable-capacity-with-admin-access-request-allowed-over-persisted-share": {
+			// Admin access skips the availability checks, so the live share does not withhold device1.
+			features: Features{ConsumableCapacity: true, AdminAccess: true},
+			allocatedSharedDeviceIDs: sets.New(
+				MakeDeviceID(driverA, pool1, device1),
+			),
+			claimsToAllocate: func() []wrapResourceClaim {
+				c := claimWithRequest(claim0, req0, classA)
+				c.Spec.Devices.Requests[0].Exactly.AdminAccess = new(true)
+				return []wrapResourceClaim{c}
+			}(),
+			classes: objects(class(classA, driverA)),
+			slices: unwrapResourceSlices(
+				sliceWithDevices(slice1, node1, resourcePool(pool1, 1), driverA,
+					device(device1),
+				),
+			),
+			node: node(node1, region1),
+			expectResults: []any{allocationResult(
+				localNodeSelector(node1),
+				deviceAllocationResult(req0, driverA, pool1, device1, true),
+			)},
+		},
 		"consumable-capacity-with-partitionable-device-multiple-capacity-pools": {
 			// This test case combines integration of PrioritizedList, PartitionableDevices, and ConsumableCapacity features.
 			features: Features{
@@ -6674,17 +6781,17 @@ func TestAllocator(t *testing.T,
 			// The prioritized request prefers devices with capacity0 >= 4 over those with capacity0 >= 2.
 			claimsToAllocate: objects(
 				claim(claim0).withRequests(
-					deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one)),
-					deviceRequest(req2, classA, 1).withCapacityRequest(ptr.To(two)),
+					deviceRequest(req0, classA, 1).withCapacityRequest(unqualifiedCapacity0, one), // TODO (https://github.com/kubernetes/kubernetes/issues/140650): this test case fails when using the fully-qualified name. It shouldn't. Same below.
+					deviceRequest(req2, classA, 1).withCapacityRequest(unqualifiedCapacity0, two),
 					requestWithPrioritizedList(req1,
 						subRequest(subReq0, classA, 1, resourceapi.DeviceSelector{
 							CEL: &resourceapi.CELDeviceSelector{
-								Expression: fmt.Sprintf(`device.capacity["%s"]["%s"].compareTo(quantity("4")) >= 0`, driverA, capacity0),
-							}}).withCapacityRequest(ptr.To(one)),
+								Expression: fmt.Sprintf(`device.capacity["%s"]["%s"].compareTo(quantity("4")) >= 0`, driverA, unqualifiedCapacity0),
+							}}).withCapacityRequest(unqualifiedCapacity0, one), // Redundant, but not wrong.
 						subRequest(subReq1, classA, 1, resourceapi.DeviceSelector{
 							CEL: &resourceapi.CELDeviceSelector{
-								Expression: fmt.Sprintf(`device.capacity["%s"]["%s"].compareTo(quantity("2")) >= 0`, driverA, capacity0),
-							}}).withCapacityRequest(ptr.To(one)),
+								Expression: fmt.Sprintf(`device.capacity["%s"]["%s"].compareTo(quantity("2")) >= 0`, driverA, unqualifiedCapacity0),
+							}}).withCapacityRequest(unqualifiedCapacity0, one), // Redundant, but not wrong.
 					),
 				),
 			),
@@ -6697,52 +6804,52 @@ func TestAllocator(t *testing.T,
 			// Capacity.RequestPolicy of ConsumableCapacity forces the capacity1 consuming with range policy (min,step,max)=(2,2,4).
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withCapacity(unqualifiedCapacity0, "2").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
-								capacity0: two,
+								counter0: two,
 							},
 						),
 						deviceCounterConsumption(counterSet2,
 							map[string]resource.Quantity{
-								capacity1: four,
+								counter1: four,
 							},
 						),
-					).withAllowMultipleAllocations().withCapacityRequestPolicyRange((map[resourceapi.QualifiedName]resource.Quantity{capacity1: four})),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					).withAllowMultipleAllocations().withCapacityRequestPolicyRange((map[resourceapi.QualifiedName]resource.Quantity{unqualifiedCapacity1: four})),
+					device(device2).withCapacity(unqualifiedCapacity0, "4").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
-								capacity0: four,
+								counter0: four,
 							},
 						),
 						deviceCounterConsumption(counterSet2,
 							map[string]resource.Quantity{
-								capacity1: four,
+								counter1: four,
 							},
 						),
-					).withAllowMultipleAllocations().withCapacityRequestPolicyRange((map[resourceapi.QualifiedName]resource.Quantity{capacity1: four})),
-					device(device3, fromCounters, nil).withDeviceCounterConsumption(
+					).withAllowMultipleAllocations().withCapacityRequestPolicyRange((map[resourceapi.QualifiedName]resource.Quantity{unqualifiedCapacity1: four})),
+					device(device3).withCapacity(unqualifiedCapacity0, "2").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1,
 							map[string]resource.Quantity{
-								capacity0: two,
+								counter0: two,
 							},
 						),
 						deviceCounterConsumption(counterSet2,
 							map[string]resource.Quantity{
-								capacity1: four,
+								counter1: four,
 							},
 						),
-					).withAllowMultipleAllocations().withCapacityRequestPolicyRange((map[resourceapi.QualifiedName]resource.Quantity{capacity1: four})),
+					).withAllowMultipleAllocations().withCapacityRequestPolicyRange((map[resourceapi.QualifiedName]resource.Quantity{unqualifiedCapacity1: four})), // TODO (https://github.com/kubernetes/kubernetes/issues/140650): test also with fully-qualified name.
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 2), driverA,
 					counterSet(counterSet1,
 						map[string]resource.Quantity{
-							capacity0: four,
+							counter0: four,
 						},
 					),
 					counterSet(counterSet2,
 						map[string]resource.Quantity{
-							capacity1: resource.MustParse("8"),
+							counter1: resource.MustParse("8"),
 						},
 					),
 				),
@@ -6757,11 +6864,14 @@ func TestAllocator(t *testing.T,
 			//   - [req1] The first prioritized subrequest of req1 cannot find a device because device2 cannot be selected.
 			//     The second prioritized subrequest is then chosen and consumes the remaining 1 unit of capacity0 on device1.
 			//     Consequently, device1 is allocated to subreq1 of req1 with 1 unit of capacity0 and 2 units of capacity1.
+			//
+			// TODO (https://github.com/kubernetes/kubernetes/issues/140650): unqualified is
+			// what the *current* code writes. This might change, but has to be handled carefully.
 			expectResults: []any{allocationResult(
 				localNodeSelector(node1),
-				deviceRequestAllocationResult(req0, driverA, pool1, device1).withConsumedCapacity(&fixedShareID, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one, capacity1: two}),
-				deviceRequestAllocationResult(req2, driverA, pool1, device3).withConsumedCapacity(&fixedShareID, map[resourceapi.QualifiedName]resource.Quantity{capacity0: two, capacity1: two}),
-				deviceRequestAllocationResult(req1SubReq1, driverA, pool1, device1).withConsumedCapacity(&fixedShareID, map[resourceapi.QualifiedName]resource.Quantity{capacity0: one, capacity1: two}),
+				deviceRequestAllocationResult(req0, driverA, pool1, device1).withConsumedCapacity(&fixedShareID, map[resourceapi.QualifiedName]resource.Quantity{unqualifiedCapacity0: one, unqualifiedCapacity1: two}),
+				deviceRequestAllocationResult(req2, driverA, pool1, device3).withConsumedCapacity(&fixedShareID, map[resourceapi.QualifiedName]resource.Quantity{unqualifiedCapacity0: two, unqualifiedCapacity1: two}),
+				deviceRequestAllocationResult(req1SubReq1, driverA, pool1, device1).withConsumedCapacity(&fixedShareID, map[resourceapi.QualifiedName]resource.Quantity{unqualifiedCapacity0: one, unqualifiedCapacity1: two}),
 			)},
 		},
 		"with-distinct-constraints": {
@@ -6783,26 +6893,26 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"driverVersion": {VersionValue: ptr.To("1.0.0")},
-						"numa":          {IntValue: ptr.To(int64(0))},
-						"boolAttribute": {BoolValue: ptr.To(true)},
-					}).withAllowMultipleAllocations(),
-					device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"driverVersion": {VersionValue: ptr.To("1.0.1")},
-						"numa":          {IntValue: ptr.To(int64(1))},
-						"boolAttribute": {BoolValue: ptr.To(false)},
-					}).withAllowMultipleAllocations(),
-					device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"driverVersion": {VersionValue: ptr.To("1.0.2")},
-						"numa":          {IntValue: ptr.To(int64(2))},
-						"boolAttribute": {BoolValue: ptr.To(true)},
-					}).withAllowMultipleAllocations(),
-					device(device4, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"driverVersion": {VersionValue: ptr.To("1.0.0")},
-						"numa":          {IntValue: ptr.To(int64(3))},
-						"boolAttribute": {BoolValue: ptr.To(true)},
-					}).withAllowMultipleAllocations(),
+					device(device1).
+						withAttribute("driverVersion", semver.MustParse("1.0.0")).
+						withAttribute("numa", 0).
+						withAttribute("boolAttribute", true).
+						withAllowMultipleAllocations(),
+					device(device2).
+						withAttribute("driverVersion", semver.MustParse("1.0.1")).
+						withAttribute("numa", 1).
+						withAttribute("boolAttribute", false).
+						withAllowMultipleAllocations(),
+					device(device3).
+						withAttribute("driverVersion", semver.MustParse("1.0.2")).
+						withAttribute("numa", 2).
+						withAttribute("boolAttribute", true).
+						withAllowMultipleAllocations(),
+					device(device4).
+						withAttribute("driverVersion", semver.MustParse("1.0.0")).
+						withAttribute("numa", 3).
+						withAttribute("boolAttribute", true).
+						withAllowMultipleAllocations(),
 				),
 			),
 			node: node(node1, region1),
@@ -6829,15 +6939,9 @@ func TestAllocator(t *testing.T,
 			// constraint. Three devices exist with stringAttribute values
 			// value1, value2, value1 -- only two distinct values.
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value2")},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
+				device(device1).withAttribute("stringAttribute", "value1"),
+				device(device2).withAttribute("stringAttribute", "value2"),
+				device(device3).withAttribute("stringAttribute", "value1"),
 			)),
 			node: node(node1, region1),
 			// Expected results:
@@ -6860,15 +6964,9 @@ func TestAllocator(t *testing.T,
 			// constraint. Three devices exist with distinct values
 			// value1, value2, value3.
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value2")},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value3")},
-				}),
+				device(device1).withAttribute("stringAttribute", "value1"),
+				device(device2).withAttribute("stringAttribute", "value2"),
+				device(device3).withAttribute("stringAttribute", "value3"),
 			)),
 			node: node(node1, region1),
 			// Expected results:
@@ -6900,15 +6998,9 @@ func TestAllocator(t *testing.T,
 			// so all 3 allocated devices must be distinct. Three devices exist
 			// with values value1, value2, value1 -- only two distinct values.
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value2")},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
+				device(device1).withAttribute("stringAttribute", "value1"),
+				device(device2).withAttribute("stringAttribute", "value2"),
+				device(device3).withAttribute("stringAttribute", "value1"),
 			)),
 			node: node(node1, region1),
 			// Expected results:
@@ -6932,7 +7024,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations(),
+					device(device1).withAllowMultipleAllocations(),
 				),
 			),
 			node: node(node1, region1),
@@ -6953,7 +7045,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{"boolAttribute": {}}).withAllowMultipleAllocations(),
+					device(device1).withAttribute("boolAttribute", resourceapi.DeviceAttribute{}).withAllowMultipleAllocations(),
 				),
 			),
 			node:          node(node1, region1),
@@ -6997,12 +7089,8 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"boolAttribute": {BoolValue: ptr.To(true)},
-					}).withAllowMultipleAllocations(),
-					device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"boolAttribute": {BoolValue: ptr.To(false)},
-					}).withAllowMultipleAllocations(),
+					device(device1).withAttribute("boolAttribute", true).withAllowMultipleAllocations(),
+					device(device2).withAttribute("boolAttribute", false).withAllowMultipleAllocations(),
 				),
 			),
 			node: node(node1, region1),
@@ -7029,9 +7117,9 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil),
-					device(device2, nil, nil),
-					device(device3, nil, nil),
+					device(device1),
+					device(device2),
+					device(device3),
 				),
 			),
 			node:          node(node1, region1),
@@ -7050,18 +7138,10 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numa": {IntValue: new(int64(1))},
-					}),
-					device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numa": {IntValue: new(int64(2))},
-					}),
-					device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numa": {IntValue: new(int64(2))},
-					}),
-					device(device4, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numa": {IntValue: new(int64(2))},
-					}),
+					device(device1).withAttribute("numa", 1),
+					device(device2).withAttribute("numa", 2),
+					device(device3).withAttribute("numa", 2),
+					device(device4).withAttribute("numa", 2),
 				),
 			),
 			node:          node(node1, region1),
@@ -7080,18 +7160,10 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numa": {IntValue: new(int64(1))},
-					}),
-					device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numa": {IntValue: new(int64(2))},
-					}),
-					device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numa": {IntValue: new(int64(1))},
-					}),
-					device(device4, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numa": {IntValue: new(int64(3))},
-					}),
+					device(device1).withAttribute("numa", 1),
+					device(device2).withAttribute("numa", 2),
+					device(device3).withAttribute("numa", 1),
+					device(device4).withAttribute("numa", 3),
 				),
 			),
 			node: node(node1, region1),
@@ -7108,15 +7180,16 @@ func TestAllocator(t *testing.T,
 			},
 			claimsToAllocate: objects(
 				claim(claim0).withConstraints(resourceapi.DeviceConstraint{DistinctAttribute: &stringAttribute}).withRequests(
-					deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(one)),
-					deviceRequest(req1, classA, 1).withCapacityRequest(ptr.To(one)),
+					deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, one),
+					deviceRequest(req1, classA, 1).withCapacityRequest(capacity0, one),
 				)),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil,
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{"stringAttribute": {StringValue: ptr.To("stringAttributeValue")}},
-					).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
+					device(device1).
+						withAttribute("stringAttribute", "stringAttributeValue").
+						withAllowMultipleAllocations().
+						withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: two}),
 				),
 			),
 			node:          node(node1, region1),
@@ -7128,21 +7201,23 @@ func TestAllocator(t *testing.T,
 			},
 			claimsToAllocate: objects(
 				claim(claim0).withConstraints(resourceapi.DeviceConstraint{DistinctAttribute: &stringAttribute}).withRequests(
-					deviceRequest(req0, classA, 1).withCapacityRequest(ptr.To(two)),
-					deviceRequest(req1, classA, 1).withCapacityRequest(ptr.To(two)),
+					deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, two),
+					deviceRequest(req1, classA, 1).withCapacityRequest(capacity0, two),
 				),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil,
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{"stringAttribute": {StringValue: ptr.To("stringAttributeValue1")}},
-					).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
+					device(device1).
+						withAttribute("stringAttribute", "stringAttributeValue1").
+						withAllowMultipleAllocations().
+						withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
 				),
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device2, nil,
-						map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{"stringAttribute": {StringValue: ptr.To("stringAttributeValue2")}},
-					).withAllowMultipleAllocations().withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
+					device(device2).
+						withAttribute("stringAttribute", "stringAttributeValue2").
+						withAllowMultipleAllocations().
+						withCapacityRequestPolicyRange(map[resourceapi.QualifiedName]resource.Quantity{capacity0: four}),
 				),
 			),
 			node: node(node1, region1),
@@ -7166,12 +7241,12 @@ func TestAllocator(t *testing.T,
 				// FractionalCapacityRange intentionally not set
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(&pointTwo)),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, pointTwo)),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withFractionalCapacityRequestPolicyRange(
+					device(device1).withAllowMultipleAllocations().withFractionalCapacityRequestPolicyRange(
 						map[resourceapi.QualifiedName]resource.Quantity{capacity0: one},
 					),
 				),
@@ -7196,12 +7271,12 @@ func TestAllocator(t *testing.T,
 				FractionalCapacityRange: true,
 			},
 			claimsToAllocate: objects(
-				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(&pointTwoFive)),
+				claim(claim0).withRequests(deviceRequest(req0, classA, 1).withCapacityRequest(capacity0, pointTwoFive)),
 			),
 			classes: objects(classWithAllowMultipleAllocations(classA, driverA, true)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withAllowMultipleAllocations().withFractionalCapacityRequestPolicyRange(
+					device(device1).withAllowMultipleAllocations().withFractionalCapacityRequestPolicyRange(
 						map[resourceapi.QualifiedName]resource.Quantity{capacity0: one},
 					),
 				),
@@ -7230,12 +7305,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
+				device(device1).withAttribute("stringAttribute", "value1"),
+				device(device2).withAttribute("stringAttribute", "value1"),
 			)),
 			node: node(node1, region1),
 
@@ -7256,12 +7327,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2", "value3"}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value2", "value3", "value4"}},
-				}),
+				device(device1).withAttribute("stringAttribute", []string{"value1", "value2", "value3"}),
+				device(device2).withAttribute("stringAttribute", []string{"value2", "value3", "value4"}),
 			)),
 			node: node(node1, region1),
 
@@ -7282,15 +7349,9 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2"}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value2", "value3"}},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value3", "value1"}},
-				}),
+				device(device1).withAttribute("stringAttribute", []string{"value1", "value2"}),
+				device(device2).withAttribute("stringAttribute", []string{"value2", "value3"}),
+				device(device3).withAttribute("stringAttribute", []string{"value3", "value1"}),
 			)),
 			node: node(node1, region1),
 
@@ -7307,18 +7368,10 @@ func TestAllocator(t *testing.T,
 			)),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2"}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1"}},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value2"}},
-				}),
-				device(device4, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value2"}},
-				}),
+				device(device1).withAttribute("stringAttribute", []string{"value1", "value2"}),
+				device(device2).withAttribute("stringAttribute", []string{"value1"}),
+				device(device3).withAttribute("stringAttribute", []string{"value2"}),
+				device(device4).withAttribute("stringAttribute", []string{"value2"}),
 			)),
 			node: node(node1, region1),
 
@@ -7341,12 +7394,8 @@ func TestAllocator(t *testing.T,
 			)),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2"}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value3", "value4"}},
-				}),
+				device(device1).withAttribute("stringAttribute", []string{"value1", "value2"}),
+				device(device2).withAttribute("stringAttribute", []string{"value3", "value4"}),
 			)),
 			node: node(node1, region1),
 
@@ -7363,12 +7412,8 @@ func TestAllocator(t *testing.T,
 			)),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2"}},
-				}),
+				device(device1).withAttribute("stringAttribute", "value1"),
+				device(device2).withAttribute("stringAttribute", []string{"value1", "value2"}),
 			)),
 			node: node(node1, region1),
 
@@ -7389,15 +7434,9 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2"}},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value2", "value3"}},
-				}),
+				device(device1).withAttribute("stringAttribute", "value1"),
+				device(device2).withAttribute("stringAttribute", []string{"value1", "value2"}),
+				device(device3).withAttribute("stringAttribute", []string{"value2", "value3"}),
 			)),
 			node: node(node1, region1),
 
@@ -7414,12 +7453,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value2", "value3"}},
-				}),
+				device(device1).withAttribute("stringAttribute", "value1"),
+				device(device2).withAttribute("stringAttribute", []string{"value2", "value3"}),
 			)),
 			node: node(node1, region1),
 
@@ -7436,12 +7471,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"numa": {IntValues: []int64{0, 1, 2}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"numa": {IntValues: []int64{1, 2, 3}},
-				}),
+				device(device1).withAttribute("numa", []int64{0, 1, 2}),
+				device(device2).withAttribute("numa", []int64{1, 2, 3}),
 			)),
 			node: node(node1, region1),
 
@@ -7465,12 +7496,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"resource.kubernetes.io/numaNode": {IntValues: []int64{4}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"resource.kubernetes.io/numaNode": {IntValues: []int64{4, 5, 6, 7}},
-				}),
+				device(device1).withAttribute("resource.kubernetes.io/numaNode", []int64{4}),
+				device(device2).withAttribute("resource.kubernetes.io/numaNode", []int64{4, 5, 6, 7}),
 			)),
 			node: node(node1, region1),
 
@@ -7493,12 +7520,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"resource.kubernetes.io/numaNode": {IntValues: []int64{0}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"resource.kubernetes.io/numaNode": {IntValues: []int64{4, 5, 6, 7}},
-				}),
+				device(device1).withAttribute("resource.kubernetes.io/numaNode", []int64{0}),
+				device(device2).withAttribute("resource.kubernetes.io/numaNode", []int64{4, 5, 6, 7}),
 			)),
 			node: node(node1, region1),
 
@@ -7515,12 +7538,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"boolAttribute": {BoolValues: []bool{true, false}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"boolAttribute": {BoolValues: []bool{true}},
-				}),
+				device(device1).withAttribute("boolAttribute", []bool{true, false}),
+				device(device2).withAttribute("boolAttribute", []bool{true}),
 			)),
 			node: node(node1, region1),
 
@@ -7541,12 +7560,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion": {VersionValues: []string{"1.0.0", "1.1.0", "2.0.0"}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion": {VersionValues: []string{"1.1.0", "2.0.0", "2.1.0"}},
-				}),
+				device(device1).withAttribute("driverVersion", []semver.Version{semver.MustParse("1.0.0"), semver.MustParse("1.1.0"), semver.MustParse("2.0.0")}),
+				device(device2).withAttribute("driverVersion", []semver.Version{semver.MustParse("1.1.0"), semver.MustParse("2.0.0"), semver.MustParse("2.1.0")}),
 			)),
 			node: node(node1, region1),
 
@@ -7567,12 +7582,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{}},
-				}),
+				device(device1).withAttribute("stringAttribute", resourceapi.DeviceAttribute{}),
+				device(device2).withAttribute("stringAttribute", []string{"value"}),
 			)),
 			node:          node(node1, region1),
 			expectResults: nil,
@@ -7589,12 +7600,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2", "value3"}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value2", "value3", "value4"}},
-				}),
+				device(device1).withAttribute("stringAttribute", []string{"value1", "value2", "value3"}),
+				device(device2).withAttribute("stringAttribute", []string{"value2", "value3", "value4"}),
 			)),
 			node: node(node1, region1),
 
@@ -7612,12 +7619,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value2")},
-				}),
+				device(device1).withAttribute("stringAttribute", "value1"),
+				device(device2).withAttribute("stringAttribute", "value2"),
 			)),
 			node: node(node1, region1),
 
@@ -7639,12 +7642,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
+				device(device1).withAttribute("stringAttribute", "value1"),
+				device(device2).withAttribute("stringAttribute", "value1"),
 			)),
 			node: node(node1, region1),
 
@@ -7666,15 +7665,9 @@ func TestAllocator(t *testing.T,
 			// devices under a DistinctAttribute constraint, and the 3 devices carry
 			// values value1, value2, value1 -- only two distinct values.
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value2")},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
+				device(device1).withAttribute("stringAttribute", "value1"),
+				device(device2).withAttribute("stringAttribute", "value2"),
+				device(device3).withAttribute("stringAttribute", "value1"),
 			)),
 			node: node(node1, region1),
 			// Expected results:
@@ -7698,15 +7691,9 @@ func TestAllocator(t *testing.T,
 			// devices under a DistinctAttribute constraint, and the 3 devices carry
 			// distinct values value1, value2, value3.
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value2")},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value3")},
-				}),
+				device(device1).withAttribute("stringAttribute", "value1"),
+				device(device2).withAttribute("stringAttribute", "value2"),
+				device(device3).withAttribute("stringAttribute", "value3"),
 			)),
 			node: node(node1, region1),
 			// Expected results:
@@ -7731,15 +7718,9 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2"}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value2", "value3"}},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value3", "value4"}},
-				}),
+				device(device1).withAttribute("stringAttribute", []string{"value1", "value2"}),
+				device(device2).withAttribute("stringAttribute", []string{"value2", "value3"}),
+				device(device3).withAttribute("stringAttribute", []string{"value3", "value4"}),
 			)),
 			node: node(node1, region1),
 
@@ -7761,12 +7742,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2", "value3"}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value2", "value4", "value5"}},
-				}),
+				device(device1).withAttribute("stringAttribute", []string{"value1", "value2", "value3"}),
+				device(device2).withAttribute("stringAttribute", []string{"value2", "value4", "value5"}),
 			)),
 			node: node(node1, region1),
 
@@ -7784,15 +7761,9 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2"}},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value2", "value3"}},
-				}),
+				device(device1).withAttribute("stringAttribute", "value1"),
+				device(device2).withAttribute("stringAttribute", []string{"value1", "value2"}),
+				device(device3).withAttribute("stringAttribute", []string{"value2", "value3"}),
 			)),
 			node: node(node1, region1),
 
@@ -7814,12 +7785,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValue: new("value1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2"}},
-				}),
+				device(device1).withAttribute("stringAttribute", "value1"),
+				device(device2).withAttribute("stringAttribute", []string{"value1", "value2"}),
 			)),
 			node: node(node1, region1),
 
@@ -7837,15 +7804,9 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"numa": {IntValues: []int64{0, 1}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"numa": {IntValues: []int64{1, 2}},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"numa": {IntValues: []int64{2, 3}},
-				}),
+				device(device1).withAttribute("numa", []int64{0, 1}),
+				device(device2).withAttribute("numa", []int64{1, 2}),
+				device(device3).withAttribute("numa", []int64{2, 3}),
 			)),
 			node: node(node1, region1),
 
@@ -7867,15 +7828,9 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"boolAttribute": {BoolValues: []bool{true}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"boolAttribute": {BoolValues: []bool{true, false}},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"boolAttribute": {BoolValues: []bool{false}},
-				}),
+				device(device1).withAttribute("boolAttribute", []bool{true}),
+				device(device2).withAttribute("boolAttribute", []bool{true, false}),
+				device(device3).withAttribute("boolAttribute", []bool{false}),
 			)),
 			node: node(node1, region1),
 
@@ -7897,15 +7852,9 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion": {VersionValues: []string{"1.0.0", "1.1.0"}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion": {VersionValues: []string{"1.1.0", "2.0.0"}},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion": {VersionValues: []string{"2.0.0", "2.1.0"}},
-				}),
+				device(device1).withAttribute("driverVersion", []string{"1.0.0", "1.1.0"}),
+				device(device2).withAttribute("driverVersion", []string{"1.1.0", "2.0.0"}),
+				device(device3).withAttribute("driverVersion", []string{"2.0.0", "2.1.0"}),
 			)),
 			node: node(node1, region1),
 
@@ -7915,7 +7864,7 @@ func TestAllocator(t *testing.T,
 				deviceAllocationResult(req0, driverA, pool1, device3, false),
 			)},
 		},
-		"list-attributes-distinct-constaint-with-empty-or-unknown-type": {
+		"list-attributes-distinct-constraint-with-empty-or-unknown-type": {
 			features: Features{
 				ListTypeAttributes: true,
 				ConsumableCapacity: true,
@@ -7927,12 +7876,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion": {VersionValues: []string{}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"driverVersion": {VersionValues: nil},
-				}),
+				device(device1).withAttribute("driverVersion", resourceapi.DeviceAttribute{}),
+				device(device2).withAttribute("driverVersion", semver.MustParse("1.0.0")),
 			)),
 			node: node(node1, region1),
 
@@ -7951,12 +7896,8 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2", "value3"}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value2", "value3", "value4"}},
-				}),
+				device(device1).withAttribute("stringAttribute", []string{"value1", "value2", "value3"}),
+				device(device2).withAttribute("stringAttribute", []string{"value2", "value3", "value4"}),
 			)),
 			node: node(node1, region1),
 
@@ -7981,21 +7922,11 @@ func TestAllocator(t *testing.T,
 			),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2", "value3"}},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value3", "value4", "value5"}},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value1", "value2"}},
-				}),
-				device(device4, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value3", "value4"}},
-				}),
-				device(device0, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"stringAttribute": {StringValues: []string{"value5", "value6"}},
-				}),
+				device(device1).withAttribute("stringAttribute", []string{"value1", "value2", "value3"}),
+				device(device2).withAttribute("stringAttribute", []string{"value3", "value4", "value5"}),
+				device(device3).withAttribute("stringAttribute", []string{"value1", "value2"}),
+				device(device4).withAttribute("stringAttribute", []string{"value3", "value4"}),
+				device(device0).withAttribute("stringAttribute", []string{"value5", "value6"}),
 			)),
 			node: node(node1, region1),
 
@@ -8018,10 +7949,10 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil),
+					device(device1),
 				),
 				sliceWithDevices(slice2, node2, resourcePool(pool1, 2), driverA,
-					device(device2, nil, nil),
+					device(device2),
 				),
 			),
 			node: node(node1, region1),
@@ -8039,7 +7970,7 @@ func TestAllocator(t *testing.T,
 			slices: unwrapResourceSlices(
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice1, node1, pool1, driverA,
-						device(device1, nil, nil),
+						device(device1),
 					)
 					s.Spec.Pool.Generation = 1
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8047,7 +7978,7 @@ func TestAllocator(t *testing.T,
 				}(),
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice2, node2, pool1, driverA,
-						device(device2, nil, nil),
+						device(device2),
 					)
 					s.Spec.Pool.Generation = 2
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8078,7 +8009,7 @@ func TestAllocator(t *testing.T,
 				// Node 1, generation 1.
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice1, node1, pool1, driverA,
-						device(device1, nil, nil),
+						device(device1),
 					)
 					s.Spec.Pool.Generation = 1
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8086,7 +8017,7 @@ func TestAllocator(t *testing.T,
 				}(),
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice1, node1, pool1, driverA,
-						device(device2, nil, nil),
+						device(device2),
 					)
 					s.Spec.Pool.Generation = 1
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8095,7 +8026,7 @@ func TestAllocator(t *testing.T,
 				// Node 2, generation 2.
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice2, node2, pool1, driverA,
-						device(device1, nil, nil),
+						device(device1),
 					)
 					s.Spec.Pool.Generation = 2
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8103,7 +8034,7 @@ func TestAllocator(t *testing.T,
 				}(),
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice2, node2, pool1, driverA,
-						device(device2, nil, nil),
+						device(device2),
 					)
 					s.Spec.Pool.Generation = 2
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8131,7 +8062,7 @@ func TestAllocator(t *testing.T,
 				// Node 2, generation 1.
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice1, node2, pool1, driverA,
-						device(device1, nil, nil),
+						device(device1),
 					)
 					s.Spec.Pool.Generation = 1
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8139,7 +8070,7 @@ func TestAllocator(t *testing.T,
 				}(),
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice1, node2, pool1, driverA,
-						device(device2, nil, nil),
+						device(device2),
 					)
 					s.Spec.Pool.Generation = 1
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8148,7 +8079,7 @@ func TestAllocator(t *testing.T,
 				// Node 1, generation 2.
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice2, node1, pool1, driverA,
-						device(device1, nil, nil),
+						device(device1),
 					)
 					s.Spec.Pool.Generation = 2
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8156,7 +8087,7 @@ func TestAllocator(t *testing.T,
 				}(),
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice2, node1, pool1, driverA,
-						device(device2, nil, nil),
+						device(device2),
 					)
 					s.Spec.Pool.Generation = 2
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8180,7 +8111,7 @@ func TestAllocator(t *testing.T,
 				// Node 1, generation 1.
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice1, node1, pool1, driverA,
-						device(device1, nil, nil),
+						device(device1),
 					)
 					s.Spec.Pool.Generation = 1
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8188,7 +8119,7 @@ func TestAllocator(t *testing.T,
 				}(),
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice1, node1, pool1, driverA,
-						device(device2, nil, nil),
+						device(device2),
 					)
 					s.Spec.Pool.Generation = 1
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8197,7 +8128,7 @@ func TestAllocator(t *testing.T,
 				// Node 2, generation 2.
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice2, node2, pool1, driverA,
-						device(device1, nil, nil),
+						device(device1),
 					)
 					s.Spec.Pool.Generation = 2
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8225,7 +8156,7 @@ func TestAllocator(t *testing.T,
 				// Node 2, generation 1.
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice1, node2, pool1, driverA,
-						device(device1, nil, nil),
+						device(device1),
 					)
 					s.Spec.Pool.Generation = 1
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8233,7 +8164,7 @@ func TestAllocator(t *testing.T,
 				}(),
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice1, node2, pool1, driverA,
-						device(device2, nil, nil),
+						device(device2),
 					)
 					s.Spec.Pool.Generation = 1
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8242,7 +8173,7 @@ func TestAllocator(t *testing.T,
 				// Node 1, generation 2.
 				func() wrapResourceSliceWithDevices {
 					s := sliceWithDevices(slice2, node1, pool1, driverA,
-						device(device1, nil, nil),
+						device(device1),
 					)
 					s.Spec.Pool.Generation = 2
 					s.Spec.Pool.ResourceSliceCount = 2
@@ -8264,13 +8195,13 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 4), driverA,
-					device(device1, nil, nil),
+					device(device1),
 				),
 				sliceWithCounterSets(slice2, node1, resourcePool(pool1, 4), driverA,
 					counterSet(counterSet1, nil),
 				),
 				sliceWithDevices(slice3, node1, resourcePool(pool1, 4), driverA,
-					device(device2, nil, nil),
+					device(device2),
 				),
 				sliceWithCounterSets(slice4, node1, resourcePool(pool1, 4), driverA,
 					counterSet(counterSet1, nil),
@@ -8291,7 +8222,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet2, nil),
 					),
 				),
@@ -8314,7 +8245,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 							"memory": resource.MustParse("8Gi"),
 						}),
@@ -8341,7 +8272,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 							"memory": resource.MustParse("8Gi"),
 						}),
@@ -8385,19 +8316,19 @@ func TestAllocator(t *testing.T,
 					}),
 				),
 				sliceWithDevices(slice2, node1, resourcePool(pool1, 3), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withCapacity("memory", "6Gi").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 							"memory": resource.MustParse("6Gi"),
 						}),
 					),
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withCapacity("memory", "2Gi").withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 							"memory": resource.MustParse("2Gi"),
 						}),
 					),
 				),
 				sliceWithDevices(slice3, node2, resourcePool(pool1, 3), driverA,
-					device(device3, nil, nil).withDeviceCounterConsumption(
+					device(device3).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 							"memory": resource.MustParse("6Gi"),
 						}),
@@ -8428,19 +8359,19 @@ func TestAllocator(t *testing.T,
 					}),
 				),
 				sliceWithDevices(slice2, node1, resourcePool(pool1, 3), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 							"memory": resource.MustParse("6Gi"),
 						}),
 					),
 				),
 				sliceWithDevices(slice3, node2, resourcePool(pool1, 3), driverA,
-					device(device2, fromCounters, nil).withDeviceCounterConsumption(
+					device(device2).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 							"memory": resource.MustParse("6Gi"),
 						}),
 					),
-					device(device3, fromCounters, nil).withDeviceCounterConsumption(
+					device(device3).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 							"memory": resource.MustParse("2Gi"),
 						}),
@@ -8473,14 +8404,14 @@ func TestAllocator(t *testing.T,
 					}),
 				),
 				sliceWithDevices(slice2, node1, resourcePool(pool1, 3), driverA,
-					device(device1, fromCounters, nil).withDeviceCounterConsumption(
+					device(device1).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet1, map[string]resource.Quantity{
 							"memory": resource.MustParse("6Gi"),
 						}),
 					),
 				),
 				sliceWithDevices(slice3, node2, resourcePool(pool1, 3), driverA,
-					device(device3, nil, nil).withDeviceCounterConsumption(
+					device(device3).withDeviceCounterConsumption(
 						deviceCounterConsumption(counterSet2, map[string]resource.Quantity{
 							"memory": resource.MustParse("6Gi"),
 						}),
@@ -8499,10 +8430,10 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node2, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil),
+					device(device1),
 				),
 				sliceWithDevices(slice2, node1, resourcePool(pool1, 2), driverA,
-					device(device2, nil, nil),
+					device(device2),
 				),
 			),
 			node: node(node1, region1),
@@ -8520,13 +8451,13 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil),
+					device(device1),
 				),
 				sliceWithDevices(slice2, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil),
+					device(device1),
 				),
 				sliceWithDevices(slice3, node1, resourcePool(pool2, 1), driverA,
-					device(device2, nil, nil),
+					device(device2),
 				),
 			),
 			node: node(node1, region1),
@@ -8544,13 +8475,13 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil),
+					device(device1),
 				),
 				sliceWithDevices(slice2, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil),
+					device(device1),
 				),
 				sliceWithDevices(slice3, node1, resourcePool(pool2, 1), driverA,
-					device(device2, nil, nil),
+					device(device2),
 				),
 			),
 			allocatedDevices: []DeviceID{
@@ -8568,7 +8499,7 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil),
+					device(device1),
 				),
 			),
 			node: node(node1, region1),
@@ -8579,10 +8510,10 @@ func TestAllocator(t *testing.T,
 			)),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, nil),
-				device(device2, nil, nil),
-				device(device3, nil, nil),
-				device(device4, nil, nil),
+				device(device1),
+				device(device2),
+				device(device3),
+				device(device4),
 			)),
 			node:                            node(node1, region1),
 			expectResults:                   nil,
@@ -8598,12 +8529,12 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil),
-					device(device2, nil, nil),
+					device(device1),
+					device(device2),
 				),
 				sliceWithDevices(slice2, node1, resourcePool(pool1, 2), driverA,
-					device(device3, nil, nil),
-					device(device4, nil, nil),
+					device(device3),
+					device(device4),
 				),
 			),
 			node:                            node(node1, region1),
@@ -8620,14 +8551,14 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, nil),
+					device(device1),
 				),
 				sliceWithDevices(slice2, node1, resourcePool(pool1, 2), driverA,
-					device(device2, nil, nil),
+					device(device2),
 				),
 				sliceWithDevices(slice3, node1, pool2, driverA,
-					device(device3, nil, nil),
-					device(device4, nil, nil),
+					device(device3),
+					device(device4),
 				),
 			),
 			node:                            node(node1, region1),
@@ -8644,16 +8575,16 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil),
+					device(device1),
 				),
 				sliceWithDevices(slice2, node1, pool2, driverA,
-					device(device2, nil, nil),
+					device(device2),
 				),
 				sliceWithDevices(slice3, node1, pool3, driverA,
-					device(device3, nil, nil),
+					device(device3),
 				),
 				sliceWithDevices(slice4, node1, pool4, driverA,
-					device(device4, nil, nil),
+					device(device4),
 				),
 			),
 			node:                            node(node1, region1),
@@ -8685,15 +8616,9 @@ func TestAllocator(t *testing.T,
 			// testing {device2, device1} for req-1 and thus finds the solution
 			// faster.
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"type": {StringValue: ptr.To("X")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"type": {StringValue: ptr.To("Y")},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"type": {StringValue: ptr.To("Y")},
-				}),
+				device(device1).withAttribute("type", "X"),
+				device(device2).withAttribute("type", "Y"),
+				device(device3).withAttribute("type", "Y"),
 			)),
 			node: node(node1, region1),
 			expectResults: []any{allocationResult(
@@ -8733,21 +8658,17 @@ func TestAllocator(t *testing.T,
 			// faster.
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, resourcePool(pool1, 2), driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"type": {StringValue: ptr.To("X")},
-					}),
+					device(device1).withAttribute("type", "X"),
 				),
 				sliceWithDevices(slice2, node1, resourcePool(pool1, 2), driverA,
-					device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"type": {StringValue: ptr.To("Y")},
-					}),
+					device(device2).withAttribute("type", "Y"),
 				),
 				// Use a binding condition here to make sure pool2 is searched after pool1 when
 				// trying to allocate devices. This makes sure we see the same results every time.
 				sliceWithDevices(slice3, node1, pool2, driverA,
-					device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"type": {StringValue: ptr.To("Y")},
-					}).withBindingConditions([]string{"IsPrepare"}, []string{}),
+					device(device3).
+						withAttribute("type", "Y").
+						withBindingConditions([]string{"IsPrepare"}, []string{}),
 				),
 			),
 			node: node(node1, region1),
@@ -8797,15 +8718,9 @@ func TestAllocator(t *testing.T,
 			// testing {device2, device1} for req-1 and thus finds the solution
 			// faster.
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"type": {StringValue: ptr.To("X")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"type": {StringValue: ptr.To("Y")},
-				}),
-				device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"type": {StringValue: ptr.To("Y")},
-				}),
+				device(device1).withAttribute("type", "X"),
+				device(device2).withAttribute("type", "Y"),
+				device(device3).withAttribute("type", "Y"),
 			)),
 			node: node(node1, region1),
 			expectResults: []any{allocationResult(
@@ -8867,20 +8782,12 @@ func TestAllocator(t *testing.T,
 			),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numa": {StringValue: new("numa-0")},
-					}),
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numa": {StringValue: new("numa-1")},
-					}),
+					device(device2).withAttribute("numa", "numa-0"),
+					device(device1).withAttribute("numa", "numa-1"),
 				),
 				sliceWithDevices(slice2, node1, pool2, driverB,
-					device(device3, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numaNode": {StringValue: new("numa-1")},
-					}),
-					device(device4, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"numaNode": {StringValue: new("numa-2")},
-					}),
+					device(device3).withAttribute("numaNode", "numa-1"),
+					device(device4).withAttribute("numaNode", "numa-2"),
 				),
 			),
 			node: node(node1, region1),
@@ -8946,15 +8853,13 @@ func TestAllocator(t *testing.T,
 			),
 			slices: unwrapResourceSlices(
 				sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"foo": {StringValue: new("A")},
-						"bar": {StringValue: new("B")},
-					}),
+					device(device1).
+						withAttribute("foo", "A").
+						withAttribute("bar", "B"),
 				),
 				sliceWithDevices(slice2, node1, pool2, driverB,
-					device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-						"baz": {StringValue: new("B")},
-					}),
+					device(device2).
+						withAttribute("baz", "B"),
 				),
 			),
 			node: node(node1, region1),
@@ -9000,12 +8905,8 @@ func TestAllocator(t *testing.T,
 			classes: objects(class(classA, "dra.example.com")),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, "dra.example.com",
 				// Mismatched physical attributes.
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"myAttr": {StringValue: new("value-1")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"myAttr": {StringValue: new("value-2")},
-				}),
+				device(device1).withAttribute("myAttr", "value-1"),
+				device(device2).withAttribute("myAttr", "value-2"),
 			)),
 			node: node(node1, region1),
 			expectResults: []any{allocationResult(
@@ -9047,9 +8948,7 @@ func TestAllocator(t *testing.T,
 			)),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"existingAttr": {StringValue: new("yes")},
-				}),
+				device(device1).withAttribute("existingAttr", "yes"),
 			)),
 			node:        node(node1, region1),
 			expectError: gomega.MatchError(gomega.ContainSubstring("no such key: missingAttr")),
@@ -9085,12 +8984,8 @@ func TestAllocator(t *testing.T,
 			)),
 			classes: objects(class(classA, driverA)),
 			slices: unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-				device(device1, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"static": {StringValue: new("value")},
-				}),
-				device(device2, nil, map[resourceapi.QualifiedName]resourceapi.DeviceAttribute{
-					"static": {IntValue: new(int64(1))},
-				}),
+				device(device1).withAttribute("static", "value"),
+				device(device2).withAttribute("static", 1),
 			)),
 			node:          node(node1, region1),
 			expectResults: nil,
@@ -9109,20 +9004,27 @@ func TestAllocator(t *testing.T,
 				// That one took over 30 seconds, this one here only 0.07 seconds.
 				// But even that is too long when we interrupt in the near future or
 				// even before starting...
+				deviceClass := class(classA, driverA)
 				classLister := informerLister[resourceapi.DeviceClass]{
-					objs: []*resourceapi.DeviceClass{class(classA, driverA)},
+					objs: []*resourceapi.DeviceClass{deviceClass},
 				}
 				claimsToAllocate := unwrap(claimWithRequests(claim0, nil,
 					request(req0, classA, 6),
 				))
 				slices := unwrapResourceSlices(sliceWithDevices(slice1, node1, pool1, driverA,
-					device(device1, nil, nil),
-					device(device2, nil, nil),
-					device(device3, nil, nil),
-					device(device4, nil, nil),
-					device("device-5", nil, nil),
+					device(device1),
+					device(device2),
+					device(device3),
+					device(device4),
+					device("device-5"),
 				))
 				node := node(node1, region1)
+
+				t.Logf("ResourceSlices:\n%s\n\nResourceClaims:\n%s\n\nDeviceClass:\n%s",
+					format.Object(slices, 1),
+					format.Object(claimsToAllocate, 1),
+					format.Object(deviceClass, 1),
+				)
 
 				switch name {
 				case "off":
@@ -9191,6 +9093,9 @@ func RunTestAllocator(t *testing.T,
 				classLister.objs = append(classLister.objs, class.DeepCopy())
 			}
 			claimsToAllocate := slices.Clone(tc.claimsToAllocate)
+			for i, claim := range claimsToAllocate {
+				claimsToAllocate[i] = wrapResourceClaim{claim.DeepCopy()}
+			}
 			allocatedDevices := slices.Clone(tc.allocatedDevices)
 			allocatedShare := tc.allocatedCapacityDevices.Clone()
 			var slices []*resourceapi.ResourceSlice
@@ -9200,6 +9105,12 @@ func RunTestAllocator(t *testing.T,
 					slices[i] = slice.DeepCopy()
 				}
 			}
+			t.Logf("ResourceSlices:\n%s\n\nResourceClaims:\n%s\n\nDeviceClasses:\n%s\nallocated capacity:\n%s",
+				format.Object(slices, 1),
+				format.Object(claimsToAllocate, 1),
+				format.Object(classLister.objs, 1),
+				format.Object(allocatedShare, 1),
+			)
 			allocatedState := AllocatedState{
 				AllocatedDevices:         sets.New(allocatedDevices...),
 				AllocatedSharedDeviceIDs: tc.allocatedSharedDeviceIDs,
@@ -9223,6 +9134,9 @@ func RunTestAllocator(t *testing.T,
 				matchError = gomega.Not(gomega.HaveOccurred())
 			}
 			g.Expect(err).To(matchError)
+			if tc.expectErrorIs != nil {
+				g.Expect(err).To(gomega.MatchError(tc.expectErrorIs))
+			}
 
 			t.Logf("name: %s", name)
 			// replace any share id with fixed value for testing
@@ -9237,7 +9151,7 @@ func RunTestAllocator(t *testing.T,
 			g.Expect(results).To(gomega.ConsistOf(tc.expectResults...))
 
 			// Objects that the allocator had access to should not have been modified.
-			g.Expect(claimsToAllocate).To(gomega.HaveExactElements(tc.claimsToAllocate))
+			g.Expect(claimsToAllocate).To(gomega.Equal(tc.claimsToAllocate))
 			g.Expect(allocatedDevices).To(gomega.HaveExactElements(tc.allocatedDevices))
 			g.Expect(slices).To(gomega.Equal(tc.slices))
 			g.Expect(classLister.objs).To(gomega.ConsistOf(tc.classes))

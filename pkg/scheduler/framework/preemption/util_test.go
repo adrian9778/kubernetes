@@ -17,6 +17,7 @@ limitations under the License.
 package preemption
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -32,6 +33,28 @@ import (
 	st "k8s.io/kubernetes/pkg/scheduler/testing"
 )
 
+type mockPodGroupLister struct {
+	podGroups map[string]*schedulingv1beta1.PodGroup
+}
+
+func (m *mockPodGroupLister) Get(namespace, name string) (*schedulingv1beta1.PodGroup, error) {
+	if pg, ok := m.podGroups[name]; ok {
+		return pg, nil
+	}
+	return nil, fmt.Errorf("pod group %s not found", name)
+}
+
+type mockCompositePodGroupLister struct {
+	compositePodGroups map[string]*schedulingv1alpha3.CompositePodGroup
+}
+
+func (m *mockCompositePodGroupLister) Get(namespace, name string) (*schedulingv1alpha3.CompositePodGroup, error) {
+	if cpg, ok := m.compositePodGroups[name]; ok {
+		return cpg, nil
+	}
+	return nil, fmt.Errorf("composite pod group %s not found", name)
+}
+
 func TestFilterVictimsWithPDBViolation(t *testing.T) {
 	newPodInfo := func(p *v1.Pod) fwk.PodInfo {
 		pi, _ := framework.NewPodInfo(p)
@@ -41,6 +64,7 @@ func TestFilterVictimsWithPDBViolation(t *testing.T) {
 	viNoPDBMatch := &victim{pods: []fwk.PodInfo{newPodInfo(st.MakePod().Name("p1").Label("app", "foo").Obj())}, keyType: fwk.PodKeyType}
 	viMatchPDB := &victim{pods: []fwk.PodInfo{newPodInfo(st.MakePod().Name("p1").Namespace(metav1.NamespaceDefault).Label("app", "foo").Obj())}, keyType: fwk.PodKeyType}
 	viMatchPDB2 := &victim{pods: []fwk.PodInfo{newPodInfo(st.MakePod().Name("p2").Namespace(metav1.NamespaceDefault).Label("app", "foo").Obj())}, keyType: fwk.PodKeyType}
+	viNoLabels := &victim{pods: []fwk.PodInfo{newPodInfo(st.MakePod().Name("p1").Namespace(metav1.NamespaceDefault).Obj())}, keyType: fwk.PodKeyType}
 	viPodGroup := &victim{
 		pods: []fwk.PodInfo{
 			newPodInfo(st.MakePod().Name("p1").Namespace(metav1.NamespaceDefault).Label("app", "foo").Obj()),
@@ -205,7 +229,29 @@ func TestFilterVictimsWithPDBViolation(t *testing.T) {
 				{
 					ObjectMeta: metav1.ObjectMeta{Namespace: metav1.NamespaceDefault},
 					Spec: policy.PodDisruptionBudgetSpec{
-						Selector: &metav1.LabelSelector{}, // matches nothing
+						Selector: &metav1.LabelSelector{},
+					},
+					Status: policy.PodDisruptionBudgetStatus{
+						DisruptionsAllowed: 0,
+					},
+				},
+			},
+			expectedViolating: []ViolatingVictim[*victim]{
+				{
+					Victim:       viMatchPDB,
+					ViolateCount: 1,
+				},
+			},
+			expectedNonViolating: nil,
+		},
+		{
+			name:    "PDB with nil selector",
+			victims: []*victim{viMatchPDB},
+			pdbs: []*policy.PodDisruptionBudget{
+				{
+					ObjectMeta: metav1.ObjectMeta{Namespace: metav1.NamespaceDefault},
+					Spec: policy.PodDisruptionBudgetSpec{
+						Selector: nil,
 					},
 					Status: policy.PodDisruptionBudgetStatus{
 						DisruptionsAllowed: 0,
@@ -214,6 +260,74 @@ func TestFilterVictimsWithPDBViolation(t *testing.T) {
 			},
 			expectedViolating:    nil,
 			expectedNonViolating: []*victim{viMatchPDB},
+		},
+		{
+			name:    "unlabeled victim with empty PDB selector",
+			victims: []*victim{viNoLabels},
+			pdbs: []*policy.PodDisruptionBudget{
+				{
+					ObjectMeta: metav1.ObjectMeta{Namespace: metav1.NamespaceDefault},
+					Spec: policy.PodDisruptionBudgetSpec{
+						Selector: &metav1.LabelSelector{},
+					},
+					Status: policy.PodDisruptionBudgetStatus{
+						DisruptionsAllowed: 0,
+					},
+				},
+			},
+			expectedViolating: []ViolatingVictim[*victim]{
+				{
+					Victim:       viNoLabels,
+					ViolateCount: 1,
+				},
+			},
+			expectedNonViolating: nil,
+		},
+		{
+			name:    "unlabeled victim with nil PDB selector",
+			victims: []*victim{viNoLabels},
+			pdbs: []*policy.PodDisruptionBudget{
+				{
+					ObjectMeta: metav1.ObjectMeta{Namespace: metav1.NamespaceDefault},
+					Spec: policy.PodDisruptionBudgetSpec{
+						Selector: nil,
+					},
+					Status: policy.PodDisruptionBudgetStatus{
+						DisruptionsAllowed: 0,
+					},
+				},
+			},
+			expectedViolating:    nil,
+			expectedNonViolating: []*victim{viNoLabels},
+		},
+		{
+			name:    "unlabeled victim matching PDB",
+			victims: []*victim{viNoLabels},
+			pdbs: []*policy.PodDisruptionBudget{
+				{
+					ObjectMeta: metav1.ObjectMeta{Namespace: metav1.NamespaceDefault},
+					Spec: policy.PodDisruptionBudgetSpec{
+						Selector: &metav1.LabelSelector{
+							MatchExpressions: []metav1.LabelSelectorRequirement{
+								{
+									Key:      "app",
+									Operator: metav1.LabelSelectorOpDoesNotExist,
+								},
+							},
+						},
+					},
+					Status: policy.PodDisruptionBudgetStatus{
+						DisruptionsAllowed: 0,
+					},
+				},
+			},
+			expectedViolating: []ViolatingVictim[*victim]{
+				{
+					Victim:       viNoLabels,
+					ViolateCount: 1,
+				},
+			},
+			expectedNonViolating: nil,
 		},
 		{
 			name:    "Multiple PDBs",
@@ -603,6 +717,115 @@ func TestMoreImportantVictim(t *testing.T) {
 	}
 }
 
+func TestLessByStartTimeThenIdentity(t *testing.T) {
+	newPodInfo := func(p *v1.Pod) fwk.PodInfo {
+		pi, _ := framework.NewPodInfo(p)
+		return pi
+	}
+
+	now := &metav1.Time{Time: time.Unix(1000, 0)}
+	before := &metav1.Time{Time: time.Unix(500, 0)}
+
+	tests := []struct {
+		name string
+		vi1  *victim
+		vi2  *victim
+		want bool
+	}{
+		{
+			name: "earlier start time wins",
+			vi1: &victim{
+				pods:              []fwk.PodInfo{newPodInfo(st.MakePod().Name("a").UID("uid-a").Obj())},
+				earliestStartTime: before,
+				keyType:           fwk.PodKeyType,
+			},
+			vi2: &victim{
+				pods:              []fwk.PodInfo{newPodInfo(st.MakePod().Name("b").UID("uid-b").Obj())},
+				earliestStartTime: now,
+				keyType:           fwk.PodKeyType,
+			},
+			want: true,
+		},
+		{
+			name: "later start time loses",
+			vi1: &victim{
+				pods:              []fwk.PodInfo{newPodInfo(st.MakePod().Name("a").UID("uid-a").Obj())},
+				earliestStartTime: now,
+				keyType:           fwk.PodKeyType,
+			},
+			vi2: &victim{
+				pods:              []fwk.PodInfo{newPodInfo(st.MakePod().Name("b").UID("uid-b").Obj())},
+				earliestStartTime: before,
+				keyType:           fwk.PodKeyType,
+			},
+			want: false,
+		},
+		{
+			name: "equal start time, lower UID wins",
+			vi1: &victim{
+				pods:              []fwk.PodInfo{newPodInfo(st.MakePod().Name("a").UID("aaa").Obj())},
+				earliestStartTime: now,
+				keyType:           fwk.PodKeyType,
+			},
+			vi2: &victim{
+				pods:              []fwk.PodInfo{newPodInfo(st.MakePod().Name("b").UID("zzz").Obj())},
+				earliestStartTime: now,
+				keyType:           fwk.PodKeyType,
+			},
+			want: true,
+		},
+		{
+			name: "equal start time, higher UID loses",
+			vi1: &victim{
+				pods:              []fwk.PodInfo{newPodInfo(st.MakePod().Name("a").UID("zzz").Obj())},
+				earliestStartTime: now,
+				keyType:           fwk.PodKeyType,
+			},
+			vi2: &victim{
+				pods:              []fwk.PodInfo{newPodInfo(st.MakePod().Name("b").UID("aaa").Obj())},
+				earliestStartTime: now,
+				keyType:           fwk.PodKeyType,
+			},
+			want: false,
+		},
+		{
+			name: "equal start time, equal UID returns false",
+			vi1: &victim{
+				pods:              []fwk.PodInfo{newPodInfo(st.MakePod().Name("a").UID("same-uid").Obj())},
+				earliestStartTime: now,
+				keyType:           fwk.PodKeyType,
+			},
+			vi2: &victim{
+				pods:              []fwk.PodInfo{newPodInfo(st.MakePod().Name("b").UID("same-uid").Obj())},
+				earliestStartTime: now,
+				keyType:           fwk.PodKeyType,
+			},
+			want: false,
+		},
+		{
+			name: "nil start times, falls back to UID comparison",
+			vi1: &victim{
+				pods:    []fwk.PodInfo{newPodInfo(st.MakePod().Name("a").UID("aaa").Obj())},
+				keyType: fwk.PodKeyType,
+			},
+			vi2: &victim{
+				pods:    []fwk.PodInfo{newPodInfo(st.MakePod().Name("b").UID("zzz").Obj())},
+				keyType: fwk.PodKeyType,
+			},
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MoreImportantVictim(tt.vi1, tt.vi2)
+			if got != tt.want {
+				t.Errorf("MoreImportantVictim() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPodTerminatingByPreemption(t *testing.T) {
 	tests := []struct {
 		name string
@@ -818,9 +1041,9 @@ func TestGetPodPriority(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := GetPodPriority(tt.pod, tt.podGroupLister, tt.compositePodGroupLister)
+			got := getPodPriority(tt.pod, tt.podGroupLister, tt.compositePodGroupLister)
 			if got != tt.expectedPriority {
-				t.Errorf("GetPodPriority() = %v, want %v", got, tt.expectedPriority)
+				t.Errorf("getPodPriority() = %v, want %v", got, tt.expectedPriority)
 			}
 		})
 	}
@@ -838,22 +1061,30 @@ func TestTraverseHierarchyUp(t *testing.T) {
 		expectedVisitedKeys     []fwk.EntityKey
 	}{
 		{
-			name:                    "nil podGroupLister",
-			startKey:                fwk.PodGroupKey(namespace, "pg1"),
-			podGroupLister:          nil,
-			compositePodGroupLister: nil,
-			expectedVisitedKeys:     nil,
-		},
-		{
 			name:     "nil compositePodGroupLister",
 			startKey: fwk.PodGroupKey(namespace, "pg1"),
 			podGroupLister: &mockPodGroupLister{
 				podGroups: map[string]*schedulingv1beta1.PodGroup{
-					"pg1": st.MakePodGroup().Name("pg1").Obj(),
+					"pg1": st.MakePodGroup().Namespace(namespace).Name("pg1").Obj(),
 				},
 			},
 			compositePodGroupLister: nil,
-			expectedVisitedKeys:     nil,
+			expectedVisitedKeys: []fwk.EntityKey{
+				fwk.PodGroupKey(namespace, "pg1"),
+			},
+		},
+		{
+			name:     "nil compositePodGroupLister with PG pointing to a parent CPG",
+			startKey: fwk.PodGroupKey(namespace, "pg1"),
+			podGroupLister: &mockPodGroupLister{
+				podGroups: map[string]*schedulingv1beta1.PodGroup{
+					"pg1": st.MakePodGroup().Namespace(namespace).Name("pg1").ParentCompositePodGroup("cpg").Obj(),
+				},
+			},
+			compositePodGroupLister: nil,
+			expectedVisitedKeys: []fwk.EntityKey{
+				fwk.PodGroupKey(namespace, "pg1"),
+			},
 		},
 		{
 			name:                    "unsupported key type",
@@ -1006,11 +1237,12 @@ func TestTraverseHierarchyUp(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var visitedKeys []fwk.EntityKey
-			traverseFn := func(key fwk.EntityKey, pg *schedulingv1beta1.PodGroup, cpg *schedulingv1alpha3.CompositePodGroup) bool {
-				visitedKeys = append(visitedKeys, key)
-				return key.Name == tt.stopAt
+			for gpg := range traverseHierarchyUp(namespace, tt.startKey, tt.podGroupLister, tt.compositePodGroupLister) {
+				visitedKeys = append(visitedKeys, gpg.GetKey())
+				if gpg.GetName() == tt.stopAt {
+					break
+				}
 			}
-			TraverseHierarchyUp(namespace, tt.startKey, tt.podGroupLister, tt.compositePodGroupLister, traverseFn)
 			if diff := cmp.Diff(tt.expectedVisitedKeys, visitedKeys); diff != "" {
 				t.Errorf("TraverseHierarchyUp() mismatch (-want, +got):\n%s", diff)
 			}

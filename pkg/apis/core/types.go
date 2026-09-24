@@ -1982,7 +1982,9 @@ type PodCertificateProjection struct {
 	// The type of keypair Kubelet will generate for the pod.
 	//
 	// Valid values are "RSA3072", "RSA4096", "ECDSAP256", "ECDSAP384",
-	// "ECDSAP521", and "ED25519".
+	// "ECDSAP521", "ED25519", "MLDSA44", "MLDSA65", and "MLDSA87".
+	//
+	// MLDSA key types are only allowed when the PodCertificateMLDSA feature gate is enabled.
 	KeyType string
 
 	// maxExpirationSeconds is the maximum lifetime permitted for the
@@ -2490,7 +2492,8 @@ type ResourceFieldSelector struct {
 	ContainerName string
 	// Required: resource to select
 	Resource string
-	// Specifies the output format of the exposed resources, defaults to "1"
+	// Divisor optionally indicates how the resource from the container should be scaled.
+	// If unset or 0, the resource is not scaled (divisor is treated as 1).
 	// +optional
 	Divisor resource.Quantity
 }
@@ -2760,12 +2763,8 @@ type ResourceRequirements struct {
 	// Claims lists the names of resources, defined in spec.resourceClaims,
 	// that are used by this container.
 	//
-	// This field depends on the
-	// DynamicResourceAllocation feature gate.
-	//
 	// This field is immutable. It can only be set for containers.
 	//
-	// +featureGate=DynamicResourceAllocation
 	// +optional
 	Claims []ResourceClaim
 }
@@ -4138,13 +4137,8 @@ type PodSpec struct {
 	// and reserved before the Pod is allowed to start. The resources
 	// will be made available to those containers which consume them
 	// by name.
-	//
-	// This is a stable field but requires that the
-	// DynamicResourceAllocation feature gate is enabled.
-	//
 	// This field is immutable.
 	//
-	// +featureGate=DynamicResourceAllocation
 	// +optional
 	ResourceClaims []PodResourceClaim
 	// Resources is the total amount of CPU and Memory resources required by all
@@ -4910,7 +4904,6 @@ type PodStatus struct {
 	Resize PodResizeStatus
 
 	// Status of resource claims.
-	// +featureGate=DynamicResourceAllocation
 	// +optional
 	ResourceClaimStatuses []PodResourceClaimStatus
 
