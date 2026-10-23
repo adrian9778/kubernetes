@@ -17,12 +17,14 @@ limitations under the License.
 package devicemanager
 
 import (
+	"cmp"
 	"context"
 	goerrors "errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -468,6 +470,12 @@ func (m *ManagerImpl) markResourceUnhealthy(logger klog.Logger, resourceName str
 	m.unhealthyDevices[resourceName] = m.unhealthyDevices[resourceName].Union(healthyDevices)
 }
 
+// Values reported in the health_state label of metrics.DevicePluginDevices.
+const (
+	healthStateHealthy   = "healthy"
+	healthStateUnhealthy = "unhealthy"
+)
+
 // GetCapacity is expected to be called when Kubelet updates its node status.
 // The first returned variable contains the registered device plugin resource capacity.
 // The second returned variable contains the registered device plugin resource allocatable.
@@ -498,6 +506,7 @@ func (m *ManagerImpl) GetCapacity(logger klog.Logger) (v1.ResourceList, v1.Resou
 		} else {
 			capacity[v1.ResourceName(resourceName)] = *resource.NewQuantity(int64(devices.Len()), resource.DecimalSI)
 			allocatable[v1.ResourceName(resourceName)] = *resource.NewQuantity(int64(devices.Len()), resource.DecimalSI)
+			metrics.DevicePluginDevices.WithLabelValues(resourceName, healthStateHealthy).Set(float64(devices.Len()))
 		}
 	}
 	for resourceName, devices := range m.unhealthyDevices {
@@ -512,6 +521,7 @@ func (m *ManagerImpl) GetCapacity(logger klog.Logger) (v1.ResourceList, v1.Resou
 			unhealthyCount := *resource.NewQuantity(int64(devices.Len()), resource.DecimalSI)
 			capacityCount.Add(unhealthyCount)
 			capacity[v1.ResourceName(resourceName)] = capacityCount
+			metrics.DevicePluginDevices.WithLabelValues(resourceName, healthStateUnhealthy).Set(float64(devices.Len()))
 		}
 	}
 
@@ -519,6 +529,10 @@ func (m *ManagerImpl) GetCapacity(logger klog.Logger) (v1.ResourceList, v1.Resou
 		delete(m.endpoints, resourceName)
 		delete(m.healthyDevices, resourceName)
 		delete(m.unhealthyDevices, resourceName)
+		// Drop the series as well, otherwise the last observed counts are
+		// reported forever for a resource that no longer exists.
+		metrics.DevicePluginDevices.DeleteLabelValues(resourceName, healthStateHealthy)
+		metrics.DevicePluginDevices.DeleteLabelValues(resourceName, healthStateUnhealthy)
 	}
 
 	m.mutex.Unlock()
@@ -1292,6 +1306,16 @@ func (m *ManagerImpl) UpdateAllocatedResourcesStatus(_ klog.Logger, pod *v1.Pod,
 				status.ContainerStatuses[i].AllocatedResourcesStatus = append(status.ContainerStatuses[i].AllocatedResourcesStatus, resourceStatus)
 			}
 		}
+
+		cs := &status.ContainerStatuses[i]
+		for j := range cs.AllocatedResourcesStatus {
+			slices.SortFunc(cs.AllocatedResourcesStatus[j].Resources, func(a, b v1.ResourceHealth) int {
+				return cmp.Compare(a.ResourceID, b.ResourceID)
+			})
+		}
+		slices.SortFunc(cs.AllocatedResourcesStatus, func(a, b v1.ResourceStatus) int {
+			return cmp.Compare(a.Name, b.Name)
+		})
 	}
 }
 
@@ -1339,4 +1363,18 @@ func (m *ManagerImpl) isContainerAlreadyRunning(logger klog.Logger, podUID, cntN
 	}
 
 	return true
+}
+
+func (m *ManagerImpl) CanAllocateExclusively(res v1.ResourceName) bool {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	// CanAllocateExclusively reports a capability, not a reflection of runtime state.
+	// If there are device plugin for resources at all, then these resource can, if
+	// other runtime conditions are met, be exclusively allocated, the reason being
+	// device-plugins-backed resources cannot be shared.
+	// The capability is however a function of configuration, in this case
+	// device plugins being deployed on the node, not on their runtime state
+	// which maps to healthy/unhealthy state
+	_, ok := m.allDevices[string(res)]
+	return ok
 }

@@ -807,6 +807,17 @@ type PlacementGeneratePlugin interface {
 
 	// GeneratePlacements generates a list of potential Placements for the given PodGroup within the parent placement.
 	// Each Placement represents a candidate set of resources, e.g., nodes matching a selector.
+	// The scheduler may shuffle and evaluate only a subset of the returned Placements, so plugins
+	// must not rely on their order.
+	//
+	// A plugin can attach per-placement data by calling state.PlacementState(placement).Write
+	// and returning that same placement pointer. When multiple PlacementGenerate plugins
+	// constrain the input, the framework intersects their placements and combines the attached
+	// state. Returning parentPlacement unchanged as the only placement imposes no constraints,
+	// and state attached through PlacementState(parentPlacement) is ignored. Use PodGroupCycleState
+	// for group-wide data instead. During placement evaluation, pod scheduling reads the combined
+	// state from CycleState.GetPlacementCycleState, and PlacementFeasible and ScorePlacement
+	// receive it directly.
 	GeneratePlacements(ctx context.Context, state PodGroupCycleState, podGroup PodGroupInfo, parentPlacement *Placement) (*GeneratePlacementsResult, *Status)
 }
 
@@ -961,6 +972,9 @@ type Handle interface {
 	// PodGroupManager provides an interface for runtime information about pod groups from scheduler's cache.
 	PodGroupManager() PodGroupManager
 
+	// SharedPodGroupHierarchyTracker returns the PodGroupHierarchyTracker of the framework.
+	SharedPodGroupHierarchyTracker() PodGroupHierarchyTracker
+
 	// SignPod creates a PodSignature for a pod.
 	SignPod(ctx context.Context, pod *v1.Pod) PodSignature
 
@@ -974,8 +988,33 @@ type PreemptionManager interface {
 	// The preemption algorithm attempts to reprieve victims in reverse order, from last to first.
 	// The preemption algorithm will pass through unsuccessful status to the caller.
 	GenerateVictims(ctx context.Context, pgInfo PodGroupInfo) ([]PreemptionVictim, *Status)
-	// Executor returns a PreemptionExecutor that can be used to actuate preemption or check preemption status.
+
+	// Executor returns a [PreemptionExecutor] that can be used to actuate preemption or check preemption status.
 	Executor() PreemptionExecutor
+
+	// NewReprieveFilter returns a [ReprieveFilter] that can be used to filter out reprieve candidates.
+	// It is called once per preemption evaluation pass after allVictims are removed from the snapshot,
+	// and the returned instance is used for the duration of that single reprieve pass and then discarded.
+	// Stateful implementations must return a fresh instance on each call.
+	// allVictims contains all victims returned by [PreemptionManager.GenerateVictims] to initialize the filter's state.
+	// The result should be non-nil, otherwise the preemption algorithm will abort evaluation without actuating preemption
+	// and return error status to the caller.
+	NewReprieveFilter(ctx context.Context, allVictims []PreemptionVictim) ReprieveFilter
+}
+
+// ReprieveFilter controls whether candidate preemption victims can be reprieved during preemption evaluation,
+// before any victim eviction is actuated.
+type ReprieveFilter interface {
+	// ShouldAttemptReprieval is called before restoring the victim and running the fit check for the preemptor.
+	// If an error is returned, the preemption algorithm will abort evaluation without actuating preemption,
+	// and pass the error status to the caller.
+	ShouldAttemptReprieval(ctx context.Context, victim PreemptionVictim) (bool, error)
+
+	// OnVictimReprieved is called on successful victim reprieval.
+	// Stateful implementations can use this function to track the currently active victims.
+	// If an error is returned, the preemption algorithm will abort evaluation without actuating preemption,
+	// and pass the error status to the caller.
+	OnVictimReprieved(ctx context.Context, victim PreemptionVictim) error
 }
 
 // PreemptionVictim represents a preemption unit that abstracts individual Pods and PodGroups,
@@ -1015,6 +1054,10 @@ type PreemptionCandidate interface {
 	// A single preemption unit can be all pods in a pod group (for DisruptionMode=all) or a single pod (for DisruptionMode=single).
 	// This value is used for metrics and doesn't impact victim actuation.
 	NumPodGroupDisruptions() int
+	// Nodes returns a list of nodes where the preemptor pods get nominated to run.
+	// For a single pod preemption it's equal Name but for pod group preemption
+	// it contains a set of nodes for all preemptor pods.
+	Nodes() []string
 }
 
 // Parallelizer helps run scheduling operations in parallel chunks where possible, to improve performance and CPU utilization.
@@ -1043,7 +1086,7 @@ type PodNominator interface {
 	// UpdateNominatedPod updates the <oldPod> with <newPod>.
 	UpdateNominatedPod(logger klog.Logger, oldPod *v1.Pod, newPodInfo PodInfo)
 	// NominatedPodsForNode returns nominatedPods on the given node.
-	NominatedPodsForNode(nodeName string) []PodInfo
+	NominatedPodsForNode(logger klog.Logger, nodeName string) []PodInfo
 }
 
 // PluginsRunner abstracts operations to run some plugins.

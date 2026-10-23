@@ -21,6 +21,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"k8s.io/apimachinery/pkg/watch"
 )
 
 func TestSnapshotListPrefix(t *testing.T) {
@@ -43,19 +45,21 @@ func TestSnapshotListPrefix(t *testing.T) {
 		{
 			name: "Indexer",
 			newSnapshot: func(t *testing.T) Snapshot {
-				indexer := newThreadedBtreeStoreIndexer(nil, btreeDegree)
-				for _, elem := range elements {
-					require.NoError(t, indexer.Add(elem))
+				indexer := NewWatchCacheStorage(nil)
+				for i, elem := range elements {
+					prev, err := indexer.UpdateStore(watch.Added, elem, uint64(i+1))
+					require.NoError(t, err)
+					assert.Nil(t, prev)
 				}
-				return indexer.Clone()
+				return indexer.store.Clone()
 			},
 		},
 		{
 			name: "btreeStore",
 			newSnapshot: func(t *testing.T) Snapshot {
 				store := newBtreeStore(btreeDegree)
-				for _, elem := range elements {
-					store.addOrUpdateElem(elem)
+				for i, elem := range elements {
+					store.addOrUpdateElem(elem, uint64(i+1))
 				}
 				return &store
 			},

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -52,6 +53,7 @@ import (
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/cri-streaming/pkg/streaming/portforward"
 	"k8s.io/cri-streaming/pkg/streaming/remotecommand"
+	"k8s.io/ktesting"
 	_ "k8s.io/kubernetes/pkg/apis/core/install"
 	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
@@ -66,7 +68,6 @@ import (
 	"k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util/hostutil"
 	"k8s.io/kubernetes/pkg/volume/util/subpath"
-	"k8s.io/kubernetes/test/utils/ktesting"
 	netutils "k8s.io/utils/net"
 	"k8s.io/utils/ptr"
 )
@@ -158,7 +159,7 @@ fe00::2	ip6-allrouters
 			hostsFileName: "hosts_test_file2_with_host_aliases",
 			hostAliases: []v1.HostAlias{
 				{IP: "123.45.67.89", Hostnames: []string{"foo", "bar", "baz"}},
-				{IP: "456.78.90.123", Hostnames: []string{"park", "doo", "boo"}},
+				{IP: "45.67.89.123", Hostnames: []string{"park", "doo", "boo"}},
 			},
 			rawHostsFileContent: `# another hosts file for testing.
 127.0.0.1	localhost
@@ -181,7 +182,7 @@ fe00::2	ip6-allrouters
 
 # Entries added by HostAliases.
 123.45.67.89	foo	bar	baz
-456.78.90.123	park	doo	boo
+45.67.89.123	park	doo	boo
 `,
 		},
 	}
@@ -272,7 +273,7 @@ fe00::2	ip6-allrouters
 			hostDomainName: "domainFoo",
 			hostAliases: []v1.HostAlias{
 				{IP: "123.45.67.89", Hostnames: []string{"foo", "bar", "baz"}},
-				{IP: "456.78.90.123", Hostnames: []string{"park", "doo", "boo"}},
+				{IP: "45.67.89.123", Hostnames: []string{"park", "doo", "boo"}},
 			},
 			expectedContent: `# Kubernetes-managed hosts file.
 127.0.0.1	localhost
@@ -285,7 +286,7 @@ fe00::2	ip6-allrouters
 
 # Entries added by HostAliases.
 123.45.67.89	foo	bar	baz
-456.78.90.123	park	doo	boo
+45.67.89.123	park	doo	boo
 `,
 		},
 		{
@@ -8911,6 +8912,39 @@ func TestGetentUserExists(t *testing.T) {
 	}
 }
 
+func TestDefaultKubeletMappings(t *testing.T) {
+	tests := []struct {
+		name         string
+		idsPerPod    uint32
+		wantFirstID  uint32
+		wantRangeLen uint32
+	}{
+		{
+			name:         "default idsPerPod",
+			idsPerPod:    65536,
+			wantFirstID:  65536,
+			wantRangeLen: (1 << 32) - 2*65536,
+		},
+		{
+			name:         "custom idsPerPod",
+			idsPerPod:    65536 * 16,
+			wantFirstID:  65536 * 16,
+			wantRangeLen: (1 << 32) - 2*65536*16,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotFirstID, gotRangeLen := defaultKubeletMappings(tc.idsPerPod)
+			assert.Equal(t, tc.wantFirstID, gotFirstID)
+			assert.Equal(t, tc.wantRangeLen, gotRangeLen)
+			// The last ID of the range must stay below 2^32-1, which the kernel
+			// treats as an invalid ID.
+			assert.Less(t, uint64(gotFirstID)+uint64(gotRangeLen)-1, uint64(math.MaxUint32))
+		})
+	}
+}
+
 func TestResolveRecursiveReadOnly(t *testing.T) {
 	testCases := []struct {
 		m                  v1.VolumeMount
@@ -9256,6 +9290,148 @@ func TestMakeEnvironmentVariablesWithFileKeyRef(t *testing.T) {
 			errorContains: "couldn't parse env file",
 			setupFiles: func() []string {
 				return []string{} // No files created
+			},
+		},
+		// Regression test for https://github.com/kubernetes/kubernetes/issues/142662.
+		{
+			name: "file does not exist with optional flag",
+			container: &v1.Container{
+				Env: []v1.EnvVar{
+					{
+						Name: "DATABASE",
+						ValueFrom: &v1.EnvVarSource{
+							FileKeyRef: &v1.FileKeySelector{
+								VolumeName: "config-volume",
+								Path:       "nonexistent.env",
+								Key:        "DATABASE",
+								Optional:   new(true),
+							},
+						},
+					},
+				},
+			},
+			podVolumes: map[string]kubecontainer.VolumeInfo{
+				"config-volume": {
+					Mounter: &testVolumeMounter{path: tmpDir},
+				},
+			},
+			expectedEnvs: nil,
+			setupFiles: func() []string {
+				return []string{} // No files created
+			},
+		},
+		// Regression test for https://github.com/kubernetes/kubernetes/issues/142662.
+		{
+			name: "key with empty value is published",
+			container: &v1.Container{
+				Env: []v1.EnvVar{
+					{
+						Name: "EMPTY",
+						ValueFrom: &v1.EnvVarSource{
+							FileKeyRef: &v1.FileKeySelector{
+								VolumeName: "config-volume",
+								Path:       "empty.env",
+								Key:        "EMPTY",
+							},
+						},
+					},
+				},
+			},
+			podVolumes: map[string]kubecontainer.VolumeInfo{
+				"config-volume": {
+					Mounter: &testVolumeMounter{path: tmpDir},
+				},
+			},
+			expectedEnvs: []kubecontainer.EnvVar{
+				{Name: "EMPTY", Value: ""},
+			},
+			setupFiles: func() []string {
+				return []string{createEnvFile("empty.env", "EMPTY=''\n")}
+			},
+		},
+		// POSIX shell reads KEY= # comment as an empty assignment.
+		{
+			name: "whitespace and comment after equals sign is published as empty",
+			container: &v1.Container{
+				Env: []v1.EnvVar{
+					{
+						Name: "EMPTY",
+						ValueFrom: &v1.EnvVarSource{
+							FileKeyRef: &v1.FileKeySelector{
+								VolumeName: "config-volume",
+								Path:       "empty-comment.env",
+								Key:        "EMPTY",
+							},
+						},
+					},
+				},
+			},
+			podVolumes: map[string]kubecontainer.VolumeInfo{
+				"config-volume": {
+					Mounter: &testVolumeMounter{path: tmpDir},
+				},
+			},
+			expectedEnvs: []kubecontainer.EnvVar{
+				{Name: "EMPTY", Value: ""},
+			},
+			setupFiles: func() []string {
+				return []string{createEnvFile("empty-comment.env", "EMPTY= # comment\n")}
+			},
+		},
+		{
+			name: "value after whitespace following equals sign",
+			container: &v1.Container{
+				Env: []v1.EnvVar{
+					{
+						Name: "DATABASE",
+						ValueFrom: &v1.EnvVarSource{
+							FileKeyRef: &v1.FileKeySelector{
+								VolumeName: "config-volume",
+								Path:       "space.env",
+								Key:        "DATABASE",
+							},
+						},
+					},
+				},
+			},
+			podVolumes: map[string]kubecontainer.VolumeInfo{
+				"config-volume": {
+					Mounter: &testVolumeMounter{path: tmpDir},
+				},
+			},
+			expectedError: true,
+			errorContains: "couldn't parse env file",
+			setupFiles: func() []string {
+				return []string{createEnvFile("space.env", "DATABASE= 'db'\n")}
+			},
+		},
+		// optional only covers a missing file or key, never invalid syntax.
+		{
+			name: "value after whitespace following equals sign with optional flag",
+			container: &v1.Container{
+				Env: []v1.EnvVar{
+					{
+						Name: "DATABASE",
+						ValueFrom: &v1.EnvVarSource{
+							FileKeyRef: &v1.FileKeySelector{
+								VolumeName: "config-volume",
+								Path:       "space.env",
+								Key:        "DATABASE",
+								Optional:   new(true),
+							},
+						},
+					},
+				},
+			},
+			podVolumes: map[string]kubecontainer.VolumeInfo{
+				"config-volume": {
+					Mounter: &testVolumeMounter{path: tmpDir},
+				},
+			},
+			expectedError: true,
+			errorContains: "couldn't parse env file",
+			setupFiles: func() []string {
+				return []string{createEnvFile("space.env", "DATABASE= 'db'\n")}
 			},
 		},
 		{

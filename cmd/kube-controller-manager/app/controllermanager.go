@@ -41,13 +41,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apiserver/pkg/server"
 	"k8s.io/apiserver/pkg/server/flagz"
 	"k8s.io/apiserver/pkg/server/healthz"
 	"k8s.io/apiserver/pkg/server/mux"
+	"k8s.io/apiserver/pkg/server/signals"
 	"k8s.io/apiserver/pkg/server/statusz"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	cacheddiscovery "k8s.io/client-go/discovery/cached/memory"
+	clientgofeaturegate "k8s.io/client-go/features"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -68,6 +69,7 @@ import (
 	logsapi "k8s.io/component-base/logs/api/v1"
 	metricsfeatures "k8s.io/component-base/metrics/features"
 	controllersmetrics "k8s.io/component-base/metrics/prometheus/controllers"
+	featuremetrics "k8s.io/component-base/metrics/prometheus/feature"
 	"k8s.io/component-base/metrics/prometheus/slis"
 	"k8s.io/component-base/term"
 	utilversion "k8s.io/component-base/version"
@@ -141,7 +143,7 @@ controller, and serviceaccounts controller.`,
 			}
 			cliflag.PrintFlags(cmd.Flags())
 
-			// We use context.Background() here still because using server.SetupSignalContext() would cause
+			// We use context.Background() here still because using signals.SetupSignalContext() would cause
 			// components like the event broadcaster to terminate on signal immediately, which is not what we want.
 			// Termination for that case is being handled explicitly in Run() later on.
 			ctx := context.Background()
@@ -152,12 +154,12 @@ controller, and serviceaccounts controller.`,
 
 			// add feature enablement metrics
 			fg := s.ComponentGlobalsRegistry.FeatureGateFor(basecompatibility.DefaultKubeComponent)
-			fg.(featuregate.MutableFeatureGate).AddMetrics()
+			fg.(featuregate.MutableFeatureGate).AddMetrics(featuremetrics.RecordFeatureInfo)
 			// add component version metrics
 			s.ComponentGlobalsRegistry.AddMetrics()
 
 			if utilfeature.DefaultFeatureGate.Enabled(cmfeatures.ControllerManagerReleaseLeaderElectionLockOnExit) {
-				ctx = server.SetupSignalContext()
+				ctx = signals.SetupSignalContext()
 			}
 			return Run(ctx, c.Complete())
 		},
@@ -531,17 +533,26 @@ func (c ControllerContext) NewClient(name string) (kubernetes.Interface, error) 
 // controllers such as the cloud provider and clientBuilder. rootClientBuilder is only used for
 // the shared-informers client and token controller.
 func CreateControllerContext(ctx context.Context, s *config.CompletedConfig, rootClientBuilder, clientBuilder clientbuilder.ControllerClientBuilder) (ControllerContext, error) {
-	// Informer transform to trim ManagedFields for memory efficiency.
-	trim := func(obj interface{}) (interface{}, error) {
-		if accessor, err := meta.Accessor(obj); err == nil {
-			if accessor.GetManagedFields() != nil {
-				accessor.SetManagedFields(nil)
+	// Informer transform to trim ManagedFields for memory efficiency. With
+	// ManagedFieldsOptOutClient, the informer clients drop them instead.
+	var trim cache.TransformFunc
+	if !clientgofeaturegate.FeatureGates().Enabled(clientgofeaturegate.ManagedFieldsOptOutClient) {
+		trim = func(obj interface{}) (interface{}, error) {
+			if accessor, err := meta.Accessor(obj); err == nil {
+				if accessor.GetManagedFields() != nil {
+					accessor.SetManagedFields(nil)
+				}
 			}
+			return obj, nil
 		}
-		return obj, nil
 	}
 
-	versionedClient, err := rootClientBuilder.Client("shared-informers")
+	versionedConfig, err := rootClientBuilder.Config("shared-informers")
+	if err != nil {
+		return ControllerContext{}, fmt.Errorf("failed to create Kubernetes client config for %q: %w", "shared-informers", err)
+	}
+	versionedConfig.DropManagedFields = true
+	versionedClient, err := kubernetes.NewForConfig(versionedConfig)
 	if err != nil {
 		return ControllerContext{}, fmt.Errorf("failed to create Kubernetes client for %q: %w", "shared-informers", err)
 	}
@@ -557,6 +568,7 @@ func CreateControllerContext(ctx context.Context, s *config.CompletedConfig, roo
 	if err != nil {
 		return ControllerContext{}, fmt.Errorf("failed to create metadata client config: %w", err)
 	}
+	metadataConfig.DropManagedFields = true
 
 	metadataClient, err := metadata.NewForConfig(metadataConfig)
 	if err != nil {

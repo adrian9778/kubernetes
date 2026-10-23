@@ -107,7 +107,7 @@ type SchedulingQueue interface {
 	// AddUnschedulablePodIfNotPresent adds an unschedulable pod back to scheduling queue.
 	// The podSchedulingCycle represents the current scheduling cycle number which can be
 	// returned by calling SchedulingCycle().
-	AddUnschedulablePodIfNotPresent(logger klog.Logger, pInfo *framework.QueuedPodInfo, podSchedulingCycle int64) error
+	AddUnschedulablePodIfNotPresent(ctx context.Context, pInfo *framework.QueuedPodInfo, podSchedulingCycle int64) error
 	// AddAttemptedPodGroupIfNeeded adds an attempted pod group back to scheduling queue.
 	// If there are no pending pods, it will not add the pod group back to the queue.
 	// Should be called synchronously to the pod group scheduling cycle.
@@ -152,7 +152,7 @@ type SchedulingQueue interface {
 
 	// The following functions are supposed to be used only for testing or debugging.
 	GetPodGroup(name, namespace string) (*framework.QueuedPodGroupInfo, bool)
-	GetPod(name, namespace string, schedulingGroup *v1.PodSchedulingGroup) (*framework.QueuedPodInfo, bool)
+	GetPod(ctx context.Context, name, namespace string, schedulingGroup *v1.PodSchedulingGroup) (*framework.QueuedPodInfo, bool)
 	PendingPods() ([]*v1.Pod, string)
 	InFlightPods() []*v1.Pod
 	PodsInActiveQ() []*v1.Pod
@@ -903,7 +903,7 @@ func (p *PriorityQueue) addPod(ctx context.Context, pod *v1.Pod) {
 
 // addPodGroupMember adds pInfo as a member of its pod group into the scheduling queue.
 func (p *PriorityQueue) addPodGroupMember(logger klog.Logger, pInfo *framework.QueuedPodInfo) {
-	rootInfoLookup, hasRoot := p.workloadForest.getRootLookupInfoForPod(pInfo.Pod)
+	rootInfoLookup, hasRoot := p.workloadForest.getRootLookupInfoForPod(logger, pInfo.Pod)
 	if !hasRoot {
 		// If the PodGroup object cannot be fetched, the pod cannot be scheduled.
 		// It should be put into incompletePodGroupPods waiting for the pod group to be observed.
@@ -987,7 +987,7 @@ func (p *PriorityQueue) Activate(logger klog.Logger, pods map[string]*v1.Pod) {
 		var entityLookup framework.QueuedEntityInfo
 		if p.isPodGroupMember(pod) {
 			var hasRoot bool
-			entityLookup, hasRoot = p.workloadForest.getRootLookupInfoForPod(pod)
+			entityLookup, hasRoot = p.workloadForest.getRootLookupInfoForPod(logger, pod)
 			if !hasRoot {
 				continue
 			}
@@ -1081,10 +1081,10 @@ func (p *PriorityQueue) determineSchedulingHintForInFlightPod(logger klog.Logger
 
 // AddUnschedulablePodIfNotPresent inserts a pod that cannot be scheduled into
 // the queue, unless it is already in the queue.
-func (p *PriorityQueue) AddUnschedulablePodIfNotPresent(logger klog.Logger, pInfo *framework.QueuedPodInfo, podSchedulingCycle int64) error {
+func (p *PriorityQueue) AddUnschedulablePodIfNotPresent(ctx context.Context, pInfo *framework.QueuedPodInfo, podSchedulingCycle int64) error {
 	p.lock.Lock()
 	defer p.lock.Unlock()
-
+	logger := klog.FromContext(ctx)
 	// In any case, this Pod will be moved back to the queue and we should call Done.
 	calledDone := false
 	defer func() {
@@ -1122,6 +1122,7 @@ func (p *PriorityQueue) AddUnschedulablePodIfNotPresent(logger klog.Logger, pInf
 	// Clear the flush flag since the pod is returning to the queue after a scheduling attempt.
 	pInfo.WasFlushedFromUnschedulable = false
 	pInfo.FlushTimestamp = time.Time{}
+	pInfo.PodSignature = p.signPod(ctx, pod)
 
 	if p.isPodGroupMember(pod) {
 		// Done has to be called before adding the unschedulable pod group member.
@@ -1380,7 +1381,7 @@ func (p *PriorityQueue) Update(ctx context.Context, oldPod, newPod *v1.Pod) {
 	var entityLookup framework.QueuedEntityInfo
 	if p.isPodGroupMember(oldPod) {
 		var hasRoot bool
-		entityLookup, hasRoot = p.workloadForest.getRootLookupInfoForPod(oldPod)
+		entityLookup, hasRoot = p.workloadForest.getRootLookupInfoForPod(logger, oldPod)
 		if !hasRoot {
 			if pInfo := p.incompletePodGroupPods.update(newPod); pInfo != nil {
 				p.UpdateNominatedPod(logger, oldPod, pInfo.PodInfo)
@@ -1501,7 +1502,7 @@ func (p *PriorityQueue) Delete(logger klog.Logger, pod *v1.Pod) {
 // deletePodGroupMember removes a pod from its pod group in the queue.
 // If the pod group is empty after removal, the pod group is removed from the queue.
 func (p *PriorityQueue) deletePodGroupMember(logger klog.Logger, pod *v1.Pod) {
-	rootInfoLookup, hasRoot := p.workloadForest.getRootLookupInfoForPod(pod)
+	rootInfoLookup, hasRoot := p.workloadForest.getRootLookupInfoForPod(logger, pod)
 	if !hasRoot {
 		pInfo := p.incompletePodGroupPods.delete(pod)
 		if pInfo == nil {
@@ -1584,7 +1585,7 @@ func (p *PriorityQueue) AddGenericPodGroup(logger klog.Logger, gpg *fwk.GenericP
 
 	p.workloadForest.addGenericPodGroup(gpg)
 
-	rootInfoLookup, hasRoot := p.workloadForest.getRootLookupInfo(gpg)
+	rootInfoLookup, hasRoot := p.workloadForest.getRootLookupInfo(logger, gpg)
 	if !hasRoot {
 		// If the root does not exist, then pods should stay in the incompletePodGroupPods.
 		return
@@ -1623,7 +1624,7 @@ func (p *PriorityQueue) UpdateGenericPodGroup(logger klog.Logger, gpg *fwk.Gener
 	defer p.lock.Unlock()
 
 	p.workloadForest.updateGenericPodGroup(gpg)
-	rootInfoLookup, hasRoot := p.workloadForest.getRootLookupInfo(gpg)
+	rootInfoLookup, hasRoot := p.workloadForest.getRootLookupInfo(logger, gpg)
 	if !hasRoot {
 		return
 	}
@@ -1644,7 +1645,7 @@ func (p *PriorityQueue) DeleteGenericPodGroup(logger klog.Logger, gpg *fwk.Gener
 	p.lock.Lock()
 	defer p.lock.Unlock()
 
-	rootInfoLookup, hadRoot := p.workloadForest.getRootLookupInfo(gpg)
+	rootInfoLookup, hadRoot := p.workloadForest.getRootLookupInfo(logger, gpg)
 	if !hadRoot {
 		p.workloadForest.deleteGenericPodGroup(gpg)
 		return
@@ -1670,7 +1671,7 @@ func (p *PriorityQueue) DeleteGenericPodGroup(logger klog.Logger, gpg *fwk.Gener
 			return
 		}
 		for _, pInfo := range pendingPods {
-			_, staysPending := p.workloadForest.getRootLookupInfoForPod(pInfo.Pod)
+			_, staysPending := p.workloadForest.getRootLookupInfoForPod(logger, pInfo.Pod)
 			if staysPending {
 				p.pendingPodGroupPods.add(pInfo)
 			} else {
@@ -1890,7 +1891,7 @@ func (p *PriorityQueue) IncompletePodGroupPodsPods() []*v1.Pod {
 }
 
 // GetPod searches for a pod in the activeQ, backoffQ, and unschedulableEntities.
-func (p *PriorityQueue) GetPod(name, namespace string, schedulingGroup *v1.PodSchedulingGroup) (*framework.QueuedPodInfo, bool) {
+func (p *PriorityQueue) GetPod(ctx context.Context, name, namespace string, schedulingGroup *v1.PodSchedulingGroup) (*framework.QueuedPodInfo, bool) {
 	p.lock.RLock()
 	defer p.lock.RUnlock()
 
@@ -1905,7 +1906,7 @@ func (p *PriorityQueue) GetPod(name, namespace string, schedulingGroup *v1.PodSc
 	}
 	var pInfo *framework.QueuedPodInfo
 	p.activeQ.underRLock(func(unlockedActiveQ unlockedActiveQueueReader) {
-		pInfo = p.getPod(pod, unlockedActiveQ)
+		pInfo = p.getPod(klog.FromContext(ctx), pod, unlockedActiveQ)
 	})
 	return pInfo, pInfo != nil
 }
@@ -1929,11 +1930,11 @@ func (p *PriorityQueue) GetPodGroup(name, namespace string) (*framework.QueuedPo
 	return foundPGInfo, foundPGInfo != nil
 }
 
-func (p *PriorityQueue) getPod(podLookup *v1.Pod, unlockedActiveQ unlockedActiveQueueReader) *framework.QueuedPodInfo {
+func (p *PriorityQueue) getPod(logger klog.Logger, podLookup *v1.Pod, unlockedActiveQ unlockedActiveQueueReader) *framework.QueuedPodInfo {
 	var entityLookup framework.QueuedEntityInfo
 	if p.isPodGroupMember(podLookup) {
 		var hasRoot bool
-		entityLookup, hasRoot = p.workloadForest.getRootLookupInfoForPod(podLookup)
+		entityLookup, hasRoot = p.workloadForest.getRootLookupInfoForPod(logger, podLookup)
 		if !hasRoot {
 			return p.incompletePodGroupPods.get(podLookup)
 		}
@@ -2002,9 +2003,9 @@ func (p *PriorityQueue) PatchPodStatus(pod *v1.Pod, conditions []*v1.PodConditio
 }
 
 // Note: this function assumes the caller locks both p.lock.RLock and p.activeQ.getLock().RLock.
-func (p *PriorityQueue) nominatedPodToInfo(np podRef, unlockedActiveQ unlockedActiveQueueReader) *framework.PodInfo {
+func (p *PriorityQueue) nominatedPodToInfo(logger klog.Logger, np podRef, unlockedActiveQ unlockedActiveQueueReader) *framework.PodInfo {
 	pod := np.toPod()
-	pInfo := p.getPod(pod, unlockedActiveQ)
+	pInfo := p.getPod(logger, pod, unlockedActiveQ)
 	if pInfo != nil {
 		return pInfo.PodInfo
 	}
@@ -2045,7 +2046,7 @@ func (p *PriorityQueue) Close() {
 // NominatedPodsForNode returns a copy of pods that are nominated to run on the given node,
 // but they are waiting for other pods to be removed from the node.
 // CAUTION: Make sure you don't call this function while taking any queue's lock in any scenario.
-func (p *PriorityQueue) NominatedPodsForNode(nodeName string) []fwk.PodInfo {
+func (p *PriorityQueue) NominatedPodsForNode(logger klog.Logger, nodeName string) []fwk.PodInfo {
 	p.lock.RLock()
 	defer p.lock.RUnlock()
 	nominatedPods := p.nominator.nominatedPodsForNode(nodeName)
@@ -2055,7 +2056,7 @@ func (p *PriorityQueue) NominatedPodsForNode(nodeName string) []fwk.PodInfo {
 	pods := make([]fwk.PodInfo, len(nominatedPods))
 	p.activeQ.underRLock(func(unlockedActiveQ unlockedActiveQueueReader) {
 		for i, np := range nominatedPods {
-			pods[i] = p.nominatedPodToInfo(np, unlockedActiveQ).DeepCopy()
+			pods[i] = p.nominatedPodToInfo(logger, np, unlockedActiveQ).DeepCopy()
 		}
 	})
 	return pods

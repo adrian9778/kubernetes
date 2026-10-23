@@ -18,6 +18,7 @@ package cacher
 
 import (
 	"fmt"
+	"iter"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/watch"
@@ -26,7 +27,7 @@ import (
 
 // cacheIntervalSource provides the iteration logic for a watchCacheInterval.
 type cacheIntervalSource interface {
-	Next() (*watchCacheEvent, error)
+	All() iter.Seq2[*watchCacheEvent, error]
 }
 
 // watchCacheInterval serves as an abstraction over a source
@@ -44,11 +45,23 @@ type watchCacheInterval struct {
 	initialEventsEndBookmark *watchCacheEvent
 }
 
-// Next returns the next item in the cache interval provided the cache
-// interval is still valid. An error is returned if the interval is
-// invalidated.
-func (wci *watchCacheInterval) Next() (*watchCacheEvent, error) {
-	return wci.source.Next()
+func (wci *watchCacheInterval) All() iter.Seq2[*watchCacheEvent, error] {
+	return wci.source.All()
+}
+
+func eventsFromNext(next func() (*watchCacheEvent, error)) iter.Seq2[*watchCacheEvent, error] {
+	return func(yield func(*watchCacheEvent, error) bool) {
+		for {
+			event, err := next()
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+			if event == nil || !yield(event, nil) {
+				return
+			}
+		}
+	}
 }
 
 type indexerFunc func(int) *watchCacheEvent
@@ -68,16 +81,11 @@ func newCacheInterval(startIndex, endIndex int, indexer indexerFunc, indexValida
 	}
 }
 
-type intervalStore interface {
-	GetByKey(key string) (item interface{}, exists bool, err error)
-	OrderedListPrefix(prefix, continueKey string) ([]interface{}, error)
-}
-
 // newCacheIntervalFromStore is meant to handle the case of rv=0, such that the events
 // returned by Next() need to be events from a List() done on the underlying store of
 // the watch cache.
 // The items returned in the interval will be sorted by Key.
-func newCacheIntervalFromStore(resourceVersion uint64, s intervalStore, key string, matchesSingle bool) (*watchCacheInterval, error) {
+func newCacheIntervalFromStore(resourceVersion uint64, s store.Snapshot, key string, matchesSingle bool) (*watchCacheInterval, error) {
 	buffer := &watchCacheIntervalBuffer{}
 	var allItems []interface{}
 	var err error
@@ -112,14 +120,15 @@ func newCacheIntervalFromStore(resourceVersion uint64, s intervalStore, key stri
 	return ci, nil
 }
 
-// newCacheIntervalFromLazySnapshot builds an interval backed by an immutable store snapshot
-// Unlike newCacheIntervalFromStore, it captures snapshot reference which takes O(1) under watch-cache RLock
-// and defers O(N) traversal to first Next() call post lock release
-func newCacheIntervalFromLazySnapshot(resourceVersion uint64, snap store.Snapshot) *watchCacheInterval {
+// newCacheIntervalFromLazySnapshot captures a snapshot under the watch cache
+// lock and traverses it incrementally after the lock is released.
+func newCacheIntervalFromLazySnapshot(resourceVersion uint64, snap store.Snapshot, key string, recursive bool) *watchCacheInterval {
 	return &watchCacheInterval{
 		source: &lazySnapshotCacheIntervalSource{
 			snapshot:        snap,
 			resourceVersion: resourceVersion,
+			key:             key,
+			recursive:       recursive,
 		},
 		resourceVersion: resourceVersion,
 	}
@@ -194,7 +203,7 @@ type historyCacheIntervalSource struct {
 	lock sync.Locker
 }
 
-// Next returns the next event from the watchCache circular buffer.
+// next returns the next event from the watchCache circular buffer.
 // An error is returned if the interval has been invalidated.
 //
 // An interval can be either valid or invalid at any given point of time.
@@ -211,7 +220,7 @@ type historyCacheIntervalSource struct {
 // When this condition becomes false, the interval is no longer valid and
 // should not be used to retrieve and serve elements from the underlying
 // source.
-func (s *historyCacheIntervalSource) Next() (*watchCacheEvent, error) {
+func (s *historyCacheIntervalSource) next() (*watchCacheEvent, error) {
 	// if there are items in the buffer to return, return from
 	// the buffer.
 	if event, exists := s.buffer.next(); exists {
@@ -236,6 +245,10 @@ func (s *historyCacheIntervalSource) Next() (*watchCacheEvent, error) {
 	return nil, nil
 }
 
+func (s *historyCacheIntervalSource) All() iter.Seq2[*watchCacheEvent, error] {
+	return eventsFromNext(s.next)
+}
+
 func (s *historyCacheIntervalSource) fillBuffer() {
 	s.buffer.startIndex = 0
 	s.buffer.endIndex = 0
@@ -255,7 +268,7 @@ type snapshotCacheIntervalSource struct {
 	buffer *watchCacheIntervalBuffer
 }
 
-func (s *snapshotCacheIntervalSource) Next() (*watchCacheEvent, error) {
+func (s *snapshotCacheIntervalSource) next() (*watchCacheEvent, error) {
 	event, exists := s.buffer.next()
 	if !exists {
 		return nil, nil
@@ -263,47 +276,61 @@ func (s *snapshotCacheIntervalSource) Next() (*watchCacheEvent, error) {
 	return event, nil
 }
 
+func (s *snapshotCacheIntervalSource) All() iter.Seq2[*watchCacheEvent, error] {
+	return eventsFromNext(s.next)
+}
+
 // lazySnapshotCacheIntervalSource serves events from an immutable snapshot.
-// The snapshot reference is captured under the watchCache lock, but the O(N)
-// traversal that materializes the events is deferred until the first Next()
-// call so that it runs off the watchCache lock.
+// The snapshot reference is captured under the watchCache lock, while its
+// contents are traversed one event at a time after releasing that lock.
 type lazySnapshotCacheIntervalSource struct {
 	// snapshot is an immutable point-in-time copy of the store.
 	snapshot store.Snapshot
 	// resourceVersion is assigned to every watchCacheEvent produced by this source.
 	resourceVersion uint64
-	// loaded indicates whether items has been materialized from the snapshot.
-	loaded bool
-	// items holds the result of OrderedListPrefix, populated on the first Next() call
-	items []interface{}
-	// currentIndex tracks the current position within items.
-	currentIndex int
+	key             string
+	recursive       bool
 }
 
-func (s *lazySnapshotCacheIntervalSource) Next() (*watchCacheEvent, error) {
-	if !s.loaded {
-		items, err := s.snapshot.OrderedListPrefix("", "")
-		if err != nil {
-			return nil, err
+func (s *lazySnapshotCacheIntervalSource) All() iter.Seq2[*watchCacheEvent, error] {
+	return func(yield func(*watchCacheEvent, error) bool) {
+		// Recursive expects key to be a prefix thus storage.PrepareKey ensures it has "/" suffix.
+		// For requests with selector matching single object, we expect the caller to set opts.Recursive=false and use the full key.
+		if s.recursive {
+			for elem, err := range s.snapshot.RangePrefix(s.key, "").All() {
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if !yield(storeElementToWatchCacheEvent(elem, s.resourceVersion), nil) {
+					return
+				}
+			}
+			return
 		}
-		s.items = items
-		s.loaded = true
+		// Non-recursive expects key to be an exact match.
+		obj, exists, err := s.snapshot.GetByKey(s.key)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		if !exists {
+			return
+		}
+		elem, ok := obj.(*store.Element)
+		if !ok {
+			return
+		}
+		if !yield(storeElementToWatchCacheEvent(elem, s.resourceVersion), nil) {
+			return
+		}
 	}
-	if s.currentIndex >= len(s.items) {
-		return nil, nil
-	}
-	elem, ok := s.items[s.currentIndex].(*store.Element)
-	if !ok {
-		return nil, fmt.Errorf("not a storeElement: %v", s.items[s.currentIndex])
-	}
-	s.currentIndex++
-	return storeElementToWatchCacheEvent(elem, s.resourceVersion), nil
 }
 
 const bufferSize = 100
 
 // watchCacheIntervalBuffer is used to reduce acquiring
-// the lock on each invocation of historyCacheIntervalSource.Next().
+// the lock on each invocation of historyCacheIntervalSource.next().
 type watchCacheIntervalBuffer struct {
 	// buffer is used to hold watchCacheEvents that
 	// the interval returns on a call to Next().
