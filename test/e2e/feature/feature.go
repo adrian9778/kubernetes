@@ -80,10 +80,6 @@ var (
 	// Enables configuring per-container restart policy and restart policy rules.
 	ContainerRestartRules = framework.WithFeature(framework.ValidFeatures.Add("ContainerRestartRules"))
 
-	// Owner: sig-node
-	// Enables configuring custom stop signals for containers from container lifecycle
-	ContainerStopSignals = framework.WithFeature(framework.ValidFeatures.Add("ContainerStopSignals"))
-
 	// Owner: sig-api-machinery
 	// Marks tests that require coordinated leader election
 	CoordinatedLeaderElection = framework.WithFeature(framework.ValidFeatures.Add("CoordinatedLeaderElection"))
@@ -129,10 +125,6 @@ var (
 	// In addition, tests must be labeled with framework.WithFeatureGate to document
 	// their dependency on specific feature gates and the corresponding API groups.
 	DynamicResourceAllocation = framework.WithFeature(framework.ValidFeatures.Add("DynamicResourceAllocation"))
-
-	// Owner: sig-storage
-	// EmptyDirVolumeMode is used for tests that require the EmptyDirVolumeMode feature gate.
-	EmptyDirVolumeMode = framework.WithFeature(framework.ValidFeatures.Add("EmptyDirVolumeMode"))
 
 	// Owner: sig-node
 	// EnvFiles is used for testing the EnvFiles feature (file-based environment variables).
@@ -267,6 +259,12 @@ var (
 	// TODO: document the feature (when to use this feature for a test)
 	MemoryManager = framework.WithFeature(framework.ValidFeatures.Add("MemoryManager"))
 
+	// NetworkIsolatedPodsSupport is in test-infra nodes whose container
+	// runtime reports the pod_network_isolated CRI capability, i.e. it can
+	// create sandboxes with spec.podNetwork "Isolated" (https://kep.k8s.io/6313).
+	// Owner: sig-network
+	NetworkIsolatedPodsSupport = framework.WithFeature(framework.ValidFeatures.Add("NetworkIsolatedPodsSupport"))
+
 	// Owner: sig-network
 	// Marks tests that require a conforming implementation of
 	// NetworkPolicy.networking.k8s.io to be present.
@@ -384,8 +382,11 @@ var (
 	SchedulerAsyncPreemption = framework.WithFeature(framework.ValidFeatures.Add("SchedulerAsyncPreemption"))
 
 	// Owner: sig-node
-	// TODO: document the feature (when to use this feature for a test)
-	SeccompDefault = framework.WithFeature(framework.ValidFeatures.Add("SeccompDefault"))
+	// KEP: https://kep.k8s.io/6061
+	// Marks tests of seccomp profiles of type OCI, which require the
+	// `SecurityProfileOCI` feature gate and a container runtime that supports
+	// the PullSecurityProfile CRI call.
+	SecurityProfileOCI = framework.WithFeature(framework.ValidFeatures.Add("SecurityProfileOCI"))
 
 	// Owner: sig-storage
 	// KEP: https://kep.k8s.io/3314
@@ -412,10 +413,6 @@ var (
 	// Owner: sig-api-machinery
 	// TODO: document the feature (when to use this feature for a test)
 	StorageVersionAPI = framework.WithFeature(framework.ValidFeatures.Add("StorageVersionAPI"))
-
-	// Owner: sig-node
-	// SupplementalGroupsPolicy is used for testing the SupplementalGroupsPolicy feature.
-	SupplementalGroupsPolicy = framework.WithFeature(framework.ValidFeatures.Add("SupplementalGroupsPolicy"))
 
 	// The Swap feature tests must run on nodes with the swap memory allocated and kubelet swap enabled. KEP-2400 (Node Swap Support)
 	Swap = framework.WithFeature(framework.ValidFeatures.Add("NodeSwap"))

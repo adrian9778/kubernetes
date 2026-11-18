@@ -650,8 +650,116 @@ func TestPodEvaluatorUsage(t *testing.T) {
 				generic.ObjectCountQuotaResourceNameFor(schema.GroupResource{Resource: "pods"}): resource.MustParse("1"),
 			},
 		},
+		"extra node allocatable resources mapping and overhead": {
+			pod: &api.Pod{
+				Spec: api.PodSpec{
+					Containers: []api.Container{{
+						Name: "c1",
+						Resources: api.ResourceRequirements{
+							Requests: api.ResourceList{
+								api.ResourceCPU:    resource.MustParse("100m"),
+								api.ResourceMemory: resource.MustParse("100Mi"),
+							},
+						},
+					}},
+				},
+				Status: api.PodStatus{
+					ExtraNodeAllocatableResources: []api.ExtraNodeAllocatableResource{
+						{
+							ContainerName: "",
+							Requests:      api.ResourceList{api.ResourceCPU: resource.MustParse("750m"), api.ResourceMemory: resource.MustParse("200Mi"), api.ResourceName(api.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("64Mi")},
+							Limits:        api.ResourceList{api.ResourceCPU: resource.MustParse("750m"), api.ResourceMemory: resource.MustParse("200Mi"), api.ResourceName(api.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("64Mi")},
+						},
+						{
+							ContainerName: "c1",
+							Requests:      api.ResourceList{api.ResourceCPU: resource.MustParse("50m")},
+							Limits:        api.ResourceList{api.ResourceCPU: resource.MustParse("750m"), api.ResourceMemory: resource.MustParse("200Mi"), api.ResourceName(api.ResourceHugePagesPrefix + "2Mi"): resource.MustParse("64Mi")},
+						},
+					},
+				},
+			},
+			usage: corev1.ResourceList{
+				corev1.ResourceCPU:            resource.MustParse("850m"),
+				corev1.ResourceRequestsCPU:    resource.MustParse("850m"),
+				corev1.ResourceMemory:         resource.MustParse("300Mi"),
+				corev1.ResourceRequestsMemory: resource.MustParse("300Mi"),
+				corev1.ResourceName(corev1.ResourceHugePagesPrefix + "2Mi"):         resource.MustParse("64Mi"),
+				corev1.ResourceName(corev1.ResourceRequestsHugePagesPrefix + "2Mi"): resource.MustParse("64Mi"),
+				corev1.ResourcePods: resource.MustParse("1"),
+				generic.ObjectCountQuotaResourceNameFor(schema.GroupResource{Resource: "pods"}): resource.MustParse("1"),
+			},
+		},
+		"pod-level resources override extra node allocatable resources for covered resource": {
+			pod: &api.Pod{
+				Spec: api.PodSpec{
+					Resources: &api.ResourceRequirements{
+						Requests: api.ResourceList{api.ResourceCPU: resource.MustParse("2")},
+					},
+					Containers: []api.Container{{
+						Name: "c1",
+					}},
+				},
+				Status: api.PodStatus{
+					ExtraNodeAllocatableResources: []api.ExtraNodeAllocatableResource{
+						{
+							ContainerName: "",
+							Requests:      api.ResourceList{api.ResourceCPU: resource.MustParse("500m"), api.ResourceMemory: resource.MustParse("200Mi")},
+							Limits:        api.ResourceList{api.ResourceCPU: resource.MustParse("500m"), api.ResourceMemory: resource.MustParse("200Mi")},
+						},
+						{
+							ContainerName: "c1",
+							Limits:        api.ResourceList{api.ResourceCPU: resource.MustParse("500m"), api.ResourceMemory: resource.MustParse("200Mi")},
+						},
+					},
+				},
+			},
+			podLevelResourcesEnabled: true,
+			usage: corev1.ResourceList{
+				corev1.ResourceCPU:            resource.MustParse("2"),
+				corev1.ResourceRequestsCPU:    resource.MustParse("2"),
+				corev1.ResourceMemory:         resource.MustParse("200Mi"),
+				corev1.ResourceRequestsMemory: resource.MustParse("200Mi"),
+				corev1.ResourcePods:           resource.MustParse("1"),
+				generic.ObjectCountQuotaResourceNameFor(schema.GroupResource{Resource: "pods"}): resource.MustParse("1"),
+			},
+		},
+		"containers sharing a device are charged its limits once": {
+			pod: &api.Pod{
+				Spec: api.PodSpec{
+					Containers: []api.Container{
+						{Name: "c1", Resources: api.ResourceRequirements{Limits: api.ResourceList{api.ResourceCPU: resource.MustParse("1")}}},
+						{Name: "c2", Resources: api.ResourceRequirements{Limits: api.ResourceList{api.ResourceCPU: resource.MustParse("1")}}},
+					},
+				},
+				Status: api.PodStatus{
+					// The kubelet reports the limit of each container with the 8 shared CPUs, and the limit of
+					// the pod with them once.
+					ContainerStatuses: []api.ContainerStatus{
+						{Name: "c1", Resources: &api.ResourceRequirements{Limits: api.ResourceList{api.ResourceCPU: resource.MustParse("9")}}},
+						{Name: "c2", Resources: &api.ResourceRequirements{Limits: api.ResourceList{api.ResourceCPU: resource.MustParse("9")}}},
+					},
+					Resources: &api.ResourceRequirements{Limits: api.ResourceList{api.ResourceCPU: resource.MustParse("10")}},
+					ExtraNodeAllocatableResources: []api.ExtraNodeAllocatableResource{
+						{
+							ContainerName: "",
+							Requests:      api.ResourceList{api.ResourceCPU: resource.MustParse("8")},
+							Limits:        api.ResourceList{api.ResourceCPU: resource.MustParse("8")},
+						},
+						{ContainerName: "c1", Limits: api.ResourceList{api.ResourceCPU: resource.MustParse("8")}},
+						{ContainerName: "c2", Limits: api.ResourceList{api.ResourceCPU: resource.MustParse("8")}},
+					},
+				},
+			},
+			podLevelResourcesEnabled: true,
+			usage: corev1.ResourceList{
+				corev1.ResourceCPU:         resource.MustParse("8"),
+				corev1.ResourceRequestsCPU: resource.MustParse("8"),
+				corev1.ResourceLimitsCPU:   resource.MustParse("10"),
+				corev1.ResourcePods:        resource.MustParse("1"),
+				generic.ObjectCountQuotaResourceNameFor(schema.GroupResource{Resource: "pods"}): resource.MustParse("1"),
+			},
+		},
 	}
-	t.Parallel()
 	for testName, testCase := range testCases {
 		t.Run(testName, func(t *testing.T) {
 			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodLevelResources, testCase.podLevelResourcesEnabled)
@@ -1194,6 +1302,51 @@ func TestPodEvaluatorUsageResourceResize(t *testing.T) {
 	}
 }
 
+func TestPodEvaluatorUsageRemovedContainers(t *testing.T) {
+	resources := func(cpu, memory string) api.ResourceList {
+		return api.ResourceList{api.ResourceCPU: resource.MustParse(cpu), api.ResourceMemory: resource.MustParse(memory)}
+	}
+	pod := &api.Pod{
+		Spec: api.PodSpec{
+			Containers: []api.Container{{
+				Name:      "c",
+				Resources: api.ResourceRequirements{Requests: resources("100m", "200Mi"), Limits: resources("200m", "400Mi")},
+			}},
+		},
+		Status: api.PodStatus{
+			ContainerStatuses: []api.ContainerStatus{{
+				Name:  "c",
+				State: api.ContainerState{Running: &api.ContainerStateRunning{}},
+			}, {
+				Name:      "removed",
+				State:     api.ContainerState{Running: &api.ContainerStateRunning{}},
+				Resources: &api.ResourceRequirements{Requests: resources("300m", "100Mi"), Limits: resources("300m", "100Mi")},
+			}, {
+				Name:      "stopped",
+				State:     api.ContainerState{Terminated: &api.ContainerStateTerminated{}},
+				Resources: &api.ResourceRequirements{Requests: resources("1", "1Gi"), Limits: resources("1", "1Gi")},
+			}},
+		},
+	}
+	expected := corev1.ResourceList{
+		corev1.ResourceRequestsCPU:    resource.MustParse("400m"),
+		corev1.ResourceRequestsMemory: resource.MustParse("300Mi"),
+		corev1.ResourceLimitsCPU:      resource.MustParse("500m"),
+		corev1.ResourceLimitsMemory:   resource.MustParse("500Mi"),
+		corev1.ResourceCPU:            resource.MustParse("400m"),
+		corev1.ResourceMemory:         resource.MustParse("300Mi"),
+		corev1.ResourcePods:           resource.MustParse("1"),
+		generic.ObjectCountQuotaResourceNameFor(schema.GroupResource{Resource: "pods"}): resource.MustParse("1"),
+	}
+	actual, err := NewPodEvaluator(nil, testingclock.NewFakeClock(time.Now())).Usage(pod)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !quota.Equals(expected, actual) {
+		t.Errorf("expected: %v, actual: %v", expected, actual)
+	}
+}
+
 func BenchmarkPodMatchesScopeFunc(b *testing.B) {
 	pod, _ := toExternalPodOrError(makePod("p1", "high-priority",
 		api.ResourceList{api.ResourceCPU: resource.MustParse("1")}, api.PodRunning))
@@ -1283,9 +1436,10 @@ func TestPodEvaluatorHandles(t *testing.T) {
 	fakeClock := testingclock.NewFakeClock(time.Now())
 	evaluator := NewPodEvaluator(nil, fakeClock)
 	testCases := []struct {
-		name  string
-		attrs admission.Attributes
-		want  bool
+		name                                string
+		attrs                               admission.Attributes
+		draNodeAllocatableResourcesDisabled bool
+		want                                bool
 	}{
 		{
 			name:  "create",
@@ -1337,9 +1491,257 @@ func TestPodEvaluatorHandles(t *testing.T) {
 			attrs: admission.NewAttributesRecord(nil, nil, schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "resize", admission.Update, nil, false, nil),
 			want:  true,
 		},
+		{
+			name: "update-status-extraNodeAllocatableResources-added",
+			attrs: admission.NewAttributesRecord(
+				&corev1.Pod{Status: corev1.PodStatus{ExtraNodeAllocatableResources: []corev1.ExtraNodeAllocatableResource{
+					{
+						ContainerName: "",
+						Requests:      corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+					{
+						ContainerName: "c1",
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+				}}},
+				&corev1.Pod{},
+				schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "status", admission.Update, nil, false, nil,
+			),
+			want: true,
+		},
+		{
+			// With the gate off, the apiserver keeps the field only on pods that already carry it.
+			name: "update-status-extraNodeAllocatableResources-modified-feature-gate-disabled",
+			attrs: admission.NewAttributesRecord(
+				&corev1.Pod{Status: corev1.PodStatus{ExtraNodeAllocatableResources: []corev1.ExtraNodeAllocatableResource{
+					{
+						ContainerName: "",
+						Requests:      corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+					},
+					{
+						ContainerName: "c1",
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+					},
+				}}},
+				&corev1.Pod{Status: corev1.PodStatus{ExtraNodeAllocatableResources: []corev1.ExtraNodeAllocatableResource{
+					{
+						ContainerName: "",
+						Requests:      corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+					{
+						ContainerName: "c1",
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+				}}},
+				schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "status", admission.Update, nil, false, nil,
+			),
+			draNodeAllocatableResourcesDisabled: true,
+			want:                                true,
+		},
+		{
+			name: "update-status-extraNodeAllocatableResources-modified",
+			attrs: admission.NewAttributesRecord(
+				&corev1.Pod{Status: corev1.PodStatus{ExtraNodeAllocatableResources: []corev1.ExtraNodeAllocatableResource{
+					{
+						ContainerName: "",
+						Requests:      corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+					},
+					{
+						ContainerName: "c1",
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+					},
+				}}},
+				&corev1.Pod{Status: corev1.PodStatus{ExtraNodeAllocatableResources: []corev1.ExtraNodeAllocatableResource{
+					{
+						ContainerName: "",
+						Requests:      corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+					{
+						ContainerName: "c1",
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+				}}},
+				schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "status", admission.Update, nil, false, nil,
+			),
+			want: true,
+		},
+		{
+			name: "update-status-extraNodeAllocatableResources-unchanged",
+			attrs: admission.NewAttributesRecord(
+				&corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning, ExtraNodeAllocatableResources: []corev1.ExtraNodeAllocatableResource{
+					{
+						ContainerName: "",
+						Requests:      corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+					{
+						ContainerName: "c1",
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+				}}},
+				&corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending, ExtraNodeAllocatableResources: []corev1.ExtraNodeAllocatableResource{
+					{
+						ContainerName: "",
+						Requests:      corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+					{
+						ContainerName: "c1",
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+				}}},
+				schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "status", admission.Update, nil, false, nil,
+			),
+			want: false,
+		},
+		{
+			name: "update-status-extraNodeAllocatableResources-cleared",
+			attrs: admission.NewAttributesRecord(
+				&corev1.Pod{Status: corev1.PodStatus{ExtraNodeAllocatableResources: []corev1.ExtraNodeAllocatableResource{}}},
+				&corev1.Pod{Status: corev1.PodStatus{ExtraNodeAllocatableResources: []corev1.ExtraNodeAllocatableResource{
+					{
+						ContainerName: "",
+						Requests:      corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+					{
+						ContainerName: "c1",
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+				}}},
+				schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "status", admission.Update, nil, false, nil,
+			),
+			want: false,
+		},
+		{
+			name: "update-status-without-extraNodeAllocatableResources",
+			attrs: admission.NewAttributesRecord(
+				&corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodRunning}},
+				&corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending}},
+				schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "status", admission.Update, nil, false, nil,
+			),
+			want: false,
+		},
+		{
+			name: "create-status-with-extraNodeAllocatableResources",
+			attrs: admission.NewAttributesRecord(
+				&corev1.Pod{Status: corev1.PodStatus{ExtraNodeAllocatableResources: []corev1.ExtraNodeAllocatableResource{
+					{
+						ContainerName: "",
+						Requests:      corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+					{
+						ContainerName: "c1",
+						Limits:        corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+				}}},
+				nil,
+				schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "status", admission.Create, nil, false, nil,
+			),
+			want: false,
+		},
+		{
+			name: "update-status-internal-pod-extraNodeAllocatableResources-added",
+			attrs: admission.NewAttributesRecord(
+				&api.Pod{Status: api.PodStatus{ExtraNodeAllocatableResources: []api.ExtraNodeAllocatableResource{
+					{
+						ContainerName: "",
+						Requests:      api.ResourceList{api.ResourceCPU: resource.MustParse("1")},
+						Limits:        api.ResourceList{api.ResourceCPU: resource.MustParse("1")},
+					},
+					{
+						ContainerName: "c1",
+						Limits:        api.ResourceList{api.ResourceCPU: resource.MustParse("1")},
+					},
+				}}},
+				&api.Pod{},
+				schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "status", admission.Update, nil, false, nil,
+			),
+			want: true,
+		},
+		{
+			name: "update-status-internal-pod-extraNodeAllocatableResources-unchanged",
+			attrs: admission.NewAttributesRecord(
+				&api.Pod{Status: api.PodStatus{Phase: api.PodRunning, ExtraNodeAllocatableResources: []api.ExtraNodeAllocatableResource{
+					{
+						ContainerName: "",
+						Requests:      api.ResourceList{api.ResourceCPU: resource.MustParse("1")},
+						Limits:        api.ResourceList{api.ResourceCPU: resource.MustParse("1")},
+					},
+					{
+						ContainerName: "c1",
+						Limits:        api.ResourceList{api.ResourceCPU: resource.MustParse("1")},
+					},
+				}}},
+				&api.Pod{Status: api.PodStatus{Phase: api.PodPending, ExtraNodeAllocatableResources: []api.ExtraNodeAllocatableResource{
+					{
+						ContainerName: "",
+						Requests:      api.ResourceList{api.ResourceCPU: resource.MustParse("1")},
+						Limits:        api.ResourceList{api.ResourceCPU: resource.MustParse("1")},
+					},
+					{
+						ContainerName: "c1",
+						Limits:        api.ResourceList{api.ResourceCPU: resource.MustParse("1")},
+					},
+				}}},
+				schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "status", admission.Update, nil, false, nil,
+			),
+			want: false,
+		},
+		{
+			name:  "update-dynamic-image",
+			attrs: admission.NewAttributesRecord(&corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "new"}}}}, &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Image: "old"}}}}, schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "dynamic", admission.Update, nil, false, nil),
+			want:  false,
+		},
+		{
+			name:  "update-dynamic-add-container-without-resources",
+			attrs: admission.NewAttributesRecord(&corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}, {Name: "added"}}}}, &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}}, schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "dynamic", admission.Update, nil, false, nil),
+			want:  true,
+		},
+		{
+			name:  "update-dynamic-remove-container-without-resources",
+			attrs: admission.NewAttributesRecord(&corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}}, &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}, {Name: "removed"}}}}, schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "dynamic", admission.Update, nil, false, nil),
+			want:  false,
+		},
+		{
+			name: "update-dynamic-add-container-with-resources",
+			attrs: admission.NewAttributesRecord(
+				&corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}, {Name: "added", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}}}}}},
+				&corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c"}}}},
+				schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "dynamic", admission.Update, nil, false, nil),
+			want: true,
+		},
+		{
+			name: "update-dynamic-remove-container-same-totals",
+			attrs: admission.NewAttributesRecord(
+				&corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}}}}}},
+				&corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}}}, {Name: "removed"}}}},
+				schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "dynamic", admission.Update, nil, false, nil),
+			want: false,
+		},
+		{
+			name: "update-dynamic-resize",
+			attrs: admission.NewAttributesRecord(
+				&corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")}}}}}},
+				&corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}}}}}},
+				schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "dynamic", admission.Update, nil, false, nil),
+			want: true,
+		},
+		{
+			name:  "update-dynamic-activeDeadlineSeconds-from-nil",
+			attrs: admission.NewAttributesRecord(&corev1.Pod{Spec: corev1.PodSpec{ActiveDeadlineSeconds: ptr.To[int64](1)}}, &corev1.Pod{}, schema.GroupVersionKind{Group: "core", Version: "v1", Kind: "Pod"}, "", "", schema.GroupVersionResource{Group: "core", Version: "v1", Resource: "pods"}, "dynamic", admission.Update, nil, false, nil),
+			want:  true,
+		},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.DRANodeAllocatableResources, !tc.draNodeAllocatableResourcesDisabled)
 			actual := evaluator.Handles(tc.attrs)
 
 			if tc.want != actual {

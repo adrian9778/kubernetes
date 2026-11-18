@@ -189,14 +189,15 @@ func TestApplySandboxResources(t *testing.T) {
 					},
 				},
 				Status: v1.PodStatus{
-					NodeAllocatableResourceClaimStatuses: []v1.NodeAllocatableResourceClaimStatus{
+					ExtraNodeAllocatableResources: []v1.ExtraNodeAllocatableResource{
 						{
-							ResourceClaimName: "direct-claim",
-							Containers:        []string{"c1"},
-							Mapping: []v1.NodeAllocatableMappedResources{
-								{Name: v1.ResourceCPU, Quantity: new(resource.MustParse("200m"))},
-								{Name: v1.ResourceMemory, Quantity: new(resource.MustParse("128Mi"))},
-							},
+							ContainerName: "",
+							Requests:      v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
+							Limits:        v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
+						},
+						{
+							ContainerName: "c1",
+							Limits:        v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
 						},
 					},
 				},
@@ -229,14 +230,15 @@ func TestApplySandboxResources(t *testing.T) {
 					},
 				},
 				Status: v1.PodStatus{
-					NodeAllocatableResourceClaimStatuses: []v1.NodeAllocatableResourceClaimStatus{
+					ExtraNodeAllocatableResources: []v1.ExtraNodeAllocatableResource{
 						{
-							ResourceClaimName: "direct-claim",
-							Containers:        []string{"c1"},
-							Mapping: []v1.NodeAllocatableMappedResources{
-								{Name: v1.ResourceCPU, Quantity: new(resource.MustParse("200m"))},
-								{Name: v1.ResourceMemory, Quantity: new(resource.MustParse("128Mi"))},
-							},
+							ContainerName: "",
+							Requests:      v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
+							Limits:        v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
+						},
+						{
+							ContainerName: "c1",
+							Limits:        v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
 						},
 					},
 				},
@@ -273,14 +275,15 @@ func TestApplySandboxResources(t *testing.T) {
 					},
 				},
 				Status: v1.PodStatus{
-					NodeAllocatableResourceClaimStatuses: []v1.NodeAllocatableResourceClaimStatus{
+					ExtraNodeAllocatableResources: []v1.ExtraNodeAllocatableResource{
 						{
-							ResourceClaimName: "direct-claim",
-							Containers:        []string{"c1"},
-							Mapping: []v1.NodeAllocatableMappedResources{
-								{Name: v1.ResourceCPU, Quantity: new(resource.MustParse("200m"))},
-								{Name: v1.ResourceMemory, Quantity: new(resource.MustParse("128Mi"))},
-							},
+							ContainerName: "",
+							Requests:      v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
+							Limits:        v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
+						},
+						{
+							ContainerName: "c1",
+							Limits:        v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
 						},
 					},
 				},
@@ -327,14 +330,15 @@ func TestApplySandboxResources(t *testing.T) {
 					},
 				},
 				Status: v1.PodStatus{
-					NodeAllocatableResourceClaimStatuses: []v1.NodeAllocatableResourceClaimStatus{
+					ExtraNodeAllocatableResources: []v1.ExtraNodeAllocatableResource{
 						{
-							ResourceClaimName: "direct-claim",
-							Containers:        []string{"c1"},
-							Mapping: []v1.NodeAllocatableMappedResources{
-								{Name: v1.ResourceCPU, Quantity: new(resource.MustParse("200m"))},
-								{Name: v1.ResourceMemory, Quantity: new(resource.MustParse("128Mi"))},
-							},
+							ContainerName: "",
+							Requests:      v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
+							Limits:        v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
+						},
+						{
+							ContainerName: "c1",
+							Limits:        v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
 						},
 					},
 				},
@@ -372,26 +376,16 @@ func TestApplySandboxResources(t *testing.T) {
 					},
 				},
 				Status: v1.PodStatus{
-					NodeAllocatableResourceClaimStatuses: []v1.NodeAllocatableResourceClaimStatus{
+					ExtraNodeAllocatableResources: []v1.ExtraNodeAllocatableResource{
 						{
-							ResourceClaimName: "combined-claim",
-							Containers:        []string{"c1"},
-							Mapping: []v1.NodeAllocatableMappedResources{
-								{Name: v1.ResourceCPU, Quantity: new(resource.MustParse("200m"))},
-								{Name: v1.ResourceMemory, Quantity: new(resource.MustParse("128Mi"))},
-							},
-							Overhead: []v1.NodeAllocatableOverheadResources{
-								{
-									Name:         v1.ResourceCPU,
-									PerPod:       new(resource.MustParse("100m")),
-									PerContainer: new(resource.MustParse("50m")),
-								},
-								{
-									Name:         v1.ResourceMemory,
-									PerPod:       new(resource.MustParse("100Mi")),
-									PerContainer: new(resource.MustParse("50Mi")),
-								},
-							},
+							ContainerName: "",
+							Requests:      v1.ResourceList{v1.ResourceCPU: resource.MustParse("350m"), v1.ResourceMemory: resource.MustParse("278Mi")},
+							Limits:        v1.ResourceList{v1.ResourceCPU: resource.MustParse("350m"), v1.ResourceMemory: resource.MustParse("278Mi")},
+						},
+						{
+							ContainerName: "c1",
+							Requests:      v1.ResourceList{v1.ResourceCPU: resource.MustParse("50m"), v1.ResourceMemory: resource.MustParse("50Mi")},
+							Limits:        v1.ResourceList{v1.ResourceCPU: resource.MustParse("350m"), v1.ResourceMemory: resource.MustParse("278Mi")},
 						},
 					},
 				},
@@ -406,6 +400,100 @@ func TestApplySandboxResources(t *testing.T) {
 				// request: spec 2 + mapping 200m + perPod 100m + perContainer 50m  = 2.35 CPUs
 				CpuShares: 2406,
 				Unified:   map[string]string{"memory.oom.group": "1"},
+			},
+			expectedOverhead: &runtimeapi.LinuxContainerResources{},
+			cgroupVersion:    cgroupV2,
+		},
+		{
+			description: "pod with limits not set for some containers",
+			pod: &v1.Pod{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name: "c1",
+							Resources: v1.ResourceRequirements{
+								Requests: v1.ResourceList{
+									v1.ResourceMemory: resource.MustParse("128Mi"),
+									v1.ResourceCPU:    resource.MustParse("1"),
+								},
+								Limits: v1.ResourceList{
+									v1.ResourceMemory: resource.MustParse("256Mi"),
+									v1.ResourceCPU:    resource.MustParse("2"),
+								},
+							},
+						},
+						{
+							Name: "c2",
+							Resources: v1.ResourceRequirements{
+								Requests: v1.ResourceList{
+									v1.ResourceMemory: resource.MustParse("64Mi"),
+									v1.ResourceCPU:    resource.MustParse("500m"),
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedResource: &runtimeapi.LinuxContainerResources{
+				MemoryLimitInBytes: 0, // c2 declares no memory limit, so the pod sandbox limit is unlimited
+				CpuPeriod:          100000,
+				CpuQuota:           0, // c2 declares no cpu limit, so the pod sandbox limit is unlimited
+				CpuShares:          1536,
+				Unified:            map[string]string{"memory.oom.group": "1"},
+			},
+			expectedOverhead: &runtimeapi.LinuxContainerResources{},
+			cgroupVersion:    cgroupV2,
+		},
+		{
+			description: "pod with DRA direct claims and limits declared on only some containers",
+			pod: &v1.Pod{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
+						{
+							Name: "c1",
+							Resources: v1.ResourceRequirements{
+								Requests: v1.ResourceList{
+									v1.ResourceMemory: resource.MustParse("128Mi"),
+									v1.ResourceCPU:    resource.MustParse("1"),
+								},
+								Limits: v1.ResourceList{
+									v1.ResourceMemory: resource.MustParse("256Mi"),
+									v1.ResourceCPU:    resource.MustParse("2"),
+								},
+							},
+						},
+						{
+							Name: "c2",
+							Resources: v1.ResourceRequirements{
+								Requests: v1.ResourceList{
+									v1.ResourceMemory: resource.MustParse("64Mi"),
+									v1.ResourceCPU:    resource.MustParse("500m"),
+								},
+							},
+						},
+					},
+				},
+				Status: v1.PodStatus{
+					ExtraNodeAllocatableResources: []v1.ExtraNodeAllocatableResource{
+						{
+							ContainerName: "",
+							Requests:      v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
+							Limits:        v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
+						},
+						{
+							ContainerName: "c1",
+							Limits:        v1.ResourceList{v1.ResourceCPU: resource.MustParse("200m"), v1.ResourceMemory: resource.MustParse("128Mi")},
+						},
+					},
+				},
+			},
+			draEnabled: true,
+			expectedResource: &runtimeapi.LinuxContainerResources{
+				MemoryLimitInBytes: 0, // c2 declares no standard memory limit, so the pod sandbox limit is unlimited
+				CpuPeriod:          100000,
+				CpuQuota:           0,
+				CpuShares:          1740,
+				Unified:            map[string]string{"memory.oom.group": "1"},
 			},
 			expectedOverhead: &runtimeapi.LinuxContainerResources{},
 			cgroupVersion:    cgroupV2,

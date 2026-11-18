@@ -154,6 +154,17 @@ func newWorker(
 	return w
 }
 
+// resolveHTTPProbeProtocol returns the wire protocol an HTTP probe actually uses, accounting for
+// the H2CContainerProbe gate: an HTTP2-configured probe silently falls back to HTTP1 when the
+// gate is disabled, so the metric must reflect that instead of the raw spec value.
+func resolveHTTPProbeProtocol(httpGet *v1.HTTPGetAction) string {
+	if httpGet.Protocol != nil && *httpGet.Protocol == v1.HTTPProtocolHTTP2 &&
+		utilfeature.DefaultFeatureGate.Enabled(features.H2CContainerProbe) {
+		return string(v1.HTTPProtocolHTTP2)
+	}
+	return string(v1.HTTPProtocolHTTP1)
+}
+
 // run periodically probes the container.
 func (w *worker) run(ctx context.Context) {
 	logger := klog.FromContext(ctx)
@@ -168,6 +179,12 @@ func (w *worker) run(ctx context.Context) {
 
 	probeTicker := time.NewTicker(probeTickerPeriod)
 
+	var activeProbesLabels metrics.Labels
+	if w.spec.HTTPGet != nil {
+		activeProbesLabels = metrics.Labels{"protocol": resolveHTTPProbeProtocol(w.spec.HTTPGet)}
+		ActiveProbes.With(activeProbesLabels).Inc()
+	}
+
 	defer func() {
 		// Clean up.
 		probeTicker.Stop()
@@ -175,12 +192,19 @@ func (w *worker) run(ctx context.Context) {
 			w.resultsManager.Remove(w.containerID)
 		}
 
-		w.probeManager.removeWorker(w.pod.UID, w.container.Name, w.probeType)
-		ProberResults.Delete(w.proberResultsSuccessfulMetricLabels)
-		ProberResults.Delete(w.proberResultsFailedMetricLabels)
-		ProberResults.Delete(w.proberResultsUnknownMetricLabels)
-		ProberDuration.Delete(w.proberDurationSuccessfulMetricLabels)
-		ProberDuration.Delete(w.proberDurationUnknownMetricLabels)
+		// A replacement worker has the same metric labels, and keeps the metrics.
+		if replaced := w.probeManager.removeWorker(w); !replaced {
+			ProberResults.Delete(w.proberResultsSuccessfulMetricLabels)
+			ProberResults.Delete(w.proberResultsFailedMetricLabels)
+			ProberResults.Delete(w.proberResultsUnknownMetricLabels)
+			ProberDuration.Delete(w.proberDurationSuccessfulMetricLabels)
+			ProberDuration.Delete(w.proberDurationUnknownMetricLabels)
+		}
+		// Each worker increments ActiveProbes once on creation, so it must
+		// decrement it once on exit regardless of replacement.
+		if activeProbesLabels != nil {
+			ActiveProbes.With(activeProbesLabels).Dec()
+		}
 	}()
 
 probeLoop:

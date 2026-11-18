@@ -29,11 +29,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/tools/record"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/klog/v2"
-	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/allocation"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/events"
@@ -154,6 +152,17 @@ type podWork struct {
 	Options UpdatePodOptions
 }
 
+// operationType returns the operation_type label value for pod worker metrics.
+// TerminatedPod is special-cased because its UpdateType is not meaningful.
+func (w *podWork) operationType() string {
+	switch w.WorkType {
+	case TerminatedPod, TerminatingPod:
+		return w.WorkType.String()
+	default:
+		return w.Options.UpdateType.String()
+	}
+}
+
 // PodWorkers is an abstract interface for testability.
 type PodWorkers interface {
 	// UpdatePod notifies the pod worker of a change to a pod, which will then
@@ -254,6 +263,15 @@ type PodWorkers interface {
 	// deleting a terminating static pod from the apiserver before the pod is shut
 	// down.
 	IsPodForMirrorPodTerminatingByFullName(podFullname string) bool
+}
+
+// podRelistSuspender suspends PLEG relist observations for a pod while the pod worker syncs it.
+// Changes made by the sync itself are then observed once, after the sync, instead of once per
+// intermediate runtime event.
+type podRelistSuspender interface {
+	SuspendRelist(podUID types.UID)
+	ResumeRelist(podUID types.UID) (relistDeferred bool)
+	RequestPodRelist(logger klog.Logger, podUID types.UID)
 }
 
 // podSyncer describes the core lifecyle operations of the pod state machine. A pod is first
@@ -597,6 +615,9 @@ type podWorkers struct {
 	// different pods at the same time.
 	podSyncer podSyncer
 
+	// relistSuspender, if set, suspends PLEG relist observations for a pod while SyncPod runs.
+	relistSuspender podRelistSuspender
+
 	// workerChannelFn is exposed for testing to allow unit tests to impose delays
 	// in channel communication. The function is invoked once each time a new worker
 	// goroutine starts.
@@ -628,6 +649,7 @@ func newPodWorkers(
 	resyncInterval, backOffPeriod time.Duration,
 	podCache kubecontainer.ROCache,
 	allocationManager allocation.Manager,
+	relistSuspender podRelistSuspender,
 ) PodWorkers {
 	return &podWorkers{
 		podSyncStatuses:                    map[types.UID]*podSyncStatus{},
@@ -641,6 +663,7 @@ func newPodWorkers(
 		backOffPeriod:                      backOffPeriod,
 		podCache:                           podCache,
 		allocationManager:                  allocationManager,
+		relistSuspender:                    relistSuspender,
 		clock:                              clock.RealClock{},
 	}
 }
@@ -973,7 +996,7 @@ func (p *podWorkers) UpdatePod(ctx context.Context, options UpdatePodOptions) {
 		go func() {
 			// TODO: this should be a wait.Until with backoff to handle panics, and
 			// accept a context for shutdown
-			defer runtime.HandleCrash()
+			defer runtime.HandleCrashWithContext(ctx)
 			defer logger.V(3).Info("Pod worker has stopped", "podUID", uid)
 			p.podWorkerLoop(ctx, uid, outCh)
 		}()
@@ -987,9 +1010,7 @@ func (p *podWorkers) UpdatePod(ctx context.Context, options UpdatePodOptions) {
 
 	// notify the pod worker there is a pending update
 	status.pendingUpdate = &options
-	if utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling) {
-		status.pendingUpdate.Pod, _ = p.allocationManager.UpdatePodFromAllocation(options.Pod)
-	}
+	status.pendingUpdate.Pod, _ = p.allocationManager.UpdatePodFromAllocation(options.Pod)
 	status.working = true
 	updateLogger.V(4).Info("Notifying pod of pending update", "workType", status.WorkType())
 	select {
@@ -1297,6 +1318,7 @@ func (p *podWorkers) podWorkerLoop(parentCtx context.Context, podUID types.UID, 
 
 			// Take the appropriate action (illegal phases are prevented by UpdatePod)
 			var postSync func()
+			var relistSuspended bool
 			switch {
 			case update.WorkType == TerminatedPod:
 				err = p.podSyncer.SyncTerminatedPod(ctx, update.Options.Pod, status)
@@ -1316,12 +1338,28 @@ func (p *podWorkers) podWorkerLoop(parentCtx context.Context, podUID types.UID, 
 				}
 
 			default:
+				if p.relistSuspender != nil {
+					p.relistSuspender.SuspendRelist(podUID)
+					relistSuspended = true
+				}
 				isTerminal, postSync, err = p.podSyncer.SyncPod(ctx, update.Options.UpdateType, update.Options.Pod, update.Options.MirrorPod, status)
 			}
 
+			// Resume *before* setting lastSyncTime: any relist that starts after lastSyncTime then
+			// sees the pod as unsuspended and reconciles it, so a relist that skipped the pod can
+			// never advance a cache timestamp past lastSyncTime. Request the follow-up relist
+			// *after* setting lastSyncTime, so its cache update unblocks the next sync. A non-nil
+			// postSync means the sync changed the pod and requests its own relist, which also
+			// observes anything deferred during the suspension.
+			var relistDeferred bool
+			if relistSuspended {
+				relistDeferred = p.relistSuspender.ResumeRelist(podUID)
+			}
 			lastSyncTime = p.clock.Now()
 			if postSync != nil {
 				postSync()
+			} else if relistDeferred {
+				p.relistSuspender.RequestPodRelist(logger, podUID)
 			}
 
 			return err
@@ -1336,12 +1374,15 @@ func (p *podWorkers) podWorkerLoop(parentCtx context.Context, podUID types.UID, 
 		case err != nil:
 			// we will queue a retry
 			logger.Error(err, "Error syncing pod, skipping", "pod", podRef, "podUID", podUID)
+			if !kubecontainer.IsBackoffError(err) {
+				metrics.PodWorkerErrorsTotal.WithLabelValues(update.operationType()).Inc()
+			}
 
 		case update.WorkType == TerminatedPod:
 			// we can shut down the worker
 			p.completeTerminated(logger, podUID)
 			if start := update.Options.StartTime; !start.IsZero() {
-				metrics.PodWorkerDuration.WithLabelValues("terminated").Observe(metrics.SinceInSeconds(start))
+				metrics.PodWorkerDuration.WithLabelValues(update.operationType()).Observe(metrics.SinceInSeconds(start))
 			}
 			logger.V(4).Info("Processing pod event done", "pod", podRef, "podUID", podUID, "updateType", update.WorkType)
 			return
@@ -1351,7 +1392,7 @@ func (p *podWorkers) podWorkerLoop(parentCtx context.Context, podUID types.UID, 
 			if update.Options.RunningPod != nil {
 				p.completeTerminatingRuntimePod(logger, podUID)
 				if start := update.Options.StartTime; !start.IsZero() {
-					metrics.PodWorkerDuration.WithLabelValues(update.Options.UpdateType.String()).Observe(metrics.SinceInSeconds(start))
+					metrics.PodWorkerDuration.WithLabelValues(update.operationType()).Observe(metrics.SinceInSeconds(start))
 				}
 				logger.V(4).Info("Processing pod event done", "pod", podRef, "podUID", podUID, "updateType", update.WorkType)
 				return
@@ -1370,7 +1411,7 @@ func (p *podWorkers) podWorkerLoop(parentCtx context.Context, podUID types.UID, 
 		// queue a retry if necessary, then put the next event in the channel if any
 		p.completeWork(logger, podUID, phaseTransition, err)
 		if start := update.Options.StartTime; !start.IsZero() {
-			metrics.PodWorkerDuration.WithLabelValues(update.Options.UpdateType.String()).Observe(metrics.SinceInSeconds(start))
+			metrics.PodWorkerDuration.WithLabelValues(update.operationType()).Observe(metrics.SinceInSeconds(start))
 		}
 		logger.V(4).Info("Processing pod event done", "pod", podRef, "podUID", podUID, "updateType", update.WorkType)
 	}

@@ -29,8 +29,8 @@ type FakeManager struct{}
 
 // Unused methods below.
 
-// AddPod simulates adding a Pod.
-func (FakeManager) AddPod(_ context.Context, _ *v1.Pod) {}
+// SyncPod simulates syncing a Pod.
+func (FakeManager) SyncPod(_ context.Context, _ *v1.Pod) {}
 
 // RemovePod simulates removing a Pod.
 func (FakeManager) RemovePod(_ *v1.Pod) {}
@@ -45,7 +45,7 @@ func (FakeManager) CleanupPods(_ map[types.UID]sets.Empty) {}
 func (FakeManager) Start() {}
 
 // UpdatePodStatus simulates updating the Pod Status.
-func (FakeManager) UpdatePodStatus(_ context.Context, _ *v1.Pod, podStatus *v1.PodStatus) {
+func (FakeManager) UpdatePodStatus(_ context.Context, _ *v1.Pod, _ *v1.PodStatus, podStatus *v1.PodStatus) {
 	for i := range podStatus.ContainerStatuses {
 		podStatus.ContainerStatuses[i].Ready = true
 	}

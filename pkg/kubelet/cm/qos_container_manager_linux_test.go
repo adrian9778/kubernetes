@@ -140,6 +140,29 @@ func createTestQOSContainerManager(logger klog.Logger) (*qosContainerManagerImpl
 	return qosContainerManager, nil
 }
 
+func TestHugePageSizeBytes(t *testing.T) {
+	for pageSize, want := range map[string]int64{
+		"64KB": 64 << 10,
+		"2MB":  2 << 20,
+		"32MB": 32 << 20,
+		"1GB":  1 << 30,
+		"16GB": 16 << 30,
+	} {
+		got, err := hugePageSizeBytes(pageSize)
+		if err != nil || got != want {
+			t.Errorf("hugePageSizeBytes(%q) = %d, %v, want %d", pageSize, got, err, want)
+		}
+	}
+	for _, pageSize := range []string{
+		"", "MB", "2", "2M", "2mb", "2MiB", "2TB", "2 MB", "-2MB", "+2MB", "1.5GB",
+		"8589934592GB", // 1<<63 bytes
+	} {
+		if got, err := hugePageSizeBytes(pageSize); err == nil {
+			t.Errorf("hugePageSizeBytes(%q) = %d, want an error", pageSize, got)
+		}
+	}
+}
+
 func TestQoSContainerCgroup(t *testing.T) {
 	burstableMin := resource.MustParse("384Mi")
 	guaranteedMin := resource.MustParse("128Mi")
@@ -213,13 +236,15 @@ func TestQoSContainerCgroup(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{UID: "99999999", Name: "besteffort-pod-with-dra", Namespace: "test"},
 					Spec:       v1.PodSpec{Containers: []v1.Container{{Name: "foo", Image: "busybox"}}},
 					Status: v1.PodStatus{
-						NodeAllocatableResourceClaimStatuses: []v1.NodeAllocatableResourceClaimStatus{
+						ExtraNodeAllocatableResources: []v1.ExtraNodeAllocatableResource{
 							{
-								ResourceClaimName: "direct-claim",
-								Containers:        []string{"foo"},
-								Mapping: []v1.NodeAllocatableMappedResources{
-									{Name: v1.ResourceMemory, Quantity: new(resource.MustParse("128Mi"))},
-								},
+								ContainerName: "",
+								Requests:      v1.ResourceList{v1.ResourceMemory: resource.MustParse("128Mi")},
+								Limits:        v1.ResourceList{v1.ResourceMemory: resource.MustParse("128Mi")},
+							},
+							{
+								ContainerName: "foo",
+								Limits:        v1.ResourceList{v1.ResourceMemory: resource.MustParse("128Mi")},
 							},
 						},
 					},
@@ -276,13 +301,15 @@ func TestQoSContainerCgroup(t *testing.T) {
 						},
 					},
 					Status: v1.PodStatus{
-						NodeAllocatableResourceClaimStatuses: []v1.NodeAllocatableResourceClaimStatus{
+						ExtraNodeAllocatableResources: []v1.ExtraNodeAllocatableResource{
 							{
-								ResourceClaimName: "direct-claim",
-								Containers:        []string{"foo"},
-								Mapping: []v1.NodeAllocatableMappedResources{
-									{Name: v1.ResourceMemory, Quantity: new(resource.MustParse("128Mi"))},
-								},
+								ContainerName: "",
+								Requests:      v1.ResourceList{v1.ResourceMemory: resource.MustParse("128Mi")},
+								Limits:        v1.ResourceList{v1.ResourceMemory: resource.MustParse("128Mi")},
+							},
+							{
+								ContainerName: "foo",
+								Limits:        v1.ResourceList{v1.ResourceMemory: resource.MustParse("128Mi")},
 							},
 						},
 					},
@@ -344,13 +371,15 @@ func TestQoSContainerCgroup(t *testing.T) {
 						},
 					},
 					Status: v1.PodStatus{
-						NodeAllocatableResourceClaimStatuses: []v1.NodeAllocatableResourceClaimStatus{
+						ExtraNodeAllocatableResources: []v1.ExtraNodeAllocatableResource{
 							{
-								ResourceClaimName: "direct-claim",
-								Containers:        []string{"foo"},
-								Mapping: []v1.NodeAllocatableMappedResources{
-									{Name: v1.ResourceMemory, Quantity: new(resource.MustParse("128Mi"))},
-								},
+								ContainerName: "",
+								Requests:      v1.ResourceList{v1.ResourceMemory: resource.MustParse("128Mi")},
+								Limits:        v1.ResourceList{v1.ResourceMemory: resource.MustParse("128Mi")},
+							},
+							{
+								ContainerName: "foo",
+								Limits:        v1.ResourceList{v1.ResourceMemory: resource.MustParse("128Mi")},
 							},
 						},
 					},
@@ -458,6 +487,7 @@ type fakeCgroupManager struct {
 	mutex   sync.Mutex
 	created []*CgroupConfig
 	updates []*CgroupConfig
+	exists  bool
 }
 
 // Update() is the observation point for this test.
@@ -484,7 +514,7 @@ func (f *fakeCgroupManager) Create(_ klog.Logger, config *CgroupConfig) error {
 
 func (f *fakeCgroupManager) Destroy(_ klog.Logger, _ *CgroupConfig) error { return nil }
 func (f *fakeCgroupManager) Validate(_ CgroupName) error                  { return nil }
-func (f *fakeCgroupManager) Exists(_ CgroupName) bool                     { return false }
+func (f *fakeCgroupManager) Exists(_ CgroupName) bool                     { return f.exists }
 func (f *fakeCgroupManager) Name(name CgroupName) string                  { return name.ToCgroupfs() }
 func (f *fakeCgroupManager) CgroupName(name string) CgroupName {
 	return ParseCgroupfsToCgroupName(name)

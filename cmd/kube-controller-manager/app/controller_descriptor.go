@@ -171,7 +171,7 @@ func NewControllerDescriptors() map[string]*ControllerDescriptor {
 	// The only known special case is the ServiceAccountTokenController which *must* be started
 	// first to ensure that the SA tokens for future controllers will exist. Think very carefully before adding new
 	// special controllers.
-	register(newServiceAccountTokenControllerDescriptor(nil))
+	register(newServiceAccountTokenControllerDescriptor())
 
 	register(newEndpointsControllerDescriptor())
 	register(newEndpointSliceControllerDescriptor())
@@ -219,6 +219,7 @@ func NewControllerDescriptors() map[string]*ControllerDescriptor {
 	register(newDeviceTaintEvictionControllerDescriptor())
 	register(newLegacyServiceAccountTokenCleanerControllerDescriptor())
 	register(newValidatingAdmissionPolicyStatusControllerDescriptor())
+	register(newImperativeEvictionResponderControllerDescriptor())
 	register(newTaintEvictionControllerDescriptor())
 	register(newServiceCIDRsControllerDescriptor())
 	register(newStorageVersionMigratorControllerDescriptor())
