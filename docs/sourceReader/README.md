@@ -58,6 +58,7 @@ flowchart TD
 | [优先级与公平性流控](topics/优先级与公平性流控.md) | apiserver APF 流控 | WithPriorityAndFairness→Handle→startRequest：FlowSchema 分类、PriorityLevel 排队、并发席位、429 拒绝 |
 | [informer resync 机制](topics/informer-resync机制.md) | client-go informer | resyncPeriod 确定→shouldResync 判定→distribute(sync=true) 仅投需 resync 的 handler→OnUpdate(old==new) 自愈 |
 | [leader election 机制](topics/leader-election机制.md) | client-go leader election | Run→acquire→renew→tryAcquireOrRenew：Lease 竞争、快慢路径、写门、Recovery 恢复 |
+| [kubelet 探针机制](topics/kubelet探针机制.md) | kubelet 探针 | prober_manager→worker→doProbe→prober：HTTP/TCP/exec/gRPC 探测、阈值判定、容器重启与 readiness |
 
 新增专题：在 `topics/` 下建 `中文名.md`，按单篇专题骨架（先总结、再生产、再开发、末验证）写，并在本表追加一行。
 
