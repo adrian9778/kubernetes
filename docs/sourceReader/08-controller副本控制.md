@@ -156,6 +156,51 @@ manageReplicas (+0，:678)
 **副作用：** expectations 状态、apiserver 写操作。
 **新增机制（scheduling 相关）：** ①「避免混合 schedulingGroup」检查（:711~:720）——当 feature gate 重新启用后出现既有 Pod 无 schedulingGroup、而 PodGroup 已建立时，若强行带 PodGroup 创建，gang 调度的 PodGroup 永远达不到 minCount；因此置 `podGroup=nil` 并记 MixedSchedulingGroup 警告事件。② podTemplate 深拷贝（:723~:729）——给新创建 Pod 注入 `SchedulingGroup.PodGroupName` 时**不改写存储中的 `rs.Spec.Template`**（DeepCopy 后写入局部 `podTemplate`）。
 
+#### 慢启动批量创建与 createPods 报文解剖（第二层补充视角）
+
+ManageReplicas 决定「要建 N 个 Pod」后，实际创建不是一次性发 N 个请求，而是经 **slowStartBatch 慢启动**分批并发创建。本节解剖慢启动算法与单个 Pod 的创建报文。
+
+**慢启动算法（`slowStartBatch`，replica_set.go:944）：**
+```text
+slowStartBatch(count, initialBatchSize, fn)
+  remaining = count
+  for batchSize := min(remaining, initialBatchSize); batchSize > 0; batchSize = min(2*batchSize, remaining):
+      errCh = make(chan error, batchSize); wg.Add(batchSize)
+      for i := 0; i < batchSize; i++ { go fn() }   ← 本批并发创建
+      wg.Wait()
+      curSuccesses = batchSize - len(errCh); successes += curSuccesses
+      if len(errCh) > 0 { return successes, <-errCh }   ← 本批有失败即停止放大
+      remaining -= batchSize
+```
+- **初始批量** `SlowStartInitialBatchSize`（controller_utils.go:87，=1）：第一批只建 1 个。
+- **倍增**：每批成功则下一批翻倍（1→2→4→8…），直至 `count` 用尽。
+- **早期失败即停**：任一批有失败（`len(errCh) > 0`）立即返回，不继续放大——避免「配额不足时一次性打 N 个请求全失败」。
+
+**单个 Pod 创建报文（`RealPodControl.createPods`，controller_utils.go）：**
+```text
+createPods(ctx, namespace, pod, object, controllerRef)
+├── len(labels.Set(pod.Labels)) == 0 → 报错（无 label 不建）
+├── KubeClient.CoreV1().Pods(namespace).Create(ctx, pod)   ← POST Pod
+│     失败且非 NamespaceTerminatingCause → FailedCreatePodReason 事件
+├── OnWrite(newPod, controllerRef)（若设，供 consistencyStore 记账）
+└── SuccessfulCreatePodReason 事件 "Created pod: <name>"
+```
+**关键：** 创建走 `Pods(namespace).Create`（POST Pod），失败时**区分 namespace 是否 terminating**——terminating namespace 不发事件（避免噪声）。
+
+**慢启动 + 创建报文对照（以 count=5、initialBatchSize=1 为例）：**
+
+| 批 | batchSize | 并发创建 | 累计成功 | 失败则 |
+|---|---|---|---|---|
+| 1 | 1 | 1 个 Pod | 1 | 停止放大 |
+| 2 | 2 | 2 个 Pod | 3 | 停止放大 |
+| 3 | 4→缩到 2（remaining=2） | 2 个 Pod | 5 | 停止放大 |
+
+**设计要点（源码可证）：**
+1. **慢启动防雪崩**：`SlowStartInitialBatchSize=1` 起步、逐批翻倍，使「配额不足」这类系统性失败在第一批就暴露，不会一次性打 N 个请求全失败（slowStartBatch 注释 :703 ～ :710）。
+2. **创建走 POST Pod，不预分配 UID**：`CreatePodsWithGenerateName` 设 `pod.ObjectMeta.GenerateName`（:554 起），让 apiserver 生成名字——避免客户端预分配 name 冲突。
+3. **失败即停 + 回补 expectations**：任一批失败即停止放大，已成功的通过 `CreationObserved` 回补 expectations（:745 ～ :751），使期望尽快归零、不靠 5min 超时兜底。
+4. **混合 schedulingGroup 防护**：PodGroup 已建立但既有 Pod 无 schedulingGroup 时置 `podGroup=nil`（:711 ～ :720），避免 gang 调度 PodGroup 永远达不到 minCount。
+
 #### 函数：calculateStatus / updateReplicaSetStatus
 **源码：** `pkg/controller/replicaset/replica_set_utils.go calculateStatus+0`（:96）/ `updateReplicaSetStatus+0`（:41）
 **职责：** `calculateStatus` 依据 active/terminating Pod 与 manageReplicas 错误计算 Conditions 与各计数字段（Replicas/FullyLabeled/Ready/Available/Terminating）；`updateReplicaSetStatus` 以 client 做 status update，冲突即返回错误触发重试。
