@@ -122,6 +122,57 @@ KUBE-SEP-XXXX（一个 endpoint：MARK-MASQ 判断 + DNAT 到 Pod IP:Port）
 ### 关键差异：RestoreAll 已更名
 旧文 `RestoreAll` 在 `pkg/proxy` 无命中（grep 无），当前为 **`proxier.iptables.Restore`**（`iptables/proxier.go:1388`，即 `syncProxyRules+763`）。`iptables` 接口以 `Restore` 为名。
 
+#### 4b. 一个 ClusterIP Service 生成的真实规则解剖
+
+以 `nginx` Service（ClusterIP `10.0.0.1`，port 80，2 个 endpoint `10.1.0.10:8080`、`10.1.0.11:8080`）为例，`syncProxyRules` 生成的 NAT 规则按「捕获 → 负载均衡 → DNAT」三层落地。以下每条规则的写法都对应 `proxier.go` 的具体行。
+
+**第一层：捕获 ClusterIP 流量（KUBE-SERVICES，:926 ～ :934）**
+```text
+-A KUBE-SERVICES -m comment --comment "default/nginx cluster IP" \
+    -m tcp -p tcp -d 10.0.0.1 --dport 80 -j KUBE-SVC-XXXX
+```
+- 写在 `syncProxyRules` 的「Capture the clusterIP」块（:926 ～ :934）：`-d <ClusterIP> --dport <port>` 匹配后跳 `internalTrafficChain`（= `KUBE-SVC-XXXX`）。
+- 无 endpoint 时改写进 `filterRules`（REJECT），不发 NAT（:935 ～ :940 的 else 分支）。
+- 同时在 `PREROUTING`/`OUTPUT` 挂 `KUBE-SERVICES` 的 jump（:374 ～ :375 的 `jumpChains`）。
+
+**第二层：ServicePort 内负载均衡（KUBE-SVC-XXXX，writeServiceToEndpointRules :1434）**
+```text
+-A KUBE-SVC-XXXX -m comment --comment "default/nginx -> 10.1.0.10:8080" \
+    -m statistic --mode random --probability 0.5000000000 -j KUBE-SEP-AAAA
+-A KUBE-SVC-XXXX -m comment --comment "default/nginx -> 10.1.0.11:8080" -j KUBE-SEP-BBBB
+```
+- `writeServiceToEndpointRules`（:1434）逐 endpoint 写一条规则。
+- **概率算法**：前 `n-1` 条带 `-m statistic --mode random --probability <1/剩余数>`（:1470 ～ :1474，`proxier.probability(numEndpoints-i)` :405）；**最后一条不带 probability 作兜底**（:1475 ～ :1476 注释：guaranteed match）。
+- `probability`（:405）从预计算表取，避免运行时浮点。
+- 若 `SessionAffinity=ClientIP`，先写一组 `-m recent --rcheck --seconds <sticky>` 亲和规则（:1444 ～ :1451）。
+
+**第三层：endpoint DNAT + hairpin SNAT（KUBE-SEP-XXXX，:1231 ～ :1247）**
+```text
+-A KUBE-SEP-AAAA -m comment --comment "default/nginx" -s 10.1.0.10 -j KUBE-MARK-MASQ
+-A KUBE-SEP-AAAA -m comment --comment "default/nginx" -m tcp -p tcp -j DNAT --to-destination 10.1.0.10:8080
+```
+- 每 endpoint 建一个 `KUBE-SEP-XXXX` 链（`MakeChainLine`，:1233 ～ :1235）。
+- **hairpin SNAT**：`-s <epIP> -j KUBE-MARK-MASQ`（:1241 ～ :1243）——Pod 访问自己所在 Service 时做源地址伪装，避免回包路由问题。
+- **DNAT**：`-j DNAT --to-destination <epIP:port>`（:1244 ～ :1246）——真正改写目标地址到 Pod。
+- ClientIP 亲和时补 `-m recent --set`（:1244）更新亲和列表。
+
+**masquerade 标记（KUBE-MARK-MASQ，:745 ～ :765）：**
+- KUBE-POSTROUTING 里对「未被标记」的包打 masquerade mark（`-m mark ! --mark <mark>/<mask> -j MARK --or-mark`，:745 ～ :765），出节点时做 SNAT。
+
+**三层规则对照（一次 ServicePort 同步产生）：**
+
+| 层 | 链 | 规则作用 | 匹配/动作 |
+|---|---|---|---|
+| 捕获 | KUBE-SERVICES | 按 ClusterIP+port 匹配，跳 SVC | `-d 10.0.0.1 --dport 80 -j KUBE-SVC-XXXX` |
+| 负载均衡 | KUBE-SVC-XXXX | 按 probability 分流到各 SEP | `-m statistic --probability 1/n -j KUBE-SEP-*` |
+| DNAT | KUBE-SEP-XXXX | hairpin SNAT + DNAT 到 Pod | `-s epIP -j MARK-MASQ`；`-j DNAT --to-destination` |
+
+**设计要点（源码可证）：**
+1. **概率负载均衡是「分母递减」**：`probability(numEndpoints-i)` 使第 i 条匹配剩余 `(n-i)` 中的 `1/(n-i)`，最后一条兜底——保证 n 个 endpoint 均匀分流，无浮点累加误差。
+2. **hairpin 用独立 MASQ 链**：DNAT 后源地址可能等于目标 Pod IP，需 SNAT 改写回包路由；单独 `KUBE-MARK-MASQ` 链集中处理，不在 SEP 链内联。
+3. **无 endpoint 降级为 REJECT**：Service 无后端时不静默丢包，而是在 filter 表 REJECT（:935 ～ :940），客户端能立即收到连接拒绝而非超时。
+4. **原子下发**：全部规则先写入 `natChains`/`natRules` LineBuffer，最后一轮 `iptables.Restore`（:1388）一次性提交——避免中间态规则不一致。
+
 ## 5. ipvs 模式定位
 
 | 函数 | 符号+偏移 | 职责 |
