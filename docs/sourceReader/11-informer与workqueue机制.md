@@ -144,6 +144,53 @@ DeltaFIFO 与普通 FIFO 的本质区别：**队列元素不是对象，而是�
 - OnDelete（:1171）：`distribute(deleteNotification{oldObj: old}, false)`（+3，:1174），对全部监听者广播
 **分发方式：** 非阻塞投递到各 listener channel，慢监听者被丢弃事件并被关闭（processor 内实现）。
 
+#### 一个 Pod CREATE 事件穿过 informer 管线（第二层补充视角）
+
+本节走一个具体的 **Pod 创建**事件，看它如何从 etcd watch 一路穿过 informer 管线到达控制器的 handler。这是「informer 如何把 etcd 变更变成控制器事件」的完整链路。
+
+**前提：** 一个 informer watch Pods，Reflector 已 ListAndWatch，DeltaFIFO 已就绪。此时 etcd 中新建了一个 Pod `nginx`。
+
+**事件穿过管线的完整链路：**
+
+| 序 | 环节 | 符号 | 做什么 |
+|---|---|---|---|
+| 1 | etcd watch 回调 | etcd → `wres.Events` | etcd 推送一个 `EventTypePut` 事件（key=`/registry/pods/default/nginx`） |
+| 2 | parseEvent | `event.go:66` | 转成内部 `event{key, value, rev, isCreated=true}` |
+| 3 | DeltaFIFO.Add | `delta_fifo.go:387` → `queueActionLocked(Added, obj)` | 追加 `Delta{Added, obj}` 到 `items[key]`，key 入 `queue` |
+| 4 | DeltaFIFO.Pop | `delta_fifo.go:563` | 弹出 `Deltas`（含一个 Added Delta） |
+| 5 | handleDeltas | `shared_informer.go:1124` | 调 `processDeltas`（controller.go:827） |
+| 6 | processDeltas | `controller.go:827` | `Sync/Replaced/Added/Updated` 分支：`clientState.Get` 查旧对象 → 不存在 → `clientState.Add` + `handler.OnAdd(obj, isInInitialList)` |
+| 7 | OnAdd | `shared_informer.go:1141` | mutation detector 记录 → `distribute(addNotification, false)` |
+| 8 | distribute | `shared_informer.go`（distribute） | 投递给**所有** listener（非 sync 事件） |
+| 9 | processorListener.add | `shared_informer.go:1495` | 写 `addCh`（阻塞，慢监听者背压） |
+| 10 | processorListener.run | `shared_informer.go:1610` 附近 | `handler.OnAdd(newObj, isInInitialList)` |
+| 11 | 控制器 handler | 控制器的 OnAdd | keyFunc 算 key → workqueue.Add → worker 调谐 |
+
+**processDeltas 的关键分支（controller.go:827）：**
+```text
+processDeltas (从 oldest 到 newest 遍历 Deltas)
+├── ReplacedAll → processReplacedAllInfo（替换全部）
+├── SyncAll → 对 clientState.List() 的每个 obj 调 handler.OnUpdate(obj, obj)（resync）
+├── Sync/Replaced/Added/Updated
+│    ├── clientState.Get(obj) 存在 → clientState.Update + handler.OnUpdate(old, obj)
+│    └── 不存在 → clientState.Add + handler.OnAdd(obj, isInInitialList)
+├── Deleted → clientState.Delete + handler.OnDelete(obj)
+└── Bookmark → （仅推进 revision，不触发 handler）
+```
+
+**Added vs Updated 的判定（processDeltas Sync/Replaced/Added/Updated 分支）：**
+- `clientState.Get(obj)` **存在** → 说明对象已在缓存（之前 Add 过）→ `clientState.Update` + `handler.OnUpdate(old, obj)`。
+- **不存在** → `clientState.Add` + `handler.OnAdd(obj, isInInitialList)`。
+- 即：**同一 Pod 第一次出现是 OnAdd，之后变更是 OnUpdate**——由 clientState 是否已有该 key 决定，而非 DeltaType 本身。
+
+**Deleted 的处理：** `clientState.Delete(obj)` + `handler.OnDelete(obj)`——从缓存删除并通知。
+
+**设计要点（源码可证）：**
+1. **Added/Updated 由 clientState 是否已有 key 决定**：processDeltas 的 Sync/Replaced/Added/Updated 分支用 `clientState.Get` 查旧对象，存在则 Update+OnUpdate，不存在则 Add+OnAdd——同一 DeltaType 在不同缓存状态下产生不同事件。
+2. **SyncAll 是 resync 的实现**：对 `clientState.List()` 的每个 obj 调 `handler.OnUpdate(obj, obj)`（old==new）——这就是 resync 的实现（见 informer resync 专题）。
+3. **processDeltas 从 oldest 到 newest 遍历**：保证同一 Pod 的多个 Delta 按序处理，不乱序。
+4. **Bookmark 不触发 handler**：Bookmark 事件仅推进 revision，不产生 handler 调用。
+
 ## 4. Workqueue 函数级
 
 ### 函数：NewTyped / NewTypedWithConfig
