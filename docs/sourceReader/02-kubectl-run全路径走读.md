@@ -134,6 +134,26 @@ NAME    READY   STATUS    RESTARTS   AGE
 nginx   1/1     Running   0          <n>
 ```
 
+### 3.7 各跳成功判据 / 失败点 / 可观察判据速查
+
+本节是第二层的「排障速查表」：每跳给出一句话的成功判据、最主要的失败点、以及**不进函数体就能观察到的信号**（事件 reason、Pod 字段/condition、可见结果）。函数级细节留待第三、四层。
+
+| 跳 | 成功判据 | 最主要失败点 | 可观察判据（事件 reason / 字段 / condition） |
+|---|---|---|---|
+| 客户端 POST | apiserver 返回 201 + Pod 对象 | 同名 Pod 已存在（409 冲突）、认证/鉴权失败（401/403） | `kubectl run` 终端打印 `pod/nginx created`；无即未成功 |
+| apiserver 写 etcd | Pod 落 etcd，`spec.nodeName` 为空 | 准入拒绝、声明式校验失败（422 Invalid）、etcd 冲突 | `kubectl get pod` 能看到 `STATUS=Pending`（已持久化、未调度） |
+| scheduler 选节点 + bind | `spec.nodeName` 被填入 | 无可行节点（资源/亲和/污点）、抢占也失败 | 事件 `Scheduled`（Normal，reason=Binding，schedule_one.go:824）；失败为 `FailedScheduling`（Warning，:976） |
+| kubelet 创建 sandbox + 容器 | sandbox 与全部容器 Running | 镜像拉取失败、PreCreate/PreStart 钩子失败、资源不足被 kubelet 拒绝 | 事件 `Pulling`/`Pulled`/`Failed`（拉镜像，`pkg/kubelet/events/event.go:47-49`）；`Started`/`Failed`（建/启容器，:22-23） |
+| 状态回报 | Pod status 回写 apiserver/etcd | PATCH 冲突（重读重试）、Pod 被删（丢弃更新） | Pod condition `PodScheduled`、`ContainersReady`、`Ready` 依次为 True（status_manager.go:1060、:659-660）；`STATUS=Running` |
+
+**用这张表排障的顺序：**
+1. 先看 `kubectl get pod` 的 `STATUS`：`Pending` 说明还没到 kubelet（卡在前两跳）；`Running` 说明前四跳全通。
+2. `STATUS=Pending` 时看 `kubectl describe pod` 的 Events：有 `FailedScheduling` → 卡在调度跳；无任何事件 → 卡在 apiserver 写入或 watch 未送达。
+3. `STATUS` 非 Running 但已调度（`spec.nodeName` 非空）→ 卡在 kubelet 跳，看节点上 `Pulling`/`Failed`/`Started` 事件定位是镜像还是容器启动问题。
+4. condition 的 `LastTransitionTime`（见第三层 03 篇）能给出每跳的**切换时刻**，用于判断卡在哪个跳、卡了多久。
+
+**边界（本层不展开）：** 每个失败点内部的函数级分支（如镜像 GC 触发、抢占、退避重试）属第三、四层，见 03/07/09/10 篇。
+
 ## 4. 本层刻意不展开的内容
 异常分支（调度失败、镜像拉取失败、etcd 冲突、准入拒绝）、边界情况、PLEG 健康检查细节、探针、非核心组件、控制器调谐，全部留待第三、四层。
 
