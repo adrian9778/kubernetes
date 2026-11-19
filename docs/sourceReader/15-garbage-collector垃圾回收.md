@@ -187,6 +187,64 @@ attemptToDeleteItem+0
 **源码：** `garbagecollector.go:GarbageCollector.attemptToOrphanWorker+0`（:746）/ `orphanDependents+0`（:680）
 **职责：** Orphan 主流程：快照 dependents → 并发对每个 dependent patch 删 ownerRef（以 dependent UID 为前置条件）→ `removeFinalizer(FinalizerOrphanDependents)`（operations.go:removeFinalizer+0，:104，RetryOnConflict）。失败则 `requeueItem`。
 
+### 5.5 patch / delete 的实际报文解剖（第二层补充视角）
+
+GC 对外只有两种写动作：**patch**（改 ownerReferences / 摘 finalizer）和 **delete**（删对象）。本节解剖这两种报文的实际内容与兜底策略——这是「GC 如何安全地改别人对象」的关键。
+
+#### patch：Strategic 优先、JSON 兜底
+
+**源码：** `patch.go GarbageCollector.patch+0`（:92）
+```text
+patch(item, smp, jmp)
+├── 1. patchObject(identity, smp, StrategicMergePatchType)
+├── 2. 成功 → 返回
+└── 3. IsUnsupportedMediaType → jmp(item) 生成 JSON merge patch
+       → patchObject(identity, patch, MergePatchType)
+```
+**为什么要双模式：** 部分 Aggregated APIService / 自定义资源不支持 StrategicMergePatch，此时回落到 JSON merge patch。两个生成器：
+- `deleteOwnerRefJSONMergePatch`（patch.go:109）：**移除**匹配 ownerUIDs 的 ownerReferences——构造 `objectForPatch{expectedObjectMeta}`，遍历现有 refs，**只保留不在 ownerUIDs 里的**，再 `json.Marshal`。
+- `unblockOwnerReferencesStrategicMergePatch`（node 方法，patch.go:127）：把所有 `BlockOwnerDeletion=true` 的 ownerRef 的该字段**置 false**（`falseVar`），用于打破 Foreground 依赖环。
+
+**patch 报文内容（以摘 ownerRef 为例）：**
+```json
+{"metadata":{"resourceVersion":"<当前RV>","ownerReferences":[
+  {"apiVersion":"...","kind":"...","name":"<未删除的owner>","uid":"..."}
+]}}
+```
+**关键：** patch 里带 `resourceVersion` 作为**前置条件**——若对象已被其它写改动（RV 变了），patch 会冲突失败，GC 重读重试。这与篇 03 的 status PATCH 用 uid 做前置条件是同一思路。
+
+#### delete：UID + RV 双前置条件 + ownerRefs 未变重试
+
+**源码：** `operations.go GarbageCollector.deleteObject+0`（:53）
+```text
+deleteObject(item, resourceVersion, ownersAtResourceVersion, policy)
+├── 1. apiResource(APIVersion, Kind) → resource + namespaced
+├── 2. Preconditions{UID, ResourceVersion} + PropagationPolicy
+├── 3. metadataClient.Resource(...).Namespace(...).Delete(name, deleteOptions)
+└── 4. errors.IsConflict 且带 RV 时：
+       ├── liveErr NotFound → 返回 NotFound（对象已没了）
+       ├── UID 匹配 && RV 变了 && ownerReferences 未变
+       │     → 去 RV 重试（deleteObject(item, "", nil, policy)）
+       └── 否则返回冲突错误
+```
+**为什么去 RV 重试：** 注释（operations.go:73 ～ :80）——对象因无关的快速更新导致 RV 变化、但 ownerReferences 没变时，若坚持 RV 前置条件会让 GC 被「饿死」（一直冲突）。去 RV 重试只保留 UID 前置条件，仍能防止删错对象（UID 不匹配则 apiserver 拒绝）。
+
+#### patch / delete 报文对照
+
+| 维度 | patch（改 ownerRef / 摘 finalizer） | delete（删对象） |
+|---|---|---|
+| HTTP 动词 | PATCH | DELETE |
+| 前置条件 | resourceVersion（防并发改） | UID（必）+ ResourceVersion（可选） |
+| 冲突兜底 | Strategic → JSON merge patch 双模式 | 去 RV 重试（ownerRefs 未变时） |
+| 内容 | 移除 ownerRef / BlockOwnerDeletion=false | DeleteOptions{PropagationPolicy} |
+| API | metadata client（PartialObjectMetadata，只读写元数据） | metadata client Delete |
+
+**设计要点（源码可证）：**
+1. **只读写元数据**：GC 用 `metadataClient`（`PartialObjectMetadata`），从不拉完整对象——最小化 apiserver/etcd 负载，也避免与业务 controller 争用完整对象。
+2. **双 patch 模式兼容自定义资源**：Strategic 不支持时回落 JSON merge，使 GC 能服务 CRD 等非内置资源。
+3. **前置条件分级**：patch 用 RV、delete 用 UID+RV；delete 冲突时按「ownerRefs 是否变」决定是否去 RV 重试，兼顾安全与不饿死。
+4. **Orphan 与 Foreground 复用同一 patch 原语**：Orphan 用 `deleteOwnerRefJSONMergePatch` 删 ownerRef，Foreground 破环用 `unblockOwnerReferences*` 置 `BlockOwnerDeletion=false`——都是对 ownerReferences 的定点修改。
+
 ## 6. 开发视角：三种级联删除策略
 
 | 策略 | apiserver 加的 finalizer | GC 行为 |
