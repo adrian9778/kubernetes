@@ -199,6 +199,60 @@ kubeGenericRuntimeManager.SyncPod
 3. **GC 只管镜像盘**：回收失败会明确区分「磁盘被非镜像数据占满」的场景，提示排查其它占用而非继续删镜像。
 4. **`freeOldImages` 先行**：超过 MinAge 的镜像先删，再按需做阈值驱动回收，减少不必要的删除。
 
+### 5c 一次新建 Pod 的 CRI gRPC 调用序列解剖（第二层补充视角）
+
+本节把 SyncPod 新建 Pod 展开成**按顺序发出的 CRI gRPC 调用**：每个调用的方法名、关键请求字段、成功信号与失败事件。这是「wire-level」视角——不看函数内部逻辑，只看 kubelet 与容器运行时之间实际往返了哪些 gRPC。
+
+#### 调用序列（新建 Pod，主成功路径）
+
+| 序 | CRI gRPC 方法 | 关键请求字段 | 成功信号 | 失败事件（reason） |
+|---|---|---|---|---|
+| 1 | `PullImage` | image、auth（pullSecrets）、sandboxConfig | `imageRef` 返回 | `FailedToPullImage`（image_manager.go:380） |
+| 2 | `RunPodSandbox` | PodSandboxConfig（hostname、dns、logDir、labels、cgroup、linux namespaces） | `podSandboxID` | `FailedCreatePodSandBox`（SyncPod+2038） |
+| 3 | `PodSandboxStatus` | podSandboxID、verbose=false | `resp.Status`（含 podIPs） | `FailedStatusPodSandBox`（SyncPod+2056） |
+| 4 | `CreateContainer`（每容器） | podSandboxID、ContainerConfig、PodSandboxConfig | `containerID` | `FailedToCreateContainer`（kuberuntime_container.go:296） |
+| 5 | `StartContainer`（每容器） | containerID | 无返回体 | `FailedToStartContainer`（:313） |
+
+**调用顺序（源码锚点）：**
+```text
+SyncPod (kuberuntime_manager.go:1854)
+  ├─ computePodActions (+1388)  ← 决策：建 sandbox + 启哪些容器
+  ├─ createPodSandbox (:2018 调用) → runtimeService.RunPodSandbox
+  ├─ runtimeService.PodSandboxStatus (:2043) → 取 podIPs
+  │     └─ 网络隔离但拿到 IP → StopPodSandbox + 失败（:2073）
+  └─ 逐容器 startContainer (kuberuntime_container.go:213)
+       ├─ imagePuller.EnsureImageExists (:233) → PullImage
+       ├─ runtimeService.CreateContainer (:295) → containerID
+       ├─ internalLifecycle.PreStartContainer (:300)
+       ├─ runtimeService.StartContainer (:313)
+       └─ recordContainerEvent: CreatedContainer → StartedContainer（Normal）
+```
+
+**每个 gRPC 调用的失败事件（源码可证）：**
+
+| gRPC 方法 | 失败事件 reason | 事件类型 | 锚点 |
+|---|---|---|---|
+| `PullImage` | `FailedToPullImage` | Warning | `image_manager.go:380` |
+| `RunPodSandbox` | `FailedCreatePodSandBox` | Warning | `kuberuntime_manager.go:2038` |
+| `PodSandboxStatus` | `FailedStatusPodSandBox` | Warning | `kuberuntime_manager.go:2056` |
+| `CreateContainer` | `FailedToCreateContainer` | Warning | `kuberuntime_container.go:296` |
+| `PreStartContainer` 钩子 | `FailedToStartContainer` | Warning | `kuberuntime_container.go:304` |
+| `StartContainer` | `FailedToStartContainer` | Warning | `kuberuntime_container.go:313` |
+| 成功：容器已建/已启 | `CreatedContainer` / `StartedContainer` | Normal | `kuberuntime_container.go:299` / `:318` |
+
+#### gRPC 错误的统一处理
+
+- 每个 CRI 调用的 gRPC status 经 `grpcstatus.FromError(err)` 取出 `s.Message()`，包装成 K8s 事件 + Go error（`kuberuntime_container.go:296`、:304、:313）。
+- sandbox 创建失败的错误可能是 CNI/CSI/CRI 任一来源；若 Pod 已被标记删除（`IsPodTerminationRequested`）则**静默返回**、不记失败（SyncPod:2020 ～ :2026）。
+- PodSandboxStatus 拿到 IP 后，若 Pod 要求网络隔离但运行时仍配了网（`IsNetworkIsolatedPod && len(podIPs)>0`），则 `StopPodSandbox` 拆掉 sandbox 并失败（:2073）。
+
+#### 关键 gRPC 调用的顺序依赖（源码可证）
+
+1. **RunPodSandbox 必须先于 CreateContainer**：容器建在 sandbox 的 network namespace 内，sandbox 没起来就没有可加入的网络。
+2. **PodSandboxStatus 必须在 CreateContainer 前**：容器的 IP 来自 sandbox status（`determinePodSandboxIPs`，:2061），要先把 IP 填进容器环境。
+3. **PullImage 必须先于 CreateContainer**：CreateContainer 的 config 引用镜像引用，镜像不在本地则 Create 失败。
+4. **CreateContainer 必须先于 StartContainer**：先建后启，PreStartContainer 钩子夹在两者之间。
+
 ## 6. 关键边界与错误
 | 场景 | 行为 |
 |---|---|
