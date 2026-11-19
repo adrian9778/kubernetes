@@ -233,6 +233,57 @@ Store.GuaranteedUpdate (registry store.go)
 | Create 不覆盖 | `OptimisticPut(expectedRev=0)` | 保证 Create 幂等语义：已存在即失败 |
 | uid 前置条件（上层） | registry 层 `AdmissionToValidateObjectFunc` | 见篇 06；storage 层只负责 RV 前置条件 |
 
+### 2.7 refreshOnError、transformer 链与 lease 复用（加深）
+
+#### refreshOnError（txn.go:146）——冲突后重读的精确语义
+
+`GuaranteedUpdate` 的 `for` 循环在冲突/前置条件失败时调 `refreshOnError` 重读。其精确语义：
+```text
+refreshOnError(st, err, ignoreNotFound, getCurrentState)
+├── st.Current → 返回 st + err（数据已最新，返回原错误）
+├── cachedRev = st.Rev; cachedErr = err（记住可能 stale 的 rev 和错误）
+├── currentState = getCurrentState(ctx, ignoreNotFound)（从 etcd 重读）
+├── cachedRev == currentState.Rev → 返回 currentState + cachedErr
+│     （缓存数据其实不 stale，返回原错误）
+└── 否则 → 返回 currentState, nil（重试）
+```
+**语义：** 只有当缓存 rev 与 etcd 当前 rev **不同**（数据真变了）才重试；若相同（数据没变，错误是别的原因）则返回原错误。这避免了「错误是别的原因却无限重试」。
+
+#### transformer 链（value/transformer.go）
+
+`transformer.TransformToStorage` 的实现是一个 **provider 链**：
+- `Transformer` 接口（transformer.go:59）= `Read` + `Write`（即 `TransformFromStorage` / `TransformToStorage`）。
+- `prefixTransformers`（transformer.go:172）：按前缀匹配多个 transformer，**每个 transformer 用自己的 prefix 作为 `authenticatedDataString`**——这是加密的关联数据（AAD），保证 key 绑定密文。
+- 具体实现：
+  - `identityTransformer`（encrypt/identity/identity.go:55）：恒等变换（不加密，用于未启用加密的资源）。
+  - `envelopeTransformer`（encrypt/envelope/kmsv2/envelope.go:256）：KMS envelope 加密——用 DEK 加密数据，DEK 用 KEK（KMS provider）加密后存 etcd annotation。
+  - `compression.go:68`：压缩 transformer（先压缩再加密）。
+
+**provider 链的意义：** 资源可按 `ResourceTransformers.TransformerForResource(GroupResource)` 选择不同 transformer——不同资源可用不同加密策略。
+
+#### lease 复用（`leaseManager.GetLease`，lease_manager.go:90）
+
+etcd lease 是**有限资源**（每个 lease 有 maxObjectCount），故 `leaseManager` 复用 lease：
+```text
+GetLease(ttl)
+├── reuseDurationSeconds = getReuseDurationSecondsLocked(ttl)
+├── valid = now + ttl < prevLeaseExpirationTime（lease 未过期）
+├── sufficient = now + (ttl + reuseDurationSeconds) < prevLeaseExpirationTime
+│     （lease 还有足够余量）
+├── leaseAttachedObjectCount++
+├── valid && sufficient && count <= maxObjectCount → 复用 prevLeaseID
+└── 否则 → Grant(ttl + reuseDurationSeconds) 新 lease
+       → 缓存新 leaseID + 过期时间 + 重置 count
+```
+**语义：** 复用条件是「lease 未过期 + 余量足够 + 对象数未超限」。不满足则申请新 lease（带额外 `reuseDurationSeconds` 余量）。这避免为每个对象都申请新 lease（etcd lease 有上限）。
+
+#### GetList 分页（store.GetList，:736）
+
+`GetList` 支持 etcd 分页：
+- `prepareKey(key, Recursive)` → keyPrefix。
+- `limit = opts.Predicate.Limit; paging = limit > 0`——`limit > 0` 时启用分页。
+- etcd 请求带 `limit` + `continue`（续读 token），实现大 list 的分页。
+
 ## 3. 验证、缺口与后续修改
 
 ### 3.1 代码回核与生产实测记录
