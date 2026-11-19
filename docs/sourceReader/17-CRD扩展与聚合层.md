@@ -94,6 +94,67 @@ ServeHTTP (+0)
 **源码：** `pkg/apiserver/customresource_handler.go:617`
 **流程：** `customStorage.Load`（+1）命中即返回；未命中加锁（+6），锁内重新 `crdLister.Get`（+13）双检，再按版本构造 structural schema（PruneDefaults 注入默认值）、`customresource.NewStorage`、converter、scope 并写回 atomic map。
 
+#### CR 创建请求流解剖（第二层补充视角）
+
+CR（Custom Resource）实例的创建与内置资源走**不同的路由机制**：CR 不经 go-restful，而是 crdHandler 注册在 NonGoRestfulMux 的 `/apis` 前缀。本节走一个 `POST /apis/example.com/v1/namespaces/default/widgets` 请求，看它如何被 crdHandler 处理。
+
+**第一步：crdHandler.ServeHTTP 入口分流（customresource_handler.go:229）**
+```text
+ServeHTTP (+0)
+├── RequestInfoFrom(ctx) 无 → InternalError
+├── !IsResourceRequest（discovery 路径）
+│    ├── pathParts == 3 → versionDiscoveryHandler
+│    ├── pathParts == 2 → groupDiscoveryHandler
+│    └── 否则 → delegate.ServeHTTP（交给 kubeAPIServer）
+├── crdName = resource + "." + group（如 widgets.example.com）
+├── crdLister.Get(crdName) NotFound → delegate.ServeHTTP（非 CRD）
+└── 命中 CRD → getOrCreateServingInfoFor(crd.UID, crd.Name)
+```
+
+**第二步：getOrCreateServingInfoFor 懒构造存储（:617）**
+1. `customStorage.Load()`（atomic.Value）命中即返回（快路径）。
+2. 未命中加锁，锁内**重新** `crdLister.Get` 双检（防与 updateCustomResourceDefinition 竞争）。
+3. 按版本遍历 `crd.Spec.Versions`，`GetSchemaForVersion` 取 schema → `structuralschema.NewStructural` 构造结构化 schema → `PruneDefaults` 注入默认值。
+4. `customresource.NewStorage` 构造该版本的 storage，建 converter、requestScope，写回 atomic map。
+
+**懒构造语义：** CRD 对象存在后，**第一次 CR 请求**才触发版本存储构造；CRD 更新则先失效缓存，下次请求重建。
+
+**第三步：serveResource 按 verb 分派（:369）**
+```text
+serveResource（:369）
+├── 取 requestScopes[version] 与 storages[version].CustomResource
+└── switch requestInfo.Verb:
+     ├── get       → handlers.GetResource(storage, requestScope)
+     ├── list      → handlers.ListResource(storage, storage, requestScope, forceWatch, minRequestTimeout)
+     ├── watch     → handlers.ListResource(...)（同 list，forceWatch=true）
+     ├── create    → handlers.CreateResource(storage, requestScope, a)
+     │                （HA 下 Established 后 2s 内创建会 sleep 2s，等 CRD 传播）
+     ├── update    → handlers.UpdateResource(storage, requestScope, admission)
+     ├── patch     → handlers.PatchResource(storage, requestScope, a, supportedTypes)
+     ├── delete    → handlers.DeleteResource(storage, allowsOptions, requestScope, admission)
+     └── deletecollection → handlers.DeleteCollection(...)
+```
+
+**第四步：CR 创建落到 etcd**
+- `handlers.CreateResource` → `customresource` 的 `REST.Create`（内嵌 `genericregistry.Store`）→ 与内置资源同一存储框架 → etcd。
+- CR 实例的 key 形如 `/registry/example.com/widgets/default/<name>`，与内置资源同一 etcd。
+
+#### CR 创建 vs 内置资源创建对照
+
+| 维度 | 内置资源（如 Pod） | CR 实例（如 Widget） |
+|---|---|---|
+| 路由 | go-restful（installer.go 注册） | crdHandler（NonGoRestfulMux `/apis` 前缀） |
+| 存储构造 | 启动时静态注册 | 首次请求懒构造（getOrCreateServingInfoFor） |
+| schema 校验 | 各资源的 strategy.Validate | structural schema（CRD spec.versions[].schema） |
+| 存储 | generic Store | 同 generic Store（customresource.REST 内嵌） |
+| HA 创建保护 | 无 | Established 后 2s 内 sleep 2s |
+
+**设计要点（源码可证）：**
+1. **懒构造存储**：CRD 存储不启动时预建，而是首次请求时按需构造（getOrCreateServingInfoFor 双检），避免为未使用的 CRD 浪费资源。
+2. **HA 建立保护**：create verb 在 CRD `Established` 后 2s 内会 sleep 2s（serveResource +13 ～ +19），等 CRD 传播到所有 apiserver 实例，避免部分实例还没准备好。
+3. **与内置资源同一存储框架**：CR 实例复用 `genericregistry.Store`，使 CR 享有与内置资源相同的 watch、分页、校验能力。
+4. **NotFound 回落 delegate**：crdLister 查不到 CRD 时交给 delegate（kubeAPIServer），使非 CRD 的 `/apis` 请求能继续走内置路由。
+
 ### 7. CR 实例存储
 | 函数/类型 | 文件 | 职责 |
 |---|---|---|
