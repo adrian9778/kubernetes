@@ -1,109 +1,109 @@
 [上一篇](19-kubeadm集群引导.md) · [总目录](README.md) · [下一篇](21-设备插件与网络边界.md)
 
 # CSI 存储插件
-> **层级**：第四层——函数级源码解析。
-> **范围**：kubelet 侧 CSI 插件、plugin manager 注册、volume manager 期望/实际状态调谐、到 NodePublishVolume gRPC 的完整链路。
+> **层级**：第四层——函数级源码解析（kubelet 侧 CSI）。
+> **范围**：driver 注册（pluginwatcher → RegistrationHandler）、卷插件装配、CSI attacher 的 Attach/MountDevice（NodeStage）、mounter 的 SetUpAt（NodePublish）与 TearDownAt（NodeUnpublish）、CSINode 维护、CSI migration 翻译。
+> **不覆盖**：driver 自身（Identity/Node/Controller gRPC 服务端）、external-attacher/provisioner/snapshotter、具体 CNI/云 provider。
+> **基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区干净），Go 1.27.4。
 
-## 1. 模块级
+## 0. 结论速览
+CSI 在 kubelet 侧是一组"插件 + 卷插件 + attacher/mounter"：
+1. **driver 发现**：第三方 driver 在 `/var/lib/kubelet/plugins_registry` 暴露 registration socket → pluginwatcher → reconciler → `RegistrationHandler.RegisterPlugin` → 写入 `DriversStore`。
+2. **卷挂载是两次 gRPC**：`MountVolume` → attacher 的 `MountDevice`（NodeStage，若 driver 支持 STAGE_UNSTAGE）→ mounter 的 `SetUpAt`（NodePublish，把卷挂进 Pod 目录）。
+3. **缺 driver = 瞬时错误**：`csiClientGetter.Get()` 失败一律返回 `NewTransientOperationFailure`（driver 尚未就绪的常规情况，见 issue #120268），交由 reconciler 退避重试。
+4. **卸载严格由 plugin 负责**：`TearDownAt` 调 `NodeUnpublishVolume`；kubelet 只清理自己写的 json 元数据与空目录，对 buggy driver 有兜底 `removeMountDir`。
+5. **CSINode**：`nodeinfomanager`/`csi_node_updater` 维护 driver 的 NodeID、topology、maxAttachLimit，供 scheduler 卷拓扑过滤。
+
+## 1. 生产视角
+| 阶段 | 触发者 | 可见结果 |
+|---|---|---|
+| driver 注册 | driver DaemonSet 起 socket | CSINode 出现 driver 条目；DriversStore 有 endpoint |
+| Pod 挂 CSI 卷 | Pod 调谐到本节点 | Pod 目录出现 bind mount；`kubectl describe` 事件 Mount/NodePublish |
+| 卷 detach | Pod 删除/驱逐 | NodeUnpublish → NodeUnstage → NodeDetach；VolumeAttachment 清理 |
+
+## 2. 模块级
 | 项 | 内容 |
 |---|---|
-| 卷插件目录 | **`pkg/volume/csi/`**（本分支无 pkg/kubelet/csi）：csi_plugin.go、csi_client.go、csi_mounter.go、csi_block.go、csi_attacher.go、csi_drivers_store.go、nodeinfomanager/ |
-| 插件管理 | `pkg/kubelet/pluginmanager/`（监听 plugins_registry） |
-| 卷管理 | `pkg/kubelet/volumemanager/`（desired/actual state + reconciler） |
-| 操作执行 | `pkg/volume/util/operationexecutor/` |
-| CSI gRPC 定义 | 上游 `github.com/container-storage-interface/spec v1.13.0`（vendor；本分支 staging 的 `k8s.io/csi-api` 已移除） |
-| 迁移翻译 | `[staging] k8s.io/csi-translation-lib` |
-| 数据流 | Pod 的 CSI 卷 → desired state → reconciler → Attach/Mount 操作 → CSI mounter → NodeStage/NodePublish gRPC → actual state 更新 |
+| `pkg/volume/csi/`（本分支**无** `pkg/kubelet/csi`）：csi_plugin.go（plugin+RegistrationHandler）、csi_client.go（gRPC client）、csi_mounter.go（mounter）、csi_attacher.go（attacher）、csi_block.go（block）、csi_drivers_store.go（DriversStore）、csi_node_updater.go、nodeinfomanager/ |
+| `pkg/kubelet/pluginmanager/`（watcher+reconciler）、`pkg/kubelet/volumemanager/`（desired/actual+reconciler）、`pkg/volume/util/operationexecutor/` |
+| CSI gRPC 类型来自 vendor `github.com/container-storage-interface/spec v1.13.0`（alias `csipbv1`）；**staging `k8s.io/csi-api` 已移除** |
+| migration：`staging/src/k8s.io/csi-translation-lib` |
 
-## 2. 类型级
-| 类型 | 文件 | 职责 |
+## 3. 类型级
+| 类型 | 文件:符号 | 职责 |
 |---|---|---|
-| `csiPlugin` | `pkg/volume/csi/csi_plugin.go` | 实现 volume.VolumePlugin；常量 `CSIPluginName = "kubernetes.io/csi"`（:54），持有 RegistrationHandler |
-| `csiDriverClient` | `csi_client.go` | 封装 CSI Identity/Node/Controller v1 gRPC client |
-| `csiClient`（interface） | `csi_client.go:41` | NodeGetInfo、NodePublishVolume、NodeStageVolume、NodeUnpublishVolume、NodeExpandVolume、NodeGetVolumeStats |
-| `csiMountMgr` | `csi_mounter.go` | 卷的 SetUp/NodePublish 执行体，缓存 csiClient |
-| `DriversStore` | `csi_drivers_store.go` | driver name → endpoint/元数据 |
-| PluginManager | `pluginmanager/plugin_manager.go:55` | 插件 socket 发现与 handler 分发 |
-| VolumeManager | `volumemanager/volume_manager.go:191` | 期望/实际状态与 reconciler 的总装配 |
+| `csiPlugin` | `csi_plugin.go Struct：csiPlugin` | volume.VolumePlugin；`CSIPluginName="kubernetes.io/csi"` 偏移：+55；`host`/`volumeAttachmentLister`/`csiDriversStore` |
+| `csiDriverClient` | `csi_client.go Struct：csiDriverClient 偏移：+132` | Identity/Node/Controller v1 gRPC client |
+| `csiClient`（interface） | `csi_client.go Struct：csiClient 偏移：+43` | NodeGetInfo/Publish/Stage/Unpublish/Expand/GetVolumeStats |
+| `csiMountMgr` | `csi_mounter.go Struct：csiMountMgr 偏移：+64` | SetUp/TearDown 执行体 |
+| `csiAttacher` | `csi_attacher.go Struct：csiAttacher` | Attach/MountDevice（NodeStage）执行体 |
+| `DriversStore` | `csi_drivers_store.go Struct：DriversStore 偏移：+36` | driver name → endpoint/元数据 |
+| `PluginManager`（interface） | `pluginmanager/plugin_manager.go Struct：PluginManager 偏移：+36` | socket 发现与 handler 分发 |
+| `VolumeManager` | `volumemanager/volume_manager.go 函数：NewVolumeManager 偏移：+195` | desired/actual & reconciler 总装配 |
 
-## 3. 插件注册函数级
+## 4. driver 注册链
+`RegistrationHandler`（csi_plugin.go）：
+- `RegisterPlugin` 偏移：+129：校验版本（`validateVersions` +338）→ `lockDriver`（+107）→ `installDriver`（+189）：`newCsiDriverClient` 建 client、`nodeInfoFromController`（+205）判断是否需从 controller 取 NodeInfo、`updateCSIDriver`（+261）写 CSIDriver status → 存入 DriversStore。
+- `syncNodeInfoFromController` 偏移：+229；`DeRegisterPlugin` 偏移：+366：从 DriversStore 删除并更新 CSINode/CSIDriver。
+- `ValidatePlugin` 偏移：+116；`VerifyExhaustedResource`（+288）/`isResourceExhaustError`（+330）：attach 失败判定是否为容量耗尽。
 
-### 函数：ProbeVolumePlugins / RegistrationHandler
-**源码：** `pkg/volume/csi/csi_plugin.go`
-**职责：** ProbeVolumePlugins 向 kubelet 注册 CSI volume plugin；RegistrationHandler 的 RegisterPlugin（:105）/DeRegisterPlugin（:118）/ValidatePlugin（:270）处理 driver socket 上下线，写入 DriversStore。
+下游：`pluginwatcher.NewWatcher`（plugin_watcher.go 偏移：+42）→ `traversePluginDir`（+114）→ `handlePluginRegistration`（+193）→ reconciler（`reconciler.go NewReconciler 偏移：+61`、`reconcile 偏移：+110`）。kubelet 接线：`kubelet.go 函数：NewMainKubelet 偏移：+1098` 调 `pluginmanager.NewPluginManager`。
 
-### 函数：NewPluginManager / Run / AddHandler
-**源码：** `pluginmanager/plugin_manager.go:55 / :109 / :129`
-**监听目录：** `DefaultKubeletPluginsRegistrationDirName = "plugins_registry"`（`kubeletconfig/defaults.go:26`，完整路径 `/var/lib/kubelet/plugins_registry`）。
-**内部链路：** `pluginwatcher.NewWatcher`（plugin_watcher.go:42）fsnotify 监听 socket 文件 → traversePluginDir（:114）→ handlePluginRegistration（:193）→ reconciler（`reconciler.go:61 NewReconciler`，:110 reconcile）回调 CSI RegistrationHandler。
-kubelet 接线处：`kubelet.go:1065`。
+## 5. attacher：Attach 与 MountDevice（NodeStage）
+`csi_attacher.go`：
+- `Attach` 偏移：+63：**kubelet 不做 attach**（`if _, ok := host.(KubeletVolumeHost); ok` → 报 "attaching volumes from the kubelet is not supported"）；构造 attachID（`getAttachmentName` +595）→ 等待 `VolumeAttachment`（`waitForVolumeAttachmentWithLister` +172）。inline 迁移场景用 PV spec 填充 VA source。
+- `MountDevice` 偏移：+264：
+  - `newCsiDriverClient` 失败 → `NewTransientOperationFailure`（#120268）。
+  - `NodeSupportsStageUnstage(ctx)` 判定 driver 是否支持 NodeStage；**不支持则跳过 MountDevice，只落元数据文件**（`dataDir` 写 volHandle/driverName/specVolID/volumeLifecycleMode，供 `UnmountDevice` 用）。
+  - `getPublishContext`（k8s API）取 publishContext；`NodeStageSecretRef` 存在且支持 stage → `getCredentialsFromSecret` 取 NodeStageSecrets。
+  - SELinux：feature gate `SELinuxMountReadWriteOncePod` 开启且 driver 支持时，`AddSELinuxMountOption` 注入 mountOption。
+  - `MkdirAllWithPathCheck(deviceMountPath, 0750)` 建 staging 目录 → 后续 `NodeStageVolume` RPC（`StageVolume`）。
 
-## 4. 卷管理函数级
+## 6. mounter：SetUpAt（NodePublish）与 TearDownAt（NodeUnpublish）
+`csi_mounter.go`：
+- `SetUpAt` 偏移：+103：
+  1. `csiClientGetter.Get()` 失败 → **瞬时错误**（#120268）。
+  2. `supportsVolumeLifecycleMode`（+536）/`getFSGroupPolicy`（+509）校验 CSIDriver.Spec 声明的能力。
+  3. `getSourceFromSpec` 取 volSrc/pvSrc；算 volumeHandle/readOnly/fsType/volAttribs/nodePublishSecrets。
+  4. `saveVolumeData(parentDir, volDataFileName, volData)` 落元数据；失败则 `removeMountDir` 回滚。
+  5. **`csi.NodePublishVolume` RPC**：调用点在 csi_mounter.go 绝对行 301，相对 SetUpAt 偏移 **+198**（SetUpAt 定义=+0 行 103）。参数 volumeHandle/readOnly/deviceMountPath/dir/accessMode/publishContext/volAttribs/nodePublishSecrets/fsType/mountOptions/nodePublishFSGroupArg。
+  6. RPC 失败：`IsOperationFinishedError && !ReconstructedVolume && !IsRemount` 才 `removeMountDir`；**remount 场景跳过删除**（#121271：卷已 publish，删目录会留 stale 内容）。
+- `TearDownAt` 偏移：+437：`csiClientGetter.Get()`（失败仍为瞬时错误）→ `csi.NodeUnpublishVolume(ctx, volID, dir)` → `removeMountDir`（spec 规定 target_path 由 plugin 删；kubelet 兜底删空目录）。
+- 辅助：`supportsFSGroup`（+474）/`getFSGroupPolicy`（+509）/`supportsVolumeLifecycleMode`（+536）/`podServiceAccountTokenAttrs`（+363）。
 
-### 函数：NewVolumeManager / Run
-**源码：** `volumemanager/volume_manager.go:191 / :319`
-**组成：**
-- DesiredStateOfWorld（`cache/desired_state_of_world.go:151 NewDesiredStateOfWorld`）：populator 从 podManager 中 Pod 的卷声明生成期望（应 attach、应 mount）。
-- ActualStateOfWorld（`cache/actual_state_of_world.go:226`）：已 attach/mount 的实际记录。
-- reconciler（`reconciler/reconciler.go:26 Run`，:33 reconcile）：周期对比两个世界，把差异交给 operationExecutor。
+## 7. 操作执行（operationexecutor）
+- `operation_executor.go AttachVolume 偏移：+773`、`MountVolume 偏移：+835`。
+- `operation_generator.go GenerateAttachVolumeFunc 偏移：+248`、`GenerateMountVolumeFunc 偏移：+431`（生成 mount 执行函数，调卷插件 mounter SetUp）。
+- 状态机：`volumemanager/cache` desired（`NewDesiredStateOfWorld` 偏移：+151）/actual（`actual_state_of_world.go` 偏移：+266）；reconciler（`volumemanager/reconciler/reconciler.go Run 偏移：+26`、`reconcile 偏移：+33`）驱动；失败保留 desired，下轮退避重试。
 
-### 操作执行函数
-| 函数 | 行 | 职责 |
-|---|---|---|
-| `operationExecutor.AttachVolume` | `operationexecutor/operation_executor.go:772` | 异步发起 attach（external-attacher 场景或 CSI ControllerPublish 回退） |
-| `operationExecutor.MountVolume` | :834 | 异步发起 mount（NodeStage + NodePublish） |
-| `GenerateAttachVolumeFunc` | `operation_generator.go:250` | 生成 attach 执行函数 |
-| `GenerateMountVolumeFunc` | :433 | 生成 mount 执行函数：调卷插件 mounter SetUp |
-**状态更新：** 操作完成（或失败）后写 ActualStateOfWorld；失败保留 desired，下个 reconcile 周期带退避重试。
+## 8. CSINode 与 migration
+- `csi_node_updater.go`：`NewCSINodeUpdater` 偏移：+46、`Run` +57、`onDriverAdd/Update/Delete` +73/+86/+111、`syncDriverUpdater` +122、`runPeriodicUpdate` +179。
+- `nodeinfomanager/`：`NewNodeInfoManager` 偏移：+110、`InstallCSIDriver` +126、`InstallCSIDriverRegistration` +153、`UpdateCSIDriver` +237、`UninstallCSIDriver` +249、`tryUpdateCSINode` +489。
+- migration（`csi-translation-lib/translate.go`）：`New` +48、`TranslateInTreeStorageClassToCSI` +54、`TranslateInTreeInlineVolumeToCSI` +67、`TranslateInTreePVToCSI` +96、`TranslateCSIPVToInTree` +112；具体驱动映射在 `plugins/`。
 
-## 5. CSI gRPC 函数级
-
-### 函数：newCsiDriverClient
-**源码：** `pkg/volume/csi/csi_client.go:170`
-**职责：** 按 driver name 从 DriversStore 取 endpoint，grpc 拨号，构造 `csipbv1.IdentityClient`/`NodeClient`/`ControllerClient`（类型来自 vendor CSI spec，alias csipbv1）。本分支无导出的 NewCsiDriverClient。
-
-### 函数：(*csiDriverClient).NodePublishVolume
-**源码：** `csi_client.go:228`
-**执行流程：** 组装 `csipbv1.NodePublishVolumeRequest`（volume id、target path、fsType、volume context、readonly、secrets）（:265）→ `nodeClient.NodePublishVolume(ctx, req)`（:299）。
-**调用方：** `csiMountMgr.SetUpAt`（csi_mounter.go:282，入口 :103；RPC 在 :301）；块设备路径在 `csi_block.go:257`。client 惰性创建并缓存。
-
-### NodeStage / 其他
-- NodeStageVolume：经 csi_attacher/ mounter 在 NodePublish 前对块设备做 staging（一个卷多 Pod 共享时先 stage 再各 publish）。
-- NodeUnpublishVolume、NodeExpandVolume、NodeGetVolumeStats：分别承担卸载、扩容、容量上报（kubelet 驱逐与 PV 容量监控使用）。
-
-## 6. CSINode 与迁移翻译
-
-### CSINode 维护
-- `csi_node_updater.go` 与 `nodeinfomanager/`：NodeGetInfo 得到 driver 的 NodeID 与 topology keys，写入/更新 `CSINode` 对象（driver 列表、allocatable 卷数），scheduler 的卷拓扑与卷数插件据此过滤。
-
-### CSI Migration 翻译
-**源码：** `[staging] csi-translation-lib/translate.go`
-| 函数 | 行 | 职责 |
-|---|---|---|
-| `New() CSITranslator` | 48 | 构造翻译器 |
-| `TranslateInTreePVToCSI` | 96 | in-tree PV 参数 → CSI 临时 PV（驱动运行时透明走 CSI） |
-| `TranslateInTreeStorageClassToCSI` | 54 | StorageClass 参数翻译 |
-| `TranslateInTreeInlineVolumeToCSI` | 67 | Pod inline 卷翻译 |
-| `TranslateCSIPVToInTree` | 112 | 反向翻译 |
-具体 in-tree 驱动映射在 `plugins/`；启用 feature gate 后旧卷插件的操作被翻译发往对应 CSI driver。
-
-## 7. 调用关系总览
+## 9. 流程图
 ```text
-driver socket 出现 → pluginwatcher → reconciler → CSI RegistrationHandler（DriversStore）
-Pod 含 CSI 卷 → DesiredStateOfWorld
- ↓ reconciler 发现差异
-operationExecutor
- ├── AttachVolume → GenerateAttachVolumeFunc（csi_attacher：ControllerPublish）
- └── MountVolume → GenerateMountVolumeFunc
-      └── csiMountMgr.SetUpAt
-           ├── newCsiDriverClient（grpc NodeClient）
-           ├── NodeStageVolume（需要时）
-           └── NodePublishVolume（target path 挂入 Pod 目录）
- ↓
-ActualStateOfWorld 更新；CSINode 经 node updater 维护
+driver socket 出现
+  └─ pluginwatcher.NewWatcher(+42) → traversePluginDir(+114) → handlePluginRegistration(+193)
+       └─ reconciler.reconcile(+110) → RegistrationHandler.RegisterPlugin(+129)
+            └─ installDriver(+189) → DriversStore + CSINode/CSIDriver 更新
+
+Pod 含 CSI 卷
+  └─ DesiredStateOfWorld(+151) → reconciler(+33) 差异
+       ├─ MountVolume(+835) → GenerateMountVolumeFunc(+431)
+       │    ├─ csiAttacher.MountDevice(+264) → NodeStageVolume（若支持 stage）
+       │    └─ csiMountMgr.SetUpAt(+103) → NodePublishVolume RPC（绝对 301，偏移 +198）
+       │         └─ ActualStateOfWorld(+266) 更新
+       └─ 卸载：TearDownAt(+437) → NodeUnpublishVolume → removeMountDir
+CSINode：csi_node_updater(+46) / nodeInfoManager(+110) 维护 NodeID/topology/maxAttachLimit
 ```
 
-## 8. 边界
-本仓库只包含 kubelet 侧客户端与编排；driver 自身（Identity/Node/Controller gRPC 服务端实现、与存储后端通信）由第三方部署为 DaemonSet/StatefulSet。Controller 侧的 provision/snapshot（external-provisioner/snapshotter）同样在仓库之外。
+## 10. 边界
+本仓库只含 kubelet 侧客户端与编排。driver 服务端、external-attacher/provisioner/snapshotter、CDI 实现、CNI/IPAM、运行时内部网络管理均不在本仓库；扩展点全部以 socket/gRPC 接入。
+
+## 11. 验证与差异
+- **`pkg/kubelet/csi` 与 `staging k8s.io/csi-api` 不存在**（ls/grep 零命中）。
+- 行号全部经 `grep -n` 回付当前 HEAD：`csiClient` :43、`csiDriverClient` :132、`newCsiDriverClient` :192、`NodePublishVolume` :253、`SetUpAt` :103、`MountDevice` :264、`Attach` :63、`GenerateMountVolumeFunc` :431、`AttachVolume` :773。
+- 与旧版差异：旧版把 SetUpAt RPC 写成绝对行号 `:282`/`:301`（实为 SetUpAt 内偏移 +301）；`csiBlockMapper` 旧写 `csi_block.go:257` 无对应函数（实为 `publishVolumeForBlock` +207 / `SetUpDevice` +280 / `MapPodDevice` +342，block 走 `NodePublishVolume` 经 `csiBlockMapper.publishVolumeForBlock`）；`VolumeManager` :191 → :195。均已修正。
 
 [上一篇](19-kubeadm集群引导.md) · [总目录](README.md) · [下一篇](21-设备插件与网络边界.md)
