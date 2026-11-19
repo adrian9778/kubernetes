@@ -59,6 +59,42 @@ kubelet 是运行在**每个节点**上的节点级 agent。从外部看，它�
 **职责：** Channel 按 source 名建输入通道并注册到 podStorage；Updates 返回合并后的 PodUpdate 输出通道。
 **合并语义：** podStorage.Merge 把各源 Pod 按 UID 归并，产出 ADD/UPDATE/REMOVE/RECONCILE 的 PodUpdate（含 Source 标记）。
 
+#### PodConfig 三源合并深度拆解（第二层补充视角）
+
+kubelet 的期望 Pod 来自三个互相独立的源：**apiserver**（`spec.nodeName=<本节点>` 的 Pod）、**静态 Pod 文件**（fsnotify 监听目录）、**HTTP manifest**（周期拉取）。`PodConfig` 是三源的多路复用器：各源往自己的 channel 写，`podStorage.Merge` 按 source 归并成一份期望集合，再产出统一的 `PodUpdate` 流给 syncLoop。
+
+**三源接入（`NewPodConfig` + `Channel`，config.go:61/:75）：**
+- `NewPodConfig` 建 `podStorage`（持 `pods map[source]map[UID]*Pod`、`updates` 输出通道、`sourcesSeen`）。
+- `Channel(ctx, source)`（+0，:75）：按 source 名（`apiserver`/`file`/`http`）建输入通道，`c.sources.Insert(source)` 登记，返回 `chan<- sourceUpdate`。每个源一个独立 goroutine 往自己的 channel 推。
+- `Updates()`（:102）：返回合并后的 `<-chan PodUpdate`——syncLoop 唯一消费的通道。
+
+**归并（`Merge` 偏移：+0，:146 / `merge` 紧随）：**
+1. `Merge` 加 `updateLock`，判 `seenBefore := sourcesSeen.Has(source)`，调 `merge` 算出 adds/updates/deletes/removes/reconciles 五类。
+2. **按序投递**到 `s.updates`：removes → adds → updates → deletes → reconciles（顺序有意义：先删后建，避免同名冲突）。
+3. **源就绪信号**：`firstSet`（首次见到该源）且五类皆空 → 发一个**空 ADD**（:160 ～ :165，注释：`signals kubelet that the source is ready`）。这是 `SeenAllSources`（:87）判「所有源都已就绪」的依据——kubelet 在三源都就绪前不启动正常调谐。
+4. RECONCILE 仅在此处支持（注释：kubelet 暂不支持 Snapshot update）。
+
+**单源归并（`merge`，:178 起）：**
+- 按 source 取该源已有的 `pods[source]` map，用 `updatePodsFunc` 把新 Pod 写入缓存。
+- `filterInvalidPods` 先滤掉非法 Pod（记事件）。
+- 每个 Pod 打 `ConfigSourceAnnotationKey = source` 注解（+标记来源，供后续区分静态/动态）。
+- 静态 Pod（`IsStaticPod`）跳过 startup SLI 观测。
+- 新旧按 UID 比对，产出 ADD（新 UID）/ UPDATE（同 UID 内容变）/ DELETE（旧 UID 消失）。
+
+**三源合并对照：**
+
+| 源 | 接入方式 | 典型内容 | 特点 |
+|---|---|---|---|
+| apiserver | ListWatch（`NewSourceApiserver`，只 watch `spec.nodeName=<本节点>`） | 普通调度来的 Pod | 动态、可增删 |
+| file | fsnotify 监听静态 Pod 目录 | 控制面静态 Pod（etcd/apiserver/scheduler） | 本地文件，kubelet 起来即有 |
+| http | 周期拉取 HTTP manifest | 少用的动态静态 Pod | 周期性、需 URL 配置 |
+
+**设计要点（源码可证）：**
+1. **按 source 隔离再归并**：`pods map[source]map[UID]*Pod` 让每个源独立维护自己的集合，合并时按 source 比对——一个源删掉 Pod 不影响其它源的 Pod。
+2. **源就绪门控**：`SeenAllSources` + 空 ADD 信号保证 kubelet 不会在三源未齐时就开始调谐（否则会误删静态 Pod 或 apiserver Pod）。
+3. **统一 PodUpdate 抽象**：三源产出同构的 ADD/UPDATE/REMOVE/RECONCILE，syncLoop 不关心 Pod 来自哪个源——这是 kubelet 支持「静态 Pod + 动态 Pod」共存的关键抽象。
+4. **来源注解**：每个 Pod 打 `ConfigSourceAnnotationKey`，使 syncLoop 能区分静态 Pod（不归 apiserver 管）与动态 Pod。
+
 ### 函数：(*Kubelet).Run
 **源码：** `pkg/kubelet/kubelet.go#(*Kubelet).Run+0`（定义行 :1988）
 **职责：** 启动全部内部组件，最后进入 syncLoop。
