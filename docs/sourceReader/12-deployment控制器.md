@@ -283,6 +283,48 @@ syncDeployment
       └── syncRolloutStatusAfter → syncRolloutStatus → calculateStatus → UpdateStatus
 ```
 
+## 8b. 滚动更新进度与 condition 迁移时间线（第二层补充视角）
+
+滚动更新不是瞬时完成，而是跨多个调度周期逐步推进。本节把「一轮 reconcile 后 Deployment 的 status 与 condition 如何变化」展开成时间线——这是用户 `kubectl rollout status` / `kubectl describe deployment` 看到的可见状态机。
+
+**每轮 reconcile 的状态计算：`calculateStatus`（`sync.go:506`）**
+```text
+availableReplicas   = Σ newRS + oldRSs 的 AvailableReplicas
+totalReplicas       = Σ 所有 RS 的 Spec.Replicas
+unavailableReplicas = totalReplicas - availableReplicas（负数归零，缩容时会出现）
+UpdatedReplicas     = 仅 newRS 的 ActualReplicaCount
+ReadyReplicas       = Σ 所有 RS 的 ReadyReplicaCount
+```
+- **Available condition**：`availableReplicas >= spec.Replicas - MaxUnavailable` → `Available=True`（`MinimumReplicasAvailable`）；否则 `Available=False`（`MinimumReplicasUnavailable`）。
+
+**Progressing condition 三分支（`syncRolloutStatus`，progress.go:49）：**
+| 分支 | 判定（`util` 函数） | Progressing condition | reason |
+|---|---|---|---|
+| 完成 | `DeploymentComplete`（util:744，`Replicas==UpdatedReplicas` 且已 Available） | True | `NewReplicaSetAvailable`（:83） |
+| 进行中 | `DeploymentProgressing`（util:755，新 RS 副本数有变化） | True | `ReplicaSetUpdated`（:73） |
+| 超时 | `DeploymentTimedOut`（util:774，超过 `progressDeadlineSeconds`） | **False** | `ProgressDeadlineExceeded`（:86） |
+
+**condition 迁移的精妙处（progress.go:76 ～ :95 注释）：**
+- **仅 Progressing 是特例**：其它 condition 若新 reason 与旧 reason 相同则不更新；但 Progressing 要在「有进展」时**更新 lastUpdateTime、保留 lastTransitionTime**——即"仍在推进，别重置计时"。这正是 `progressDeadlineSeconds` 超时判定的计时基准。
+- **无 progressDeadlineSeconds** → 直接移除 Progressing condition（:52 ～ :54），不做进度估算。
+- **已完成（isCompleteDeployment）** → 不再估算进度（:58 ～ :62）。
+
+**一次滚动更新的 condition 时间线：**
+
+| 时刻 | Replicas/Updated | Progressing | Available |
+|---|---|---|---|
+| t0 提交新模板 | newRS 建 0 副本 | True/`ReplicaSetUpdated` | False/`MinimumReplicasUnavailable` |
+| t1 先扩 | UpdatedReplicas 上升 | True/`ReplicaSetUpdated`（lastUpdateTime 刷新） | False |
+| t2 新 Pod Ready | Updated==Available 上升 | True/`ReplicaSetUpdated` | True（达 minAvailable） |
+| t3 全部就绪 | Replicas==UpdatedReplicas | True/`NewReplicaSetAvailable` | True |
+| 超时（若卡住） | 无进展 | **False**/`ProgressDeadlineExceeded` | 视情况 |
+
+**设计要点（源码可证）：**
+1. **Progressing 的 lastUpdateTime 与 lastTransitionTime 分离**：有进展时只刷 lastUpdateTime（保留 lastTransitionTime），使 `progressDeadlineSeconds` 度量「自上次真实进展以来的时长」而非「自 condition 创建以来的时长」。
+2. **超时置 False 而非删除**：`ProgressDeadlineExceeded` 把 Progressing 置 False，用户 `kubectl rollout status` 能看到明确的失败态，而非一直 Pending。
+3. **`syncRolloutStatusAfter` 包装**（progress.go:34）：即使 reconcile 出错也照样跑进度检查，防止「reconcile 失败 → 跳过超时判定 → 卡死在 Progressing」。
+4. **Available 与 Progressing 独立**：Available 看 minAvailable（是否够用），Progressing 看是否还在向新版本收敛——一个 Pod 滚动更新期间 Available 可为 True 而 Progressing 仍为 True。
+
 ## 9. 设计意图（源码可证）
 
 - 每个 Deployment revision 对应一个独立 RS，回滚即把旧 revision 的 RS 重新扩起，无需重建 Pod template 历史（`rollbackToTemplate` 拷贝 template + `SetDeploymentRevision` 递增 revision）。
