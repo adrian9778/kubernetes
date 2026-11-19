@@ -211,6 +211,58 @@ f.ClientForMapping(mapping)  → RESTClient（已定 API 路径 + 组版本）
 3. **Helper 是 RESTClient 的薄封装**：`NewHelper(client, mapping)` 绑定 client/resource/namespaceScope，`Create/Get/Patch` 等动词都只是「设 options → 拼 builder → Do().Get()」，无业务逻辑。
 4. **modify 语义**：`Helper.CreateWithOptions` 的 `modify=true` 才清空 ResourceVersion（供 apply/update 复用对象），`kubectl run` 传 `modify=false`，直接创建。
 
+### 3.10 kubeconfig 加载与 RESTConfig 构造（第二层补充视角）
+
+kubectl 发请求前必须先知道「连哪个集群、用什么凭据」。这来自 kubeconfig 文件（默认 `~/.kube/config`）。本节走一遍 kubeconfig 的加载与 RESTConfig 构造——这是 client-go 客户端链路的起点（先于篇 04 的 Factory→RESTClient 链）。
+
+**kubeconfig 加载（`ClientConfigLoadingRules.Load`，loader.go:197）：**
+```text
+Load()
+├── 1. Migrate()（迁移旧格式）
+├── 2. 确定 kubeConfigFiles：
+│      ExplicitPath 非空 → 只用该文件（不存在即报错）
+│      否则 → Precedence 列表（默认 ~/.kube/config）
+├── 3. 逐文件 LoadFromFile，跳过不存在的（记 missingList 产 warning）
+└── 4. 合并所有 kubeconfigs（按 Precedence 顺序，后者覆盖前者）
+```
+
+**RESTConfig 构造（`DirectClientConfig.ClientConfig`，client_config.go:172）：**
+```text
+ClientConfig()
+├── 1. getAuthInfo → AuthInfo（用户凭据：token/cert/client-key/exec/oidc）
+├── 2. getContext → Context（当前上下文：cluster + user + namespace）
+├── 3. getCluster → Cluster（集群：server、CA、insecure）
+├── 4. ConfirmUsable（:432）校验三者齐备
+└── 5. 构造 restclient.Config{Host, TLS, BearerToken, ...}
+```
+
+**kubeconfig 的三层结构（`clientcmdapi.Config`）：**
+| 层 | 字段 | 作用 |
+|---|---|---|
+| Clusters | server / certificate-authority / insecure-skip-tls-verify | 集群地址与 CA |
+| AuthInfos (users) | token / client-certificate / client-key / username-password / exec | 用户凭据 |
+| Contexts | cluster + user + namespace | 把集群与用户绑成当前上下文 |
+| current-context | 上下文名 | 默认使用哪个上下文 |
+
+**上下文切换（`kubectl config use-context`）：** 改 `current-context`，使后续请求用不同的 cluster/user。
+
+**认证插件的注册（篇 04 §3.1 提到的空导入）：** `cmd/kubectl/kubectl.go:28` 空导入 `k8s.io/client-go/plugin/pkg/client/auth`，注册所有认证插件（gcp/oidc/azure 等），使 kubeconfig 的 `exec`/`auth-provider` 凭据能被解析。
+
+**RESTConfig 的关键字段（`DirectClientConfig.ClientConfig`）：**
+| 字段 | 来源 | 作用 |
+|---|---|---|
+| `Host` | Cluster.Server | apiserver 地址 |
+| `TLSClientConfig` | Cluster.CA + AuthInfo.cert/key | TLS 凭据 |
+| `BearerToken` | AuthInfo.Token | Bearer token（写入 Authorization 头） |
+| `ExecProvider` | AuthInfo.Exec | exec 凭据（动态获取 token） |
+| `ProxyURL` | Cluster.ProxyURL | 代理地址 |
+
+**设计要点（源码可证）：**
+1. **kubeconfig 是分层的**：Clusters/AuthInfos/Contexts 三层解耦，一个 cluster 可配多个 user，一个 user 可访问多个 cluster——通过 context 切换。
+2. **凭据多样**：token/cert/exec/oidc 等多种认证方式，由认证插件（篇 04 §3.1 提到的空导入）解析。
+3. **Precedence 顺序**：多 kubeconfig 文件按 Precedence 顺序合并，后者覆盖前者——允许用户有默认配置 + 特定覆盖。
+4. **ConfirmUsable 校验**：构造 RESTConfig 前先校验三者齐备，避免运行时才发现配置不全。
+
 ## 4. 调用关系总览
 ```text
 main
