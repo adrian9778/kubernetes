@@ -247,6 +247,74 @@ ScheduleOne (schedule_one.go)
 
 **assume/nominated 语义：** 抢占者回队时带 `nominatedNodeName`，但**尚未 assume**占节点资源——真正的资源占用要等受害者消失、下一轮 Filter 通过、`AssumeAndReserveInCache` 才发生。因此「抢占成功」到「抢占者 Running」之间有一个**受害者终止 + 下一轮调度**的窗口。
 
+### 2.7 异步抢占一致性、扩展器与 PodGroup 跨节点受害者（加深）
+
+#### 异步抢占一致性（`isRunningPreemption`，executor.go:476）
+
+异步抢占（`AsyncPreemption`）下，`prepareCandidateAsync` 把驱逐放 goroutine，抢占者立即回队。为防「驱逐未完成就重复抢占」，Executor 维护两个集合：
+- `preempting sets.Set[UID]`（executor.go:85）：记录当前正在触发抢占的 pod/podgroup UID。
+- `needsActivation map[UID]*atomic.Bool`（executor.go:97）：记录 `PreEnqueue` 是否因 `prepareCandidateAsync` 未完成而拒绝了抢占者（:90 注释）。
+
+`isRunningPreemption(uid)`（:476）判定：
+```text
+isRunningPreemption(uid)
+├── !preempting.Has(uid) → false（不在抢占中）
+└── needsActivation[uid] 存在：
+      → needsActivation.Store(true)（标记住：最后一次 victim 终止后需 Activate）
+      → return true（继续阻塞抢占者）
+```
+**语义：** 无 DRAPreemption 时，`isRunningPreemption` 查 podLister，最后一个 victim 终止/删除后放行抢占者。有 DRAPreemption 时，即使最后一个 victim 已 terminating/deleted，`AssumeVictim` 可能还没跑，此时 `PodEligibleToPreempt` 仍会放行另一次抢占——因此**持续阻塞抢占者**，由 `prepareCandidateAsync` 在退出时调 `Activate`。
+
+**调用点：** `IsPodRunningPreemption(podUID)`（:467）和 `IsPodGroupRunningPreemption(podGroupUID)`（:472）供调度队列在 Pop 时判定是否跳过该抢占者。
+
+#### 扩展器路径（`callExtenders`，preemption.go:253）
+
+扩展器（extender）是调度器的 HTTP 扩展点，可在抢占时增删受害者。`callExtenders` 在 `SelectCandidate` 之前调用。
+
+```text
+callExtenders (preemption.go:253)
+├── deferred resize pod → 直接返回 candidates（不调 extender）
+├── extenders = ev.Handler.Extenders()（无 extender → 直接返回）
+├── victimsMap = CandidatesToVictimsMap(candidates)
+└── for _, extender := range extenders:
+      ├── !SupportsPreemption() || !IsInterested(pod) → skip
+      ├── 记录 emptyInputNodes（victimsMap 中 victims 为空的节点）
+      ├── ProcessPreemption(pod, victimsMap, nodeLister) → nodeNameToVictims
+      │     出错且 IsIgnorable() → skip 该 extender
+      │     出错且非 ignorable → 返回错误
+      └── 回填 nodeNameToVictims（含 emptyInputNodes 的空 victims）
+```
+**关键语义（注释 :286 ～ :293）：**
+- ProcessPreemption 可能修改并返回 victimsMap，需记住调用前的 emptyInputNodes。
+- 空 victims 节点保留为候选（让有抢占能力的 extender 补受害者）；无抢占能力 extender 时空 victims 表示抢占无法帮助该节点（非错误）。
+
+#### PodGroup 跨节点受害者（`getCrossNodesVictims`，victims.go）
+
+`GenericWorkload` 开启时，PodGroup 抢占把跨节点的 PodGroup 作为整体受害者。`getCrossNodesVictims`（victims.go）负责收集跨节点受害者：
+
+```text
+getCrossNodesVictims (victims.go)
+├── existing = sets.New[EntityKey]()（去重）
+├── for node ∈ nodes:
+│    └── for podInfo ∈ node.GetPods():
+│         ├── getHighestAllAncestor(p, snapshot) → highestAllKey
+│         │     无 All 祖先 → 该 Pod 作为独立 victim（NewPodVictim）
+│         └── 有 All 祖先且未见过 → searchCrossNodesVictimPods(...) 收集同 PodGroup 全部 Pod
+└── return victims
+```
+**searchCrossNodesVictimPods**（victims.go）：遍历 PodGroup 的所有 PodGroupState，收集 `ScheduledPods()`；为空则退化为独立 victim（注释：理论上不应发生）。
+
+**受害者集合比较（`CompareVictimSets`，manager.go:90）：** 比较两组受害者集合，决定哪个更优：
+1. PDB 违规数（`countPDBViolations`）少的胜。
+2. 按优先级带逐带比较：同优先级带的 Pod 数少的胜。
+3. 所有优先级带都平 → 按结构重要性（Pod < PodGroup < CompositePodGroup，同级别取小组）从高到低比较。
+**注意（TODO #142718）：** `NumPDBViolations` 在 domain 内静态计算，`DisruptionsAllowed == 0` 时精确，但 `DisruptionsAllowed > 0` 且早期受害者共享同一 PDB 时可能误计——需在 PodGroupPreemptionState 中动态跟踪 `DisruptionsAllowed`。
+
+**受害者选择（`SelectVictimsOnNode`，default_preemption.go:287）：**
+- `removeVictim` 闭包：**只改 mainNode 的 NodeInfo**（远端节点走 `PreFilterExtension.RemovePod`，不改远端 NodeInfo——注释明确这是刻意为之）。
+- `addVictim` 闭包：同构，只在 mainNode 上加回。
+- 遍历 `potentialVictims`（经 `isPreemptionAllowedAcrossAllVictimNodes` 过滤）→ 移除后重跑 Filter。
+
 ## 3. 验证、缺口与后续修改
 
 ### 3.1 代码回核与生产实测记录
