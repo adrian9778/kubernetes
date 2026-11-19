@@ -279,6 +279,42 @@ CreateResource → createHandler 闭包
 | etcd key 已存在 | 409 AlreadyExists | Store.create 解释后经 scope.err |
 | 加密/编码/网络 | 500 InternalError | 各层包装上抛 |
 
+## 5b. 写入后的 watch 广播（第二层补充视角）
+
+写入成功不只返回 201——apiserver 同时通过 **watch** 把这次变更推给所有订阅者（各控制器的 informer、scheduler、kubelet 配置源）。这是「声明式调谐」的起点：没有 watch，控制器就只能靠轮询。本节拆解 etcd3 层如何把一次 etcd 写变成一条 watch 事件并送达客户端。
+
+**入口：** `[staging] storage/etcd3/store.go 函数：Watch 偏移：+0`（:1115）→ `watcher.createWatchChan`（watcher.go:175）建立到 etcd 的 watch 通道。
+
+#### 从 etcd 事件到客户端事件
+
+| 环节 | 符号 | 做什么 |
+|---|---|---|
+| etcd watch 回调 | `startWatching`（watcher.go 内，:520 起） | 收 etcd `wres.Events`，逐个 `parseEvent`（:540） |
+| 解析 | `parseEvent`（`event.go:66`） | etcd `Event` → 内部 `event{key, value, rev, isDeleted, isCreated, prevValue}`；`expectPrevKV` 且 `PrevKv==nil`（已被 compact）则报错 |
+| 进度通知 | `progressNotifyEvent`（event.go:80） | etcd bookmark（仅 rev、无对象），维持客户端 revision 前进 |
+| 排队 | `queueEvent`（watcher.go:843） | 推入 `incomingEventChan`，**channel 满则阻塞上游**（不丢事件） |
+| 并发转换 | `scheduleEventProcessing`/`collectEventProcessing`（watcher.go:529/:552） | 用 `processingQueue` 保序地把事件交给 worker 做 transform |
+| 转换 | `wc.transform` | 内部 event → `watch.Event`（Added/Modified/Deleted，带对象） |
+| 送达 | `sendEvent`（watcher.go:829） | `resultChan <- *event`；客户端接收不够快则**阻塞**（同样不丢） |
+
+**Create 对应的 watch 事件：** 一次 `OptimisticPut` 成功后，etcd 产生 `EventTypePut`；`parseEvent` 判 `isCreated = e.IsCreate()`（首次 Put）→ 上层转成 **ADDED** 事件，携带存回的 Pod 对象（`spec.nodeName` 仍空）。这正是 scheduler / ReplicaSet 控制器 informer 收到的第一个信号。
+
+#### watch 的两个关键保证（源码可证）
+
+1. **不丢事件（背压而非丢弃）**：`sendEvent`/`queueEvent` 都是阻塞 `select`（watcher.go:836 ～ :841、:847 ～ :852）——客户端消费慢时反向阻塞 etcd 事件读取，而非像 PLEG 那样丢弃。这保证 informer 不会漏掉任何变更。
+2. **保序**：`concurrentOrderedEventProcessing` 用 `processingQueue`（无缓冲，容量 `processEventConcurrency-1`）串行化转换结果（watcher.go:532 ～ :553），同一 watch 的事件按 etcd revision 顺序送达。
+
+**与 PLEG 的对比（为何一个丢弃一个背压）：**
+- PLEG 面向「最新状态对账」，丢一次事件下轮 relist 会重新发现 → 丢弃安全。
+- watch 面向「变更流」，丢一次就永久错过（除非 relist 兜底）→ 必须背压阻塞。这也是 informer 还要周期 resync 兜底的原因。
+
+#### 设计要点（源码可证）
+
+1. **watch 从 etcd 直接起**：`Watch`（store.go:1115）在 etcd3 层就建 watch 通道，apiserver 不轮询 etcd——一次 etcd watch 服务所有订阅该资源的客户端。
+2. **prevKV 用于计算旧对象**：`parseEvent` 带 `prevValue`（event.go:80 ～ :82），使 `OnUpdate` 能拿到 oldObj 算 diff（见篇 11 informer）。
+3. **compact 防御**：`expectPrevKV && PrevKv==nil` 报错（event.go:69 ～ :72），处理 etcd 历史已被 compact 的场景。
+4. **progress notify 维持 revision**：bookmark 事件（watcher.go:524 ～ :527）让客户端 revision 前进，避免长时间无事件后重连从旧 revision 开始。
+
 ## 6. 设计意图与验证
 **设计意图（源码可证）：**
 - **先解码后默认化再校验再持久化**：decode（create.go:127）在 handler 层完成版本转换；`PrepareForCreate` 只做就地默认化（strategy.go:88）；`ValidateCreate` 聚合并把错误转成 422 Invalid（rest/create.go:130 ～ :132）；持久化只在全部通过后进入 etcd3。职责分层清晰：handler 管协议/协商，strategy 管资源语义，generic store 管通用编排，etcd3 管持久化与冲突。
