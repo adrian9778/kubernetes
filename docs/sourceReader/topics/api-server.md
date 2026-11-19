@@ -190,15 +190,26 @@ APIInstaller.Install()
 ```
 
 **三个最关键的横切关注点：**
-- **认证（WithAuthentication，endpoints/filters/authentication.go `WithAuthentication+0`）**：用 authenticator 链（client cert / bearer token / service account / OIDC / requestheader）解析出 `user.Info`，注入 request context。失败走 `failed` handler（401）。
+- **认证（WithAuthentication，endpoints/filters/authentication.go `WithAuthentication+0`）**：用 authenticator 链（client cert / bearer token / service account / OIDC / requestheader）解析出 `user.Info`，注入 request context。**失败走 `failedHandler`**（=`Unauthorized` 包 `WithFailedAuthenticationAudit`，config.go :1124-25），返回 401。注意 `WithFailedAuthenticationAudit` **不在主链**，只在认证失败路径触发——认证失败也留审计。
 - **鉴权（WithAuthorization，endpoints/filters/authorization.go `WithAuthorization+0`）**：用 authorizer（RBAC / Node / Webhook / ABAC）判断 `user` 对 `RequestInfo` 标识的资源是否有权执行 `verb`。失败 403。
 - **流控（WithPriorityAndFairness）**：APF 按 FlowSchema 分类、PriorityLevel 排队，超载返回 429（详见 [优先级与公平性流控专题](优先级与公平性流控.md)）。
+
+**认证/鉴权链的装配位置：** authenticator 链在 `pkg/kubeapiserver/authenticator/config.go`（`Config.New`）装配：requestheader → x509 → token-file/legacy-SA/JWT-SA/bootstrap/OIDC/webhook → union。authorizer 链在 `pkg/kubeapiserver/authorizer/config.go` + `reload.go`（Node/ABAC/RBAC/Webhook/AlwaysAllow 各 mode builder）。
+
+**审计与模拟（精确锚点）：**
+- `WithAudit`（endpoints/filters/audit.go `WithAudit+0`，:42）：记录审计事件（含 defer/panic/long-running stage）；策略评估在 `evaluatePolicyAndCreateAuditEvent+0`（:117）。
+- `WithImpersonation`（filters/impersonation/impersonation.go `WithImpersonation+0`，:42）：每请求做 `Authorize(verb=impersonate)` 检查 + `LogImpersonatedUser`。
+- `WithConstrainedImpersonation`（filters/impersonation/constrained_impersonation.go `WithConstrainedImpersonation+0`，:46，独立文件）。
 
 ### 3.2 admission 在哪一层
 
 **admission 不在中间件链里**，而在 **CRUD handler 内部**（`createHandler`/`updateHandler` 显式调用）。原因是 admission 需要解码后的对象 + 操作语义（CREATE/UPDATE/DELETE），与 HTTP 层解耦。顺序：**mutating admission → 对象默认化/validation → validating admission**。
 
 admission 链由 `NewChainHandler`（admission/chain.go `NewChainHandler+0`）构造，`admission.Interface`（interfaces.go :124）定义 `Admit`/`Validate`。
+
+**两种 admission 的触发时机不同（精确）：**
+- **mutating admission 内联触发**：`createHandler` 直接调 `mutatingAdmission.Admit(ctx, admissionAttributes, scope)`（create.go :203）。
+- **validating admission 经 storage 写触发**：handler 把 `rest.AdmissionToValidateObjectFunc(admit, attrs, scope)`（create.go :188，函数在 registry/rest/create.go `AdmissionToValidateObjectFunc+0`，:218）作为 validate 回调传给 `Store.Create`，validating 在 storage 写路径内才执行（update 用 `AdmissionToValidateObjectUpdateFunc+0`，update.go :286）。这样保证 validating 看到的是最终写入对象。
 
 ---
 
