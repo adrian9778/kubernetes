@@ -56,6 +56,7 @@ flowchart TD
 | [调度器抢占 preemption](topics/调度器抢占-preemption.md) | kube-scheduler 抢占 | PostFilter→Preempt→DryRun→SelectCandidate→Actuate 全链：选受害者、PDB tie-break、nominated node、异步驱逐 |
 | [etcd3 写入路径](topics/etcd3写入路径.md) | apiserver storage 层 | Create/Update→OptimisticPut 乐观事务：key 准备、编码、加密变换、lease、冲突重试循环 |
 | [优先级与公平性流控](topics/优先级与公平性流控.md) | apiserver APF 流控 | WithPriorityAndFairness→Handle→startRequest：FlowSchema 分类、PriorityLevel 排队、并发席位、429 拒绝 |
+| [informer resync 机制](topics/informer-resync机制.md) | client-go informer | resyncPeriod 确定→shouldResync 判定→distribute(sync=true) 仅投需 resync 的 handler→OnUpdate(old==new) 自愈 |
 
 新增专题：在 `topics/` 下建 `中文名.md`，按单篇专题骨架（先总结、再生产、再开发、末验证）写，并在本表追加一行。
 
