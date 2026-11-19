@@ -230,6 +230,68 @@ runProbe (+0)
 | 生产探针观测 | `[待运行验证]` | 未在真实集群观测探针触发频率与容器重启 |
 | startup 探针的特殊处理 | 未深挖 | startup 探针的特殊处理未展开 |
 
+#### 探测实现（runProbe 四种方式，prober.go:152）
+
+`runProbe`（prober.go:152）按 probeSpec 类型分派到四种探测器：
+```text
+runProbe (+0)
+├── HTTP（container.LivenessProbe.HTTPGet）→ pb.http.Probe(req, timeout)
+│     或 ProbeH2C（HTTP/2 cleartext，h2cProbe）
+├── TCP（TCPSocket）→ pb.tcp.Probe(host, port, timeout)
+├── exec（Exec）→ pb.exec.Probe(newExecInContainer(cmd, timeout))
+├── gRPC（GRPC）→ pb.grpc.Probe(host, service, port, timeout, {UseTLS})
+└── 其他 → probe.Unknown + "missing probe handler"
+```
+- HTTP 探测支持 HTTP/2 cleartext（h2cProbe）——用于 gRPC-Web 等场景。
+- gRPC 探测支持 TLS（`UseTLS`）——gRPC 健康检查协议。
+
+#### 探针指标（prober_manager.go:46）
+
+`prober_manager.go` 定义探针指标：
+- `probe_total`（:46）：探针总数计数器（按 probeType、result 分）。
+- `probe_duration_seconds`（:62）：探针耗时直方图。
+- 这些指标用于观测探针触发频率与耗时。
+
+#### startup 探针的特殊处理（worker.go:121-125）
+
+startup 探针有几个特殊处理：
+1. **独立 resultsManager**：startup 探针用 `m.startupManager`（worker.go:123），与 liveness/readiness 的 resultsManager 分离。
+2. **初始值 Unknown**：`w.initialValue = results.Unknown`（worker.go:124）——启动前未知。
+3. **Started 门控**：`container.Started` 为 true 时，startup 探针不再探测（worker.go:373）。
+4. **restartable init container（sidecar）**：sidecar 的 startup 探针在容器已 Started 后 seed Success（:308 ～ :313），避免 kubelet 重启后误判。
+5. **Pod 删除时跳过**：Pod 被删除时，liveness/startup 探针跳过（worker.go:354），readiness 探针继续。
+
+#### 探测实现（runProbe 四种方式，prober.go:152）
+
+`runProbe`（prober.go:152）按 probeSpec 类型分派到四种探测器：
+```text
+runProbe (+0)
+├── HTTP（container.LivenessProbe.HTTPGet）→ pb.http.Probe(req, timeout)
+│     或 ProbeH2C（HTTP/2 cleartext，h2cProbe）
+├── TCP（TCPSocket）→ pb.tcp.Probe(host, port, timeout)
+├── exec（Exec）→ pb.exec.Probe(newExecInContainer(cmd, timeout))
+├── gRPC（GRPC）→ pb.grpc.Probe(host, service, port, timeout, {UseTLS})
+└── 其他 → probe.Unknown + "missing probe handler"
+```
+- HTTP 探测支持 HTTP/2 cleartext（h2cProbe）——用于 gRPC-Web 等场景。
+- gRPC 探测支持 TLS（`UseTLS`）——gRPC 健康检查协议。
+
+#### 探针指标（prober_manager.go:46）
+
+`prober_manager.go` 定义探针指标：
+- `probe_total`（:46）：探针总数计数器（按 probeType、result 分）。
+- `probe_duration_seconds`（:62）：探针耗时直方图。
+- 这些指标用于观测探针触发频率与耗时。
+
+#### startup 探针的特殊处理（worker.go:121-125）
+
+startup 探针有几个特殊处理：
+1. **独立 resultsManager**：startup 探针用 `m.startupManager`（worker.go:123），与 liveness/readiness 的 resultsManager 分离。
+2. **初始值 Unknown**：`w.initialValue = results.Unknown`（worker.go:124）——启动前未知。
+3. **Started 门控**：`container.Started` 为 true 时，startup 探针不再探测（worker.go:373）。
+4. **restartable init container（sidecar）**：sidecar 的 startup 探针在容器已 Started 后 seed Success（:308 ～ :313），避免 kubelet 重启后误判。
+5. **Pod 删除时跳过**：Pod 被删除时，liveness/startup 探针跳过（worker.go:354），readiness 探针继续。
+
 ### 3.3 修改联动清单、源码索引与关联文档
 
 **改动这块前必查：**
