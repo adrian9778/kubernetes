@@ -48,6 +48,16 @@ flowchart TD
 | 20 | 第四层 | [CSI 存储插件](20-CSI存储插件.md) | plugin manager 注册、volume manager 调谐与 NodePublishVolume |
 | 21 | 第四层 | [设备插件与网络边界](21-设备插件与网络边界.md) | 设备注册/Allocate 进入 CRI config；kubelet 与 CNI 的职责边界 |
 
+## 专题（topics/）
+跨篇的机制纵深专题，按「代码基准 + 结论速览 → 生产视角 → 开发视角 → 验证」组织，符号+偏移锚点。适合在读完主线篇后针对某个子系统深挖。
+
+| 专题 | 主题 | 一句话定位 |
+|---|---|---|
+| [调度器抢占 preemption](topics/调度器抢占-preemption.md) | kube-scheduler 抢占 | PostFilter→Preempt→DryRun→SelectCandidate→Actuate 全链：选受害者、PDB tie-break、nominated node、异步驱逐 |
+| [etcd3 写入路径](topics/etcd3写入路径.md) | apiserver storage 层 | Create/Update→OptimisticPut 乐观事务：key 准备、编码、加密变换、lease、冲突重试循环 |
+
+新增专题：在 `topics/` 下建 `中文名.md`，按单篇专题骨架（先总结、再生产、再开发、末验证）写，并在本表追加一行。
+
 ## 阅读建议
 - 顺序阅读：严格按编号从 01 到 21，四层逐级深入。
 - 带着问题读：第一层回答"系统由什么组成、数据怎么流转"；第二、三层回答"一个 Pod 请求具体怎么走"；第四层回答"每个函数内部做了什么"。
