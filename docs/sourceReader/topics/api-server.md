@@ -251,6 +251,32 @@ create(creater, req, scope, admit, namespace, ...)
 
 **Store 不直接操作 etcd**，而是持有 `Storage storage.Interface`（由 storage factory 注入，可能是 etcd3 直连或 `Cacher` 包装）。它负责对象级语义：`CreateStrategy`/`UpdateStrategy`/`DeleteStrategy`（默认化、校验、canonicalize）、namespace 校验、generation 维护。
 
+#### Store.Create 内部链（`e.create`，registry store.go）
+
+`e.Create`（:564）委托给私有 `e.create`（`e.create+0`，:595），其内部顺序：
+
+```text
+e.create(ctx, obj, createValidation, options)     e.create+0 (:595)
+├── rest.BeforeCreate(e.CreateStrategy, ctx, obj)  e.create+24 (:619)
+│     ↑ BeforeCreate 在 registry/rest/create.go BeforeCreate+0 (:103)
+├── createValidation(ctx, obj)                     e.create+29 (:624)  ← validating admission 回调
+└── e.Storage.Create(ctx, key, obj, out, ttl, dryRun)  e.create+49 (:644)
+      ↑ 真正落 etcd（经 dryrun 包装）
+```
+
+#### Get / List / Watch handlers（同一文件 get.go）
+
+读路径 handler 都在 `endpoints/handlers/get.go`：
+
+| handler | 锚点 | 作用 |
+|---|---|---|
+| `GetResource` | `GetResource+0` (:87) | GET 单对象 |
+| `ListResource` | `ListResource+0` (:168) | GET 集合（含 `?watch=true` 分流） |
+| `handleWatch` | `handleWatch+0` (:258) | watch 长连接 |
+| `handleList` | `handleList+0` (:314) | list 主体 |
+
+DELETE 路由的注册辅助 `restfulDeleteResource` 在 installer.go `restfulDeleteResource+0`（:1313）。
+
 ---
 
 ## 5. Storage 层（etcd3）
@@ -266,10 +292,12 @@ s.Create(ctx, key, obj, out, ttl)                 s.Create+0
 ├── preparedKey = s.prepareKey(key, false)         key 防逃逸（s.prepareKey+0，:1232）
 ├── if ttl > 0: lease = s.leaseManager.GetLease(ttl)   短 TTL 对象用 lease
 ├── newData = s.transformer.TransformToStorage(data, authenticatedDataString(preparedKey))
-│     ↑ ★ 加密变换（见 §5.3）
+│     ↑ ★ 加密变换（s.Create+35，见 §5.3）
 └── txnResp = s.client.Kubernetes.OptimisticPut(ctx, preparedKey, newData, 0, {LeaseID: lease})
-      ↑ ★ 乐观事务，expectedRev=0（Create 幂等：已存在即失败）
+      ↑ ★ 乐观事务，expectedRev=0（s.Create+43，Create 幂等：已存在即失败）
 ```
+
+**注意：** `OptimisticPut` 来自外部包 `go.etcd.io/etcd/client/v3/kubernetes`（经 `s.client.Kubernetes` 调用），**不在仓库内**——仓库内仅有测试记录器 `storage/testing/recorder.go`。乐观锁重试逻辑在 `storage/txn.go:GuaranteedUpdate`。
 
 **关键点：**
 1. **加密在 storage 层**：`TransformToStorage` 加密后才落 etcd，密文对 etcd 透明。
@@ -374,14 +402,16 @@ proxyHandler.ServeHTTP(w, req)
 
 ### 8.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上用 `grep -n`/`sed -n`/`awk` 复核：
+本专题所有「符号+偏移」均在 HEAD `782c049` 上用 `grep -n`/`sed -n`/`awk` 复核（apiserver/aggregator/apiextensions 源码自 `782c049` 起无漂移）：
 - `Run+0`/`CreateServerChain+0`/`CreateKubeAPIServerConfig+0`（server.go:152/:189/:213）
 - `DefaultBuildHandlerChain+0`（config.go:1078）
-- `NewAPIServerHandler+0`（handler.go:73）、`director`（:115）
-- `APIInstaller.Install+0`（installer.go:196）、`registerResourceHandlers+0`（:288）
+- `NewAPIServerHandler+0`（handler.go:73）、`director+0`（:115）
+- `APIInstaller.Install+0`（installer.go:196）、`registerResourceHandlers+0`（:288）、`restfulDeleteResource+0`（:1313）
 - `createHandler+0`（create.go:53）、`CreateResource+0`（:245）、`UpdateResource+0`（update.go:51）、`PatchResource+0`（patch.go:71）
-- `e.Create+0`（registry store.go:564）等
-- `s.Create+0`（etcd3 store.go:293）、`s.GuaranteedUpdate+0`（:437）、`refreshOnError+0`（txn.go:148）
+- 读路径 handler 同在 get.go：`GetResource+0`（:87）、`ListResource+0`（:168）、`handleWatch+0`（:258）、`handleList+0`（:314）
+- `e.Create+0`（registry store.go:564）、`e.create+0`（:595，内部 BeforeCreate+24/:619、createValidation+29/:624、Storage.Create+49/:644）
+- `BeforeCreate+0`（registry/rest/create.go:103）、`BeforeUpdate+0`（update.go:114）
+- `s.Create+0`（etcd3 store.go:293，加密 s.Create+35、OptimisticPut s.Create+43）、`s.GuaranteedUpdate+0`（:437）、`refreshOnError+0`（txn.go:148）
 - `prefixTransformers.TransformToStorage+0`（transformer.go:172）
 - `Cacher.Watch+0`（cacher.go:797）
 - `proxyHandler.ServeHTTP+0`（handler_proxy.go:107）、`getOrCreateServingInfoFor+0`（customresource_handler.go:617）
