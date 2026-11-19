@@ -153,6 +153,51 @@ remaining = backoffDuration - clock.Since(lastFailureTime)
 2. **指数退避 + 上限封顶**：10s 起倍增封顶 10min，在「快速重试瞬态失败」与「避免打爆 API/镜像仓库」间取平衡。
 3. **两套 BackoffLimit 对应两种 RestartPolicy**：Never 看 Pod 计数、OnFailure 看容器 restartCount 累加，各自贴合其重启语义。
 
+#### Job 完成判定与落定流程深度拆解（第二层补充视角）
+
+Job 怎么从「Pod 跑完」走到「Job 标记 Complete/Failed」？这不是一步完成的——中间有**未计数 Pod 门控**、**terminating 门控**、**两段 condition 转换**。本节把这条落定流程拆开。
+
+**finishedCondition 的诞生（syncJob，job_controller.go:1085 ～ :1143）：**
+1. `jobCtx.finishedCondition = hasSuccessCriteriaMetCondition(&job)`（:1089）：先看是否已有 SuccessCriteriaMet condition（Indexed Job 的 successPolicy 满足）。
+2. 若无：把 FailureTarget condition 转成 Failed（:1097），或按 podFailurePolicy 新建 `JobFailureTarget`（:1101）。
+3. **BackoffLimit / Deadline 兜底**（:1105 ～ :1111）：`BackoffLimitExceeded`（:1109）、`DeadlineExceeded`（:1111）。
+4. **Indexed Job 的 failed indexes**（:1125 ～ :1129）：`MaxFailedIndexesExceeded`、`FailedIndexes`。
+5. **SuccessCriteriaMet**（:1135 ～ :1137）：成功策略满足 → `JobSuccessCriteriaMet` condition。
+
+**落定门控（`enactJobFinished`，job_controller.go:1628）：** 即使 finishedCondition 已定，也不立即落定——有两个门控：
+1. **未计数 Pod 门控**：`UncountedTerminatedPods` 里还有 succeeded/failed Pod 未被计数（`count > 0`）→ 延迟落定（:1635 ～ :1641）。这保证每个终止 Pod 都被精确计数一次（配合 tracking finalizer）。
+2. **terminating 门控**：`*jobCtx.terminating > 0`（还有正在删除的 Pod）→ 延迟落定（:1644 ～ :1649）。
+
+**两个门控都通过后：**
+- `ensureJobConditionStatus` 把 finishedCondition 写入 `job.Status.Conditions`（:1652）。
+- `finishedCond.Type == JobComplete` 时设 `job.Status.CompletionTime`（:1654 ～ :1656）。
+
+**condition 的两段转换（syncJob :1085 注释）：**
+```text
+FailureTarget (ConditionTrue)  ──(所有相关 Pod 终止且计数)──▶  Failed
+SuccessCriteriaMet (ConditionTrue) ──(同上)──▶  Complete
+```
+即先立一个「意向」condition（FailureTarget / SuccessCriteriaMet），等门控通过后再转成终态（Failed / Complete）。这是「精确计数」与「终态原子性」的关键：终态只在所有 Pod 都被统计后才立。
+
+**完成事件（`recordJobFinished`，:1673 附近）：**
+- JobComplete → `Completed` 事件（Normal）；若 `Succeeded > Completions` 发 `TooManySucceededPods` 警告。
+- JobFailed → `Failed` 事件。
+- 递增 `job_finished_total` 指标（按 completionMode 区分）。
+
+**完成流程时间线：**
+
+| 时刻 | 动作 | 可见结果 |
+|---|---|---|
+| 所有 Pod 终止 | `getNewFinishedPods` 筛出新 succeeded/failed | `UncountedTerminatedPods` 累积 |
+| 逐个计数 | `trackJobStatusAndRemoveFinalizers` 计数 + 摘 tracking finalizer | `UncountedTerminatedPods` 清空 |
+| 全部计数 + 无 terminating | `enactJobFinished` 通过门控 | Job condition 转 Complete/Failed + `CompletionTime` |
+| 落定 | `recordJobFinished` 发事件 + 指标 | `kubectl get job` STATUS = Complete/Failed |
+
+**设计要点（源码可证）：**
+1. **两段 condition 而非一步终态**：先立 FailureTarget/SuccessCriteriaMet「意向」，等精确计数与 terminating 门控通过后再转终态——避免「Pod 还在删就 premature 标 Complete」。
+2. **未计数门控配合 tracking finalizer**：tracking finalizer 保证 kubelet 不会在 Job 计数前彻底删掉 Pod；未计数门控保证 Job 不在计数前落定。两者配合实现「恰好计数一次」。
+3. **CompletionTime 取 finishedCondition 的 LastTransitionTime**（:1655），使 Complete 时刻精确对应「最后一个 Pod 终止且被计数」的时刻。
+
 ### 4. tracking finalizer 机制
 - 常量 `JobTrackingFinalizer @ staging/src/k8s.io/api/batch/v1/types.go:45`（`labelPrefix + "job-tracking"`）：Pod 创建前注入 PodTemplate；带 finalizer 的 Pod 在 apiserver 上不会被提前彻底删除，保证 Job 控制器能统计到每一次 Pod 结束。
 - `tracking_utils.go`：`uidSet @ :43`、`hasJobTrackingFinalizer @ :127`、`recordFinishedPodWithTrackingFinalizer @ :131`、`isFinishedPodWithTrackingFinalizer @ :144`；finalizer 摘除的 expect/observed（`expectFinalizersRemoved @ :79` / `finalizerRemovalObserved @ :99`）防止摘除事件丢失导致 Pod 计数泄漏。
