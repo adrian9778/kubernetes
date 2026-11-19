@@ -154,6 +154,72 @@ nginx   1/1     Running   0          <n>
 
 **边界（本层不展开）：** 每个失败点内部的函数级分支（如镜像 GC 触发、抢占、退避重试）属第三、四层，见 03/07/09/10 篇。
 
+### 3.8 完整 HTTP 报文解剖（第二层补充视角）
+
+本节把 3.1 的 POST 展开成**线上的完整 HTTP 报文**：请求行、请求头、请求体、响应行、响应体。所有头部与编码都来自 client-go 的 `rest.Request` 构造链（`createResource` → `Post/NamespaceIfScoped/Resource/VersionedParams/Body/Do/Get`）。
+
+#### 请求行与 URL 构造
+
+**源码：** `staging/src/k8s.io/client-go/rest/request.go 函数：URL 偏移：+0`（:556）、`函数：createResource 偏移：+0`（cli-runtime/pkg/resource/helper.go:240）
+
+```text
+POST /api/v1/namespaces/default/pods HTTP/1.1
+```
+URL 由 `Request.URL`（:556）拼装：
+- `pathPrefix` = `/api/v1`（核心组，见篇 04 `ClientForMapping` 的 `/api` vs `/apis` 分流）
+- `namespaceSet && namespace` → 追加 `/namespaces/default`（`NamespaceIfScoped`，helper.go:242）
+- `resource` → 追加 `/pods`（helper.go:244）
+- name 为空（Create 不带 name，由服务端/对象内 name 定）
+- query：`VersionedParams(options, ParameterCodec)`（helper.go:246）追加 `dryRun`/`fieldManager`/`fieldValidation`（本场景均空）
+
+#### 请求头
+
+| 头 | 值（本场景） | 来源锚点 |
+|---|---|---|
+| `Authorization` | `Bearer <token>` | `transport/round_trippers.go:322`（`SetHeader("Authorization", "Bearer "+token)`，`NewBearerAuthRoundTripper` :285） |
+| `Accept` | `application/vnd.kubernetes.protobuf,application/json` | `request.go:199`（`setAcceptHeader`，默认 `AcceptContentTypes`） |
+| `Content-Type` | `application/json` | `request.go:542`（`Body` 内 `SetHeader("Content-Type", ContentType)`）；未设时按 config.go:318 注释回落 `application/json` |
+| `User-Agent` | `kubectl/vX.Y.Z (os/arch) kubernetes/<commit>` | `config.go:545 buildUserAgent` 格式串 / `:550 DefaultKubernetesUserAgent` |
+| `Content-Length` | body 字节数 | `http` 传输层 |
+
+`Accept` 用 protobuf 优先：client-go 默认 `AcceptContentTypes = "application/vnd.kubernetes.protobuf,application/json"`（request.go:199）——能接受 protobuf 就用（省带宽），否则回落 JSON。`Content-Type` 则由 `Body` 内 `Negotiator.Encoder(ContentType)`（:530）按对象序列化后设置。
+
+#### 请求体
+
+**源码：** `request.go 函数：Body 偏移：+0`（:510）
+
+`Body(obj)` 对 `runtime.Object` 走 `Negotiator.Encoder(ContentType)` → `runtime.Encode`（:530 ～ :539）序列化，并设 `Content-Type`。本场景序列化后的 body 即 §3.1 的 Pod 清单（`apiVersion: v1` / `kind: Pod` / `metadata.name: nginx` / `spec.containers[0].image: nginx` / `restartPolicy: Never`），以 `application/json` 编码为 JSON 字节。
+
+#### 响应行与响应体
+
+**源码：** `request.go 函数：transformResponse 偏移：+0`（:1186）、`函数：Do 偏移：+0`（:1142）
+
+```text
+HTTP/1.1 201 Created
+Content-Type: application/json
+```
+- `Do`（:1142）调 `request`（:1043）发 HTTP，回调 `transformResponse`（:1186）。
+- `transformResponse`：读 body → 取 `Content-Type`（空则回落 `ContentType`）→ `Negotiator.Decoder` 解码器 → 按 status code 分流。
+- **2xx**（:1242 附近，`<200` 或 `>206` 为错误）：decode body 为 `runtime.Object`，`Result{obj, body}`。
+- **非 2xx**：`transformUnstructuredResponseError` 把错误体转 `*apierrors.StatusError`（409 冲突 / 422 Invalid / 403 等）。
+- body 再经 `Helper.createResource` 的 `.Get()`（helper.go:249）decode 成存回的 Pod（含服务端分配的 `UID`、`ResourceVersion`）。
+
+#### 请求/响应报文对照
+
+| 维度 | 请求（kubectl → apiserver） | 响应（apiserver → kubectl） |
+|---|---|---|
+| 行 | `POST /api/v1/namespaces/default/pods HTTP/1.1` | `HTTP/1.1 201 Created` |
+| 身份 | `Authorization: Bearer <token>` | — |
+| 内容协商 | `Accept: ...protobuf,application/json` | `Content-Type: application/json` |
+| 体 | Pod 清单（JSON） | 存回的 Pod（含 UID/RV，`spec.nodeName=""`） |
+| 失败形态 | — | 409 AlreadyExists / 422 Invalid / 403 Forbidden |
+
+**设计要点（源码可证）：**
+1. **内容协商双向**：`Accept`（client 能收什么，protobuf 优先）与 `Content-Type`（client 发什么，JSON）由 `Negotiator` 分别决定——读写可用不同编码。
+2. **身份用 Bearer token，凭证用后由 apiserver 侧认证中间件校验**（见篇 05 认证 filter）；client-go 只负责把 token 放进 `Authorization` 头。
+3. **URL 由 builder 链拼装**：`Post/NamespaceIfScoped/Resource/VersionedParams/Body` 各设一段，最终 `URL`（:556）拼成完整路径——命令本身不拼 URL。
+4. **非 2xx 统一转 StatusError**：`transformResponse` 把错误体 decode 成 `StatusError`，使上层能按 `Reason`（AlreadyExists/Invalid/Forbidden）分支。
+
 ## 4. 本层刻意不展开的内容
 异常分支（调度失败、镜像拉取失败、etcd 冲突、准入拒绝）、边界情况、PLEG 健康检查细节、探针、非核心组件、控制器调谐，全部留待第三、四层。
 
