@@ -235,6 +235,76 @@ LeaseDuration > RenewDeadline > JitterFactor * RetryPeriod
 | 续约失败 cancel context | `renew`（:405 ～ :409） | 停止续约循环 |
 | 快路径失败回落慢路径 | `tryAcquireOrRenew`（:770 ～ :772） | 乐观失败（RV 冲突）时不放弃 |
 
+### 2.9 Recovery 恢复流程与 MultiLock（加深）
+
+#### Recovery 恢复流程（`renewWithRecovery`，leaderelection.go:421）
+
+带 `Recovery` 的 elector 失去 lease 后**不退出**，而是进入恢复循环。本节解剖恢复流程。
+
+```text
+renewWithRecovery (+0，:421)
+├── ctx, cancel（独立 cancel，与 Run 的 ctx 分离）
+├── leading = true
+├── wait.UntilWithContext(ctx, RetryPeriod)
+│    └── PollUntilContextTimeout(RenewDeadline, immediate=true)
+│         ├── ctx.Err() → return false, err（短路径，避免无谓处理）
+│         └── tryRecover(ctx) → (renewed, lost)
+│              ├── lost → return false, errLeaseLost（lease 被别人拿走）
+│              └── renewed → return renewed, nil
+│    成功 → 继续续约
+│    失败 → leading=false + writeGate.close() + leaderOff 指标
+│            + RecordEvent("stopped leading") + notifyStoppedLeading()
+│            （写门关闭，但**不退出**，继续尝试恢复）
+└── ctx 取消 → cancel
+```
+
+**tryRecover（:547）——恢复时的续约尝试：**
+```text
+tryRecover(ctx) → (renewed, lost)
+├── 1. 快路径：IsLeader() && isLeaseValid → 乐观 Update（条件于 RV）
+│     失败 → 回落慢路径
+├── 2. Lock.Get 取记录（**与 tryAcquireOrRenew 不同：从不 Create**）
+│     注释：Recovery 场景从不创建 lease——只续约已持有的 lease
+└── 检查 holder/lease 有效性
+```
+**与 tryAcquireOrRenew 的区别：** tryRecover **从不 Create** lease——恢复场景只续约已持有的 lease，不抢别人的。
+
+**写门的精确时机（注释 :330 附近）：**
+- 写门在「观察到失去 lease」时关闭（`writeGate.close()`），**早于任何 release**。
+- 无 Recovery 时 `Run` 在失去 lease 时退出，写门也在那时关闭。
+- Lease 自身用的 client **不被写门拦截**（否则恢复期间无法续约）。
+
+#### MultiLock（多锁，multilock.go:36）
+
+`MultiLock` 用于多地区/多锁场景（如 HA 跨 region）：
+
+```text
+MultiLock.Get(ctx)
+├── Primary.Get → primary, primaryRaw
+├── Secondary.Get → secondary, secondaryRaw
+│     NotFound 且 primary.HolderIdentity != 我 → 返回 primary（旧 client 兼容）
+├── primary.HolderIdentity != secondary.HolderIdentity
+│     → HolderIdentity = UnknownLeader（两把锁不一致 → 未知 leader）
+└── 返回合并后的记录
+```
+**语义：** Primary 与 Secondary 两把锁，若 holder 不一致则返回 `UnknownLeader`——防止脑裂时双 leader。
+
+#### 写门与 Recovery 的时间线
+
+| 时刻 | 写门 | 进程 | 动作 |
+|---|---|---|---|
+| 持有 lease | open | 运行主逻辑 | 正常续约 |
+| 续约失败（超 RenewDeadline） | **close** | 继续运行（有 Recovery） | OnStoppedLeading 通知 |
+| 尝试恢复 | close | 继续尝试续约 | tryRecover 循环 |
+| 恢复成功 | open | 重新成为 leader | 继续主逻辑 |
+| 恢复失败（lease 被夺） | close | 退出（无 Recovery）或继续（有 Recovery） | — |
+
+**设计要点（源码可证）：**
+1. **写门早于 release 关闭**：写门在观察到失去 lease 时就关闭（早于 release），防止非 leader 实例继续写 apiserver。
+2. **Lease 自身不被写门拦截**：续约用的 client 不被 gate，否则恢复期间无法续约，永远无法重新成为 leader。
+3. **Recovery 不 Create lease**：tryRecover 从不 Create，只续约已持有的 lease——避免恢复场景下抢占别人的 lease。
+4. **MultiLock 防脑裂**：Primary 与 Secondary 不一致时返回 `UnknownLeader`，防止脑裂时双 leader。
+
 ## 3. 验证、缺口与后续修改
 
 ### 3.1 代码回核与生产实测记录
