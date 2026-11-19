@@ -228,6 +228,47 @@ sharedIndexInformer.Run
 - 改 resync 投递 → 同步 `distribute` 的 sync 分支与 `processorListener.run` 的 updateNotification 处理。
 - 改 batch 处理 → `processDeltasInBatch`（controller.go:903）与 `InOrderInformersBatchProcess` feature gate。
 
+#### relist（Reflector ListAndWatch）与 resync 的协作（加深）
+
+relist 与 resync 是**两个不同层次的对账**，容易混淆：
+
+| 维度 | relist（Reflector ListAndWatch） | resync（sharedProcessor） |
+|---|---|---|
+| 数据来源 | **apiserver**（重新 ListAndWatch） | **本地缓存**（indexer 重投） |
+| 写入目标 | DeltaFIFO（写 Delta） | 直接 distribute（不写 DeltaFIFO） |
+| 触发 | Reflector 周期 relist + watch 断连重连 | processorListener.shouldResync 周期判定 |
+| 作用 | 同步 apiserver 真相到缓存 | 驱动控制器重新调谐缓存对象 |
+
+**relist 的两种模式（`Reflector.ListAndWatchWithContext`，reflector.go:465）：**
+1. **WatchList 模式**（`useWatchList=true`，feature gate `WatchListClient`）：`r.watchList(ctx)` 打开 watch 流拉数据。
+2. **常规 List 模式**（`fallbackToList=true`）：`r.list(ctx)` 一次性 List 全量。
+
+WatchList 不支持时回落到常规 List（注释：`This is expected if watchlist is not supported or disabled in kube-apiserver`）。
+
+**协作时序：**
+1. relist 把 apiserver 真相写入 DeltaFIFO（Delta type = Sync/Replaced）。
+2. DeltaFIFO Pop → handleDeltas → indexer 更新 + distribute(sync=false) → OnAdd/OnUpdate/OnDelete。
+3. **resync 是独立于 relist 的**：resync 不写 DeltaFIFO，而是直接从 indexer 取缓存对象重投 handler。
+
+**协作的意义：** relist 保证缓存与 apiserver 一致（数据平面），resync 保证控制器与缓存一致（调谐平面）——两层对账缺一不可。
+
+#### handleBatchDeltas（batch 处理路径，加深）
+
+**源码：** `shared_informer.go handleBatchDeltas+0`（:1134）
+```text
+handleBatchDeltas(logger, deltas, isInInitialList)
+├── s.blockDeltas.Lock()（与 handleDeltas 同一把锁）
+└── processDeltasInBatch(logger, s, s.indexer, deltas, isInInitialList, s.keyFunc)
+```
+- batch 路径受 **`InOrderInformersBatchProcess` feature gate** 控制（controller.go:64-66：`ProcessBatch must be non-nil` + feature gate enabled）。
+- 启用时 `Config.ProcessBatch`（controller.go:67）替代逐 Delta 的 `Process`，一次处理一批 Deltas——减少锁竞争。
+- 未启用时走逐 Delta 的 `Process`（controller.go:56）。
+
+**设计要点（源码可证）：**
+1. **relist 与 resync 正交**：relist 对账「缓存 vs apiserver」，resync 对账「控制器 vs 缓存」——两层对账缺一不可。
+2. **WatchList 模式**：`useWatchList`（reflector.go:170，feature gate `WatchListClient`）启用时用 watch 流拉初始数据，否则回落常规 List。
+3. **batch 处理受 feature gate 控制**：`InOrderInformersBatchProcess` 启用时走 `processDeltasInBatch`，否则走逐 Delta 的 `processDeltas`。
+
 **源码索引：**
 
 | 符号 | 文件:行 |
