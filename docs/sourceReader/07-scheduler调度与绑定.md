@@ -248,6 +248,76 @@ PostFilter (default_preemption.go:163)
 2. **DryRun 先试算、Actuate 后驱逐**：先并行算出「驱逐哪些 Pod 可行」，选中后再真正驱逐，避免误删。
 3. **异步驱逐（KEP-4832）**：`EnableAsyncPreemption` 下驱逐放 goroutine，`prepareCandidateAsync` 完成前 Pod 不重试，避免驱逐未落地就重复调度。
 
+### 2.7 一次成功调度决策走读（第二层补充视角）
+
+本节是抢占（§2.6）的成功路径对照：走一个**资源充足、可正常调度**的 Pod，看 Filter/Score/Bind 三个阶段各插件实际做了什么检查、打出什么分。抢占只在 Filter 全失败时触发；本节是 Filter 有可行节点的常态路径。
+
+#### 注册的插件与阶段（plugin registry）
+
+**源码：** `pkg/scheduler/framework/plugins/registry.go`
+`registry.go` 按扩展点注册约 20 个内置插件，关键的 Filter/Score/Bind 插件：
+
+| 扩展点 | 插件 | 作用 |
+|---|---|---|
+| QueueSort | `queuesort` | 队列内 Pod 排序（优先级/时间） |
+| PreFilter | `noderesources`、`podtopologyspread`、`interpodaffinity`、`volumebinding`、`schedulinggates` | 预筛 + 写 CycleState |
+| Filter | `nodename`、`nodeunschedulable`、`tainttoleration`、`nodeaffinity`、`nodeports`、`noderesources`、`volumerestrictions`、`volumezone`、`interpodaffinity`、`podtopologyspread` | 逐节点判可行 |
+| PreScore / Score | `nodeaffinity`、`podtopologyspread`、`interpodaffinity`、`noderesources.BalancedAllocation`、`imagelocality` | 打分 |
+| Bind | `defaultbinder` | 写 Binding |
+
+**Filter 阶段：逐插件判「这个节点能不能放」**
+
+`noderesources.Fit.Filter`（`noderesources/fit.go:617`）：
+- 从 CycleState 取 `PreFilter` 算好的 `preFilterState`（Pod 的资源请求）。
+- 调 `helper.FitsRequest`（`helper/resource_fit.go:124`）逐资源比对：
+  - **Pod 数上限**：`len(nodeInfo.GetPods()) >= allowedPodNumber` → `"Too many pods"`。
+  - **CPU**：`podRequest.MilliCPU > allocatable.MilliCPU - requested.MilliCPU` → `"Insufficient cpu"`；若请求 > 节点总量则标 `Unresolvable`（抢占也救不了）。
+  - **内存**：同构判断 → `"Insufficient memory"`。
+  - **EphemeralStorage / ScalarResources**：同构。
+- 任一资源不足 → 返回 Unschedulable（带全部失败原因，供抢占/事件用）。
+
+`tainttoleration.Filter`（`tainttoleration/taint_toleration.go:102`）：
+- `FindMatchingUntoleratedTaint`（:87/:90）检查节点 taint 是否被 Pod toleration 容忍；`DoNotScheduleTaintsFilterFunc()` 只看 NoSchedule/NoExecute。
+
+`nodeaffinity.Filter` / `nodeunschedulable.Filter` / `nodename.Filter`：分别判 required node affinity、`spec.unschedulable`、`spec.nodeName`。
+
+**Score 阶段：逐插件给「这个节点有多好」打分**
+
+`noderesources.BalancedAllocation.Score`（`balanced_allocation.go:227 balancedResourceScorer`）：
+- 同时算「加了这个 Pod 后」与「加之前」的 CPU/内存占用均衡度（`balancedResourceScore`，按各资源 fraction 的标准差）。
+- 分数 = `MaxNodeScore/2 + (MaxNodeScore/2 + scoreWithPod - scoreWithoutPod)/2`：
+  - 均衡度变化小 → 约 75。
+  - 均衡度改善 → 趋向 100。
+  - 均衡度变差 → 趋向 50。
+- 这样选出的节点是「加完 Pod 后资源最均衡」的，而非单纯最空的。
+
+`nodeaffinity` / `podtopologyspread` / `interpodaffinity` / `imagelocality` Score：分别按 preferred affinity、拓扑分布均衡度、跨 Pod 亲和、镜像本地性加分。
+
+**Bind 阶段：写 Binding**
+
+`defaultbinder.Bind`（`defaultbinder/default_binder.go:52`）：
+```text
+Bind(ctx, state, pod, nodeName)
+├── 构造 v1.Binding{ObjectMeta{ns,name,uid}, Target{Kind:"Node", Name:nodeName}}
+├── APICacher 可用 → APICacher().BindPod(binding) + WaitOnFinish（快路径）
+└── 否则 util.BindPod(ctx, ClientSet(), binding)（POST binding 子资源）
+```
+**关键：** Bind 优先走 `APICacher().BindPod`——通过 apiserver 的 watch 缓存直写，绕过一次 list；不可用时回落到经典 `util.BindPod`（POST `pods/<name>/binding`）。
+
+#### 一次成功调度的三阶段对照
+
+| 阶段 | 插件做什么 | 通过判据 | 失败表现 |
+|---|---|---|---|
+| Filter | 资源够不够、污点容不容忍、亲和匹配不匹配、端口冲不冲突 | 至少一个节点全插件通过 | 全失败 → 触发抢占（§2.6） |
+| Score | 资源均衡度、拓扑、亲和、镜像本地性打分 | 选出最高分节点 | 平分则 tie-break |
+| Bind | 写 Binding（APICacher 快路径或 binding 子资源） | `spec.nodeName` 持久化 | Bind 失败 → 撤销 assume，回队重试 |
+
+**设计要点（源码可证）：**
+1. **Filter 与 Score 分离**：Filter 是硬约束（二值，通过/失败），Score 是软偏好（0-100 连续）。资源够但「不够均衡」的节点不会被 Filter 排除，只在 Score 上失分。
+2. **BalancedAllocation 同时看前后**：不只看「加完 Pod 后多均衡」，还看「加这个 Pod 改善了多少均衡」——避免总是押注同一个最空节点。
+3. **Bind 走缓存快路径**：`APICacher().BindPod` 绕过一次 list，减少 apiserver 读放大；经典路径作回落。
+4. **抢占是 Filter 全失败的兜底**：本节是常态成功路径；抢占（§2.6）只在 Filter 全失败时触发，二者互补覆盖「资源够」与「资源不够」两种场景。
+
 ## 3. 设计意图与验证
 
 ### 3.1 设计意图（代码推断）
