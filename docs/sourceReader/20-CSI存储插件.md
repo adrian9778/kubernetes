@@ -98,6 +98,46 @@ Pod 含 CSI 卷
 CSINode：csi_node_updater(+46) / nodeInfoManager(+110) 维护 NodeID/topology/maxAttachLimit
 ```
 
+### 9b. 一个 CSI 卷的挂载生命周期解剖（第二层补充视角）
+
+CSI 把「把卷交给 Pod 用」拆成 **attach → stage → publish** 三步，分别由**不同组件**负责。本节走一遍这三步，厘清「谁发哪个 gRPC、等什么信号」。以一个 PV（volumeHandle=`vol-123`，driver=`csi.example.com`）挂到 node-1 的 Pod 为例。
+
+**关键前提：kubelet 不做 attach。** `csiAttacher.Attach`（`csi_attacher.go Attach+0`，:63）开头就判 `if _, ok := host.(volume.KubeletVolumeHost); ok` → 返回 `"attaching volumes from the kubelet is not supported"`。attach 由**外部 external-attacher**（通过 VolumeAttachment 对象）完成。
+
+**三步生命周期（谁发哪个 gRPC，等什么信号）：**
+
+| 步 | 组件 | gRPC / API | 等待信号 | 锚点 |
+|---|---|---|---|---|
+| 1. Attach | external-attacher（非 kubelet） | `ControllerPublishVolume` → 写 VolumeAttachment | VolumeAttachment `attached=true` | kubelet 侧 `Attach` 直接拒绝；`WaitForAttach`（:146）只**轮询 VolumeAttachment** |
+| 2. Stage（NodeStage） | kubelet attacher | `NodeStageVolume` | deviceMountPath 出现 | `MountDevice`（:264）→ `NodeStageVolume`（:389） |
+| 3. Publish（NodePublish） | kubelet mounter | `NodePublishVolume` | Pod 目录出现 bind mount | `SetUpAt`（:103）→ `NodePublishVolume`（:301） |
+
+**逐步走读：**
+
+1. **Attach（external-attacher 负责，kubelet 不做）**：`Attach`（:63）在 kubelet 侧直接返回不支持——真正的 attach 由 external-attacher 调 driver 的 `ControllerPublishVolume`，成功后把 VolumeAttachment 的 `status.attached` 置 true。
+2. **WaitForAttach（kubelet 轮询）**：`WaitForAttach`（:146）用 `attachID = getAttachmentName(volumeHandle, driver, node)`（:70）`Get` VolumeAttachment，`verifyAttachmentStatus` 确认 `attached=true`；未就绪则返回错误，由上层 operationExecutor 重试（:174 ～ :175）。
+3. **Stage（`MountDevice`，:264）**：先 `NodeSupportsStageUnstage`（:294 附近）问 driver 是否支持 stage；支持则 `NodeStageVolume`（:389）把卷挂到全局 staging 目录（`deviceMountPath`）——**一个卷多 Pod 共享时只 stage 一次**。
+4. **Publish（`SetUpAt`，:103）**：`NodePublishVolume`（:301）把 staging 目录 bind-mount 进 Pod 目录（`dir`）；每个 Pod 一次。
+
+**卸载是对称的逆序：**
+- **Unpublish**：`TearDownAt`（:437）→ `NodeUnpublishVolume`（卸 Pod 目录 bind mount）→ `removeMountDir`。
+- **Unstage**：最后一个 Pod 卸载后 `UnmountDevice` → `NodeUnstageVolume`（回收 staging 目录）。
+- **Detach**：`Detach`（:419）由 external-attacher 调 `ControllerUnpublishVolume`，清 VolumeAttachment。
+
+**三步对照：**
+
+| 步 | 谁 | gRPC | 粒度 | 等什么 |
+|---|---|---|---|---|
+| Attach | external-attacher | ControllerPublishVolume | 卷 × 节点 | VolumeAttachment.attached=true |
+| Stage | kubelet attacher | NodeStageVolume | 卷 × 节点（全局 staging） | deviceMountPath 挂好 |
+| Publish | kubelet mounter | NodePublishVolume | 卷 × Pod | Pod 目录 bind mount |
+
+**设计要点（源码可证）：**
+1. **attach 与 stage/publish 分离**：attach 是「卷 × 节点」粒度（external-attacher），stage 是「卷 × 节点全局目录」（kubelet），publish 是「卷 × Pod」（kubelet）——三级粒度使多 Pod 共享同一卷时只 stage 一次。
+2. **kubelet 明确不做 attach**：`Attach` 开头拒绝，保证 attach 语义统一由 external-attacher 承担（带 PDB/VolumeAttachment 契约），kubelet 不越权。
+3. **WaitForAttach 只轮询不调 gRPC**：kubelet 侧 attach 状态完全通过 VolumeAttachment 对象观测，不直接问 driver——解耦 kubelet 与 driver 的 attach 责任。
+4. **stage/publish 分离支持 ReadWriteMany**：多 Pod 共享卷只 stage 一次、各 publish 一次，避免重复挂全局目录。
+
 ## 10. 边界
 本仓库只含 kubelet 侧客户端与编排。driver 服务端、external-attacher/provisioner/snapshotter、CDI 实现、CNI/IPAM、运行时内部网络管理均不在本仓库；扩展点全部以 socket/gRPC 接入。
 
