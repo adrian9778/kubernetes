@@ -64,7 +64,7 @@ director.ServeHTTP（按已注册 webservice 分流）
 | `APIGroupVersion` | `[staging] endpoints/groupversion.go:50` | 单个 group/version 的安装输入（Storage map、Creater、converter、根前缀） |
 | `APIInstaller` | `[staging] endpoints/installer.go:63` | 把每个 rest.Storage 的能力接口翻译成一组 go-restful 路由 |
 | `APIServerHandler` | `[staging] apiserver/pkg/server/handler.go:42` | FullHandlerChain + GoRestfulContainer + NonGoRestfulMux + Director 的聚合体 |
-| `director` | `handler.go:115` | 按已注册 webservice 判断，把请求分给 go-restful 或 NonGoRestfulMux |
+| `director` | `director+0` | 按已注册 webservice 判断，把请求分给 go-restful 或 NonGoRestfulMux |
 | `PodStorage` | `pkg/registry/core/pod/storage/storage.go:58` | Pod 主资源与全部子资源的 RESTStorage 集合 |
 
 ---
@@ -296,7 +296,7 @@ DefaultBuildHandlerChain 只搭好 filter 顺序；本节下钻到「一次请�
 2. kubeAPIServer       = KubeAPIs.New(apiExtensionsServer.GenericAPIServer)  ← delegate = 扩展层
 3. aggregatorServer    = CreateAggregatorServer(..., kubeAPIServer.GenericAPIServer, ...)  ← delegate = 核心层
 ```
-**关键：** 每层的 `NewHandler` 把 `nonGoRestfulMux.NotFoundHandler` 设为下一层的入口（handler.go:75-76）——即「本层 go-restful + NonGoRestfulMux 都不认的路径，交给 delegate」。对外唯一入口是**最外层的 aggregatorServer**。
+**关键：** 每层的 `NewHandler` 把 `nonGoRestfulMux.NotFoundHandler` 设为下一层的入口（`NewAPIServerHandler+2~+3`）——即「本层 go-restful + NonGoRestfulMux 都不认的路径，交给 delegate」。对外唯一入口是**最外层的 aggregatorServer**。
 
 **一个请求的三种落点：**
 
@@ -379,7 +379,7 @@ apiExtensionsServer（第三层）
 **源码：** `[staging] endpoints/installer.go` `restfulCreateResource` +0（:1307）
 **语义修正：** 由**方法**改为**包级函数** `func restfulCreateResource(r rest.Creater, scope handlers.RequestScope, admit admission.Interface) restful.RouteFunction`。
 **职责：** 适配函数：返回的 RouteFunction 直接调用 `handlers.CreateResource(r, &scope, admit)`（+1 ～ +3，请求处理细节在下一篇 06）。
-**调用点：** `installer.go:928`（POST 分支），非 namedCreater 路径；namedCreater 走 `restfulCreateNamedResource`（:1301）。
+**调用点：** `(*APIInstaller).registerResourceHandlers+640`（POST 分支），非 namedCreater 路径；namedCreater 走 `restfulCreateNamedResource`（:1301）。
 
 ---
 

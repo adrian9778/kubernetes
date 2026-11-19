@@ -12,7 +12,7 @@
 ### 0.1 informer 作为生产组件
 | 行为 | 说明 |
 |---|---|
-| 启动 | `Run(stopCh)` 仅转调 `RunWithContext(wait.ContextForChannel(stopCh))`（shared_informer.go :894-895，Run 定义 :893）；重复启动被拒绝并告警（RunWithContext +4～+8，:901-904） |
+| 启动 | `Run(stopCh)` 仅转调 `RunWithContext(wait.ContextForChannel(stopCh))`（`s.Run+1`，定义 `s.Run+0`）；重复启动被拒绝并告警（`s.RunWithContext+4~+8`） |
 | 同步完成信号 | `HasSynced()` 在首次全量 List 完成后才返回 true；`HasSyncedChecker().Done()` 是无需轮询的等待入口 |
 | 缓存读 | `GetIndexer()` 返回进程内只读 indexer；lister 查询不打 apiserver |
 | 事件注册 | `AddEventHandler` 返回 `ResourceEventHandlerRegistration`，`RemoveEventHandler`/`ShutDownEventHandler` 可注销并阻塞至事件处理完 |
