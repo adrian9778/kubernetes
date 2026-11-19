@@ -286,6 +286,47 @@ DefaultBuildHandlerChain 只搭好 filter 顺序；本节下钻到「一次请�
 3. 未匹配 → `nonGoRestfulMux.ServeHTTP`（+31 ～ +32）
 **存在原因（注释可证，:53-64）：** go-restful 的 `/apis` webservice 会强制对非 discovery 请求 404，破坏委托链；director 先自省路径再决定路由，解决 fallthrough。
 
+### 4.3c 三层委托链请求流走读（第二层补充视角）
+
+`CreateServerChain` 构造的三个 server 是**层层委托**关系：每层的 `NonGoRestfulMux` 未命中时回落到下一层。本节走一个请求，看它如何穿过这三层。
+
+**委托链的构造顺序（`CreateServerChain`，:189）：**
+```text
+1. apiExtensionsServer = ApiExtensions.New(空 delegate + notFoundHandler)
+2. kubeAPIServer       = KubeAPIs.New(apiExtensionsServer.GenericAPIServer)  ← delegate = 扩展层
+3. aggregatorServer    = CreateAggregatorServer(..., kubeAPIServer.GenericAPIServer, ...)  ← delegate = 核心层
+```
+**关键：** 每层的 `NewHandler` 把 `nonGoRestfulMux.NotFoundHandler` 设为下一层的入口（handler.go:75-76）——即「本层 go-restful + NonGoRestfulMux 都不认的路径，交给 delegate」。对外唯一入口是**最外层的 aggregatorServer**。
+
+**一个请求的三种落点：**
+
+| 请求路径 | 第一跳（aggregator） | 第二跳（kubeAPIServer） | 第三跳（apiExtensions） |
+|---|---|---|---|
+| `/api/v1/namespaces/default/pods` | NonGoRestfulMux 未注册 `/api/v1/...`（聚合 API 才注册）→ 回落 delegate | go-restful 命中 `pods` → `Store.Create` → etcd | 不会到达 |
+| `/apis/apps/v1/deployments` | 非 aggregated APIService → 回落 delegate | go-restful 命中 `deployments` | 不会到达 |
+| `/apis/customresourcedefinitions...` | 未注册 → 回落 delegate | NonGoRestfulMux 未注册 → 回落 delegate | crdHandler 命中 `/apis` → 懒分发（见篇 17） |
+| `/apis/<aggregated-group>/v1/...` | APIService 已注册 → proxyHandler 反向代理到后端 Service | 不会到达 | 不会到达 |
+
+**走读一次 `/api/v1/pods` 请求穿过三层：**
+```text
+客户端 → aggregatorServer（最外层入口）
+  ↓ FullHandlerChain（认证/鉴权/APF，见 §DefaultBuildHandlerChain）
+  ↓ director.ServeHTTP：遍历 go-restful webservices，aggregator 只注册了 APIService 相关路径
+  ↓ 非 aggregated 路径 → nonGoRestfulMux → NotFoundHandler = kubeAPIServer 入口
+kubeAPIServer（第二层）
+  ↓ FullHandlerChain（第二次认证/鉴权/APF）
+  ↓ director.ServeHTTP：go-restful 命中 pods webservice → Store.Create → etcd
+  ↓ （若是 CRD 路径）nonGoRestfulMux → NotFoundHandler = apiExtensionsServer 入口
+apiExtensionsServer（第三层）
+  ↓ crdHandler.ServeHTTP → 懒分发 → customresource NewStorage
+```
+
+**设计要点（源码可证）：**
+1. **构造顺序与委托方向相反**：`CreateServerChain` 先建最内层（apiExtensions，delegate 为空+notFoundHandler），再建核心层（delegate=扩展层），最后建聚合层（delegate=核心层）——使聚合层成为对外唯一入口，未匹配时逐层回落。
+2. **每层独立 FullHandlerChain**：请求穿过聚合层、核心层时会**各过一次**认证/鉴权/APF（每层有自己的 handler chain）——这是「聚合 API 请求被认证两次」的根因，也是 APF 并发席位可能被计两次的原因。
+3. **director 解决 go-restful `/apis` 404 破坏委托链**：go-restful 的 `/apis` webservice 会对非 discovery 请求强制 404；director 先自省路径，只在确认 go-restful 能处理时才 `Dispatch`，否则交给 NonGoRestfulMux 回落 delegate（director.ServeHTTP 注释 :53-64）。
+4. **CRD 走 NonGoRestfulMux 而非 go-restful**：CRD 不经 go-restful 路由，crdHandler 注册在 NonGoRestfulMux 的 `/apis` 前缀——这是「CR 实例与内置资源走不同路由机制」的根因（见篇 17）。
+
 ### 函数：(*GenericAPIServer).InstallLegacyAPIGroup / installAPIResources
 
 **源码：** `[staging] apiserver/pkg/server/genericapiserver.go` `InstallLegacyAPIGroup` +0（:885）／`installAPIResources` +0（:820）
