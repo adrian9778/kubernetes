@@ -1,0 +1,202 @@
+{
+  "units": [
+    {
+      "id": "00",
+      "file": "00-文档说明与约定.md",
+      "layer": "—",
+      "title": "文档说明与约定",
+      "scope": "全库元信息：基准、范围、定位规则、分支差异、术语",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "01",
+      "file": "01-系统骨架.md",
+      "layer": "第一层",
+      "title": "系统骨架",
+      "scope": "cmd/kube-apiserver,kube-scheduler,kube-controller-manager,kubelet,kube-proxy,kubeadm + 各组件进程入口与模块职责",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "02",
+      "file": "02-kubectl-run全路径走读.md",
+      "layer": "第二层",
+      "title": "kubectl run 全路径走读",
+      "scope": "kubectl run 裸 Pod 成功场景：客户端→apiserver→etcd→scheduler→kubelet→CRI→状态回报",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "03",
+      "file": "03-主链路逐步拆解.md",
+      "layer": "第三层",
+      "title": "主链路逐步拆解",
+      "scope": "五段逐跳：参数转换、内部动作、状态变化与错误传播",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "04",
+      "file": "04-kubectl客户端.md",
+      "layer": "第四层",
+      "title": "kubectl 客户端",
+      "scope": "staging/src/k8s.io/kubectl + client-go REST 请求发出",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "05",
+      "file": "05-apiserver启动与路由.md",
+      "layer": "第四层",
+      "title": "apiserver 启动与路由",
+      "scope": "cmd/kube-apiserver + pkg/server 启动链、中间件链、路由生成",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "06",
+      "file": "06-apiserver请求处理与etcd.md",
+      "layer": "第四层",
+      "title": "apiserver 请求处理与 etcd",
+      "scope": "pkg/registry + apiserver REST 存储、createHandler、etcd3 写入",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "07",
+      "file": "07-scheduler调度与绑定.md",
+      "layer": "第四层",
+      "title": "scheduler 调度与绑定",
+      "scope": "pkg/scheduler 调度框架、ScheduleOne、过滤打分、assume/bind",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "08",
+      "file": "08-controller副本控制.md",
+      "layer": "第四层",
+      "title": "controller 副本控制",
+      "scope": "pkg/controller/replicaset 控制器函数级",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "09",
+      "file": "09-kubelet同步循环.md",
+      "layer": "第四层",
+      "title": "kubelet 同步循环",
+      "scope": "pkg/kubelet 主循环、PodConfig 三源、podWorkers、PLEG、statusManager",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "10",
+      "file": "10-kubelet-CRI运行时.md",
+      "layer": "第四层",
+      "title": "kubelet CRI 运行时",
+      "scope": "pkg/kubelet/kuberuntime SyncPod、CRI gRPC 客户端",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "11",
+      "file": "11-informer与workqueue机制.md",
+      "layer": "第四层",
+      "title": "informer 与 workqueue",
+      "scope": "staging/src/k8s.io/client-go/tools/cache + util/workqueue 泛型",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "12",
+      "file": "12-deployment控制器.md",
+      "layer": "第四层",
+      "title": "Deployment 控制器",
+      "scope": "pkg/controller/deployment 滚动/回滚/状态",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "13",
+      "file": "13-job与cronjob控制器.md",
+      "layer": "第四层",
+      "title": "Job 与 CronJob 控制器",
+      "scope": "pkg/controller/job + cronjob 周期调度",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "14",
+      "file": "14-daemonset控制器.md",
+      "layer": "第四层",
+      "title": "DaemonSet 控制器",
+      "scope": "pkg/controller/daemonset 节点映射与 surge 更新",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "15",
+      "file": "15-garbage-collector垃圾回收.md",
+      "layer": "第四层",
+      "title": "Garbage Collector",
+      "scope": "pkg/controller/garbagecollector 依赖图与级联删除",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "16",
+      "file": "16-kube-proxy网络代理.md",
+      "layer": "第四层",
+      "title": "kube-proxy 网络代理",
+      "scope": "pkg/proxy + cmd/kube-proxy iptables/ipvs",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "17",
+      "file": "17-CRD扩展与聚合层.md",
+      "layer": "第四层",
+      "title": "CRD 扩展与聚合层",
+      "scope": "staging/src/k8s.io/apiextensions-apiserver + kube-aggregator",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "18",
+      "file": "18-cloud-controller-manager.md",
+      "layer": "第四层",
+      "title": "cloud-controller-manager",
+      "scope": "cmd/cloud-controller-manager + pkg/controller/cloud + cloud-provider 接口",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "19",
+      "file": "19-kubeadm集群引导.md",
+      "layer": "第四层",
+      "title": "kubeadm 集群引导",
+      "scope": "cmd/kubeadm + staging/src/k8s.io/kubeadm 工作流",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "20",
+      "file": "20-CSI存储插件.md",
+      "layer": "第四层",
+      "title": "CSI 存储插件",
+      "scope": "pkg/kubelet/pluginmanager + volumemanager + csi 插件",
+      "status": "completed",
+      "phase": "completed"
+    },
+    {
+      "id": "21",
+      "file": "21-设备插件与网络边界.md",
+      "layer": "第四层",
+      "title": "设备插件与网络边界",
+      "scope": "pkg/kubelet/deviceplugin + kubelet CNI 边界",
+      "status": "completed",
+      "phase": "completed"
+    }
+  ]
+}
