@@ -249,6 +249,60 @@ DaemonSet 滚动更新的核心是：**每个节点上「保留哪个 Pod、删�
 **源码：** `update.go:46`
 **职责：** 滚动更新的删除节奏。当 `maxSurge == 0` 时按 `maxUnavailable` 挑出可替换的旧 Pod 删除（不可用旧 Pod 优先、否则按候选数），让核心循环在相应节点创建新 Pod；surge 路径由 `updatedDesiredNodeCounts`（update.go:590）计算上下限。
 
+#### rollingUpdate 两分支深度拆解（第二层补充视角）
+
+DaemonSet 滚动更新有两条分支：**maxSurge == 0**（先删后建，无 surge）与 **maxSurge > 0**（先建后删，有 surge）。本节走一遍这两条分支，看每轮 reconcile 如何推进滚动更新。
+
+**rollingUpdate（update.go:46）入口：**
+```text
+rollingUpdate (+0)
+├── getNodesToDaemonPods（:49）→ 按 node 分组当前 Pod
+├── updatedDesiredNodeCounts（:52）→ 算 maxSurge/maxUnavailable/desiredNumberScheduled
+└── maxSurge == 0 ?
+     ├── 是 → 删分支（删旧 Pod，让核心循环建新）
+     └── 否 → surge 分支（建新 Pod，最多 maxSurge 个）
+```
+
+**分支一：maxSurge == 0（先删后建，:62 ～ :126）**
+```text
+逐节点 findUpdatedPodsOnNode（update.go:272）区分 newPod/oldPod
+├── oldPod == nil && newPod == nil，或都存在 → numUnavailable++（跳过）
+├── newPod != nil：
+│    └── !IsPodAvailable(newPod) → numUnavailable++（新 Pod 不可用占预算）
+├── oldPod != nil（更新候选）：
+│    ├── !IsPodAvailable(oldPod) → 加入 allowedReplacementPods + numUnavailable++
+│    │     （旧 Pod 不可用，优先替换，不计入预算）
+│    ├── numUnavailable >= maxUnavailable → continue（无预算）
+│    └── 否则 → 加入 candidatePodsToDelete（可替换候选）
+└── remainingUnavailable = maxUnavailable - numUnavailable
+     oldPodsToDelete = allowedReplacementPods + candidatePodsToDelete[:remainingUnavailable]
+     → syncNodes(ds, oldPodsToDelete, nil, hash)
+```
+**关键：** 先删旧 Pod，让核心循环（manage）在相应节点建新 Pod——**不 surge，节点上不会短暂出现 2 个 Pod**。
+
+**分支二：maxSurge > 0（先建后删，:126 起）**
+```text
+surge 分支：允许节点上短暂出现 2 个 Pod（一个旧、一个新）
+├── 建：manage 循环在无 Pod 或只有旧 Pod 的节点建新 Pod（最多 maxSurge 个）
+└── 删：旧 Pod 在新 Pod Available 后才删（surge 节点内决策，见 §surge 深度拆解）
+```
+
+**两分支对照：**
+
+| 维度 | maxSurge == 0（先删后建） | maxSurge > 0（先建后删） |
+|---|---|---|
+| 节点上 Pod 上限 | 恒 1 | 短暂 2（新旧各一） |
+| 删旧 Pod 时机 | 建 new 前先删 old | new Available 后才删 old |
+| 更新期间可用性 | 每节点有中断窗口 | 尽量保持至少一个可用 Pod |
+| 不可用预算 | numUnavailable 计数 | maxSurge 控制额外 Pod 数 |
+| 候选排序 | 不可用旧 Pod 优先，否则按候选数 | manage 循环按节点建新 Pod |
+
+**设计要点（源码可证）：**
+1. **maxSurge == 0 优先删不可用旧 Pod**：`!IsPodAvailable(oldPod)` 的旧 Pod 加入 `allowedReplacementPods`，不计入 `numUnavailable`——因为它们已经不可用，删掉不会增加不可用数（rollingUpdate :100 ～ :110）。
+2. **candidatePodsToDelete 受 remainingUnavailable 限制**：`remainingUnavailable = maxUnavailable - numUnavailable`，最多删这么多健康旧 Pod（:120 ～ :125）——避免一次性删太多健康 Pod。
+3. **surge 由 manage 循环建新 Pod**：surge 分支不直接建 Pod，而是让 manage 循环建（`podsShouldBeOnNode` 判定），rollingUpdate 只负责删旧 Pod——职责分离。
+4. **deleted pods 不计 unavailable**：注释（:71）明确「Deleted pods do not count as unavailable so that updates make progress when nodes are down」——节点 down 时更新仍能推进。
+
 ### 函数：constructHistory / cleanupHistory（update.go）
 
 **源码：** `update.go:299` / `:356`
