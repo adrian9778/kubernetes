@@ -68,6 +68,7 @@ flowchart TD
 | [kube-proxy 规则生成](topics/kube-proxy规则生成.md) | kube-proxy 规则生成 | 事件回调→changes 缓存→BoundedFrequencyRunner 限频 Sync→syncProxyRules 全量重建 iptables 三级链（KUBE-SERVICES/SVC/SEP）概率负载均衡，iptables-restore 原子下发；ipvs/nftables 同构定位 |
 | [ReplicaSet 副本控制](topics/replicaset副本控制.md) | ReplicaSet 副本控制（基础控制器范式） | informer→queue→worker→syncReplicaSet→manageReplicas：expectations 抑制、slowStartBatch 指数批量创建、getPodsToDelete 删除优先级、calculateStatus 回写 |
 | [Job 与 CronJob 周期调度](topics/job与cronjob周期调度.md) | Job/CronJob 周期调度 | Job：syncJob+tracking finalizer 精确计数+manageJob+backoff；CronJob：syncCronJob 周期调度（mostRecentScheduleTime）+并发策略 Allow/Forbid/Replace |
+| [CRD 建立与懒分发](topics/CRD建立与懒分发.md) | CRD 动态注册与懒分发 | crdHandler 注册 NonGoRestfulMux /apis→ServeHTTP 分发→getOrCreateServingInfoFor 懒安装（atomic.Value 缓存）；establish 控制器置 Established；CRD 清理 finalizer |
 
 新增专题：在 `topics/` 下建 `中文名.md`，按单篇专题骨架（先总结、再生产、再开发、末验证）写，并在本表追加一行。
 
