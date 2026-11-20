@@ -61,6 +61,7 @@ flowchart TD
 | [kubelet 探针机制](topics/kubelet探针机制.md) | kubelet 探针 | prober_manager→worker→doProbe→prober：HTTP/TCP/exec/gRPC 探测、阈值判定、容器重启与 readiness |
 | [API Server 全景](topics/api-server.md) | kube-apiserver 全链路 | 三层委托链（aggregator→kubeAPIServer→apiextensions）装配、路由注册、40+ 层中间件链、CRUD handlers、etcd3 storage/加密、watch cache、聚合代理、discovery |
 | [workqueue 机制](topics/workqueue机制.md) | client-go workqueue | 基础队列（Add/Get/Done 去重+脏标记）+ delaying（AddAfter 延迟）+ rate-limiting（指数退避重试）三层包装 |
+| [scheduler 过滤打分框架](topics/scheduler过滤打分框架.md) | kube-scheduler 调度周期 | SchedulePod 两阶段：PreFilter→Filter（并行逐节点）→PostFilter、PreScore→Score（分×权重选节点）；10 个扩展点接口 |
 
 新增专题：在 `topics/` 下建 `中文名.md`，按单篇专题骨架（先总结、再生产、再开发、末验证）写，并在本表追加一行。
 
