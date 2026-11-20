@@ -74,6 +74,7 @@ flowchart TD
 | [etcd watch 链路](topics/etcd-watch链路.md) | 服务端 watch 实时推送 | etcd3 watcher.Watch→watchChan（sync 先全量后 startWatching 增量、processEvents 背压不丢事件）→Cacher 共享内存 buffer→apiserver watch handler 流式推客户端 |
 | [admission webhook](topics/admission-webhook.md) | admission webhook 扩展点 | mutating（Admit→Dispatch→callAttrMutatingHook 应用 JSON Patch）+ validating（Validate→Dispatch allow/deny）；两种触发（内联 Admit / storage 写内 AdmissionToValidateObjectFunc）；fail-open/closed |
 | [aggregator 代理转发](topics/aggregator代理转发.md) | kube-aggregator 代理转发 | proxyHandler.ServeHTTP 五个早退守卫（local/不可用/transport 错/缺用户）→ResolveEndpoint 后端解析→NewAuthProxyRoundTripper 身份透传→NewUpgradeAwareHandler 转发；transport 复用 |
+| [CRD conversion webhook](topics/CRD-conversion-webhook.md) | CRD 多版本转换 | 转换器工厂按策略分派（nopConverter/webhookConverter）→webhookConverter.Convert（getObjectsToConvert batch 打包→webhook /convert→validateConvertedObject 校验）→safeConverterWrapper 防御性拷贝 |
 
 新增专题：在 `topics/` 下建 `中文名.md`，按单篇专题骨架（先总结、再生产、再开发、末验证）写，并在本表追加一行。
 
