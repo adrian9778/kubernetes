@@ -33,25 +33,25 @@
 |---|---|
 | 模块 | `[staging] k8s.io/client-go/tools/cache`（shared_informer、controller、reflector、delta_fifo、indexer） |
 | 队列 | `[staging] k8s.io/client-go/util/workqueue`（queue、delaying、rate_limiting） |
-| 对外接口 | `SharedInformer`/`SharedIndexInformer`（AddEventHandler、Run、HasSynced、GetIndexer）、workqueue 的 `TypedInterface[T]`（queue.go:30） |
+| 对外接口 | `SharedInformer`/`SharedIndexInformer`（AddEventHandler、Run、HasSynced、GetIndexer）、workqueue 的 `TypedInterface[T]`（queue.go `TypedInterface[T]+0`，:30） |
 | 数据流（informer） | Reflector List/Watch → DeltaFIFO → processLoop Pop → handleDeltas → indexer 更新 + OnAdd/Update/Delete → processor 分发监听者 |
 | 数据流（控制器侧） | informer 事件回调 → keyFunc → workqueue.Add → worker Get → syncHandler → Done/Forget/AddRateLimited |
 
 ## 2. 类型级
 | 类型 | 文件 | 职责 |
 |---|---|---|
-| `sharedIndexInformer` | `cache/shared_informer.go:753` | 组合 Reflector 控制器、indexer、processor、mutation detector |
-| `controller` | `cache/controller.go:117` | Reflector + processLoop 的驱动器 |
-| `Reflector` | `cache/reflector.go:106` | 执行 ListAndWatch，把对象写入 DeltaFIFO |
-| `DeltaFIFO` | `cache/delta_fifo.go:108` | 按对象 key 聚合 Delta（Added/Updated/Deleted/Sync）的 FIFO |
-| `sharedProcessor` | `cache/shared_informer.go:1221` | 管理监听者并分发 notification（含 resync 专用通道） |
-| `Typed[T]` | `workqueue/queue.go:208` | 泛型队列：`queue`（待处理集合）、`dirty`（已 Add 未处理）、`processing`（处理中）；**workqueue 下无 typed.go，泛型定义与 `Type = Typed[any]`（:206）、`TypedInterface[T]`（:30）均在 queue.go** |
-| `TypedRateLimitingInterface[T]` | `workqueue/rate_limiting_queue.go:30` | Typed + Delaying + rate limiter 的组合接口 |
+| `sharedIndexInformer` | `cache/shared_informer.go sharedIndexInformer+0`（:753） | 组合 Reflector 控制器、indexer、processor、mutation detector |
+| `controller` | `cache/controller.go controller+0`（:117） | Reflector + processLoop 的驱动器 |
+| `Reflector` | `cache/reflector.go Reflector+0`（:106） | 执行 ListAndWatch，把对象写入 DeltaFIFO |
+| `DeltaFIFO` | `cache/delta_fifo.go DeltaFIFO+0`（:108） | 按对象 key 聚合 Delta（Added/Updated/Deleted/Sync）的 FIFO |
+| `sharedProcessor` | `cache/shared_informer.go sharedProcessor+0`（:1221） | 管理监听者并分发 notification（含 resync 专用通道） |
+| `Typed[T]` | `workqueue/queue.go Typed[T]+0`（:208） | 泛型队列：`queue`（待处理集合）、`dirty`（已 Add 未处理）、`processing`（处理中）；**workqueue 下无 typed.go，泛型定义与 `Type = Typed[any]`（:206）、`TypedInterface[T]`（:30）均在 queue.go** |
+| `TypedRateLimitingInterface[T]` | `workqueue/rate_limiting_queue.go TypedRateLimitingInterface[T]+0`（:30） | Typed + Delaying + rate limiter 的组合接口 |
 
 ## 3. Informer 函数级
 
 ### 函数：(*sharedIndexInformer).Run / RunWithContext
-**源码：** `cache/shared_informer.go:893 / :897`
+**源码：** `cache/shared_informer.go s.Run+0 / s.RunWithContext+0`（:893 / :897）
 **职责：** 启动 informer 全套管线；`Run` 仅分派到 `RunWithContext(wait.ContextForChannel(stopCh))`（:894-895）。重复 Run 直接告警返回（+4 ～ +8）。
 **执行流程：**
 ```text
@@ -69,7 +69,7 @@ RunWithContext (+0)
 **停止顺序（注释 :934-936）：** controller 先停，processor 后停，避免监听器收到半截事件。
 
 ### 函数：(*controller).RunWithContext
-**源码：** `cache/controller.go:172`
+**源码：** `cache/controller.go c.RunWithContext+0`（:172）
 **执行流程：**
 1. ctx 取消时自动 `Queue.Close()`（+4，:176）
 2. 构造 Reflector（+7 ～ +18，:179-190）：绑定 ListerWatcher、Queue、resync 周期、错误处理器（`r.ShouldResync`/`WatchListPageSize`/watchErrorHandler 在 +19～+28 装配）
@@ -79,7 +79,7 @@ RunWithContext (+0)
 **关键关系：** Reflector 是唯一生产者（写 FIFO），processLoop 是唯一消费者。
 
 ### 函数：(*controller).processLoop
-**源码：** `cache/controller.go:238`
+**源码：** `cache/controller.go c.processLoop+0`（:238）
 **职责：** 循环 Pop FIFO 并交给 config.Process；支持 batch 处理（+1 ～ +5，:239-243）。
 ```text
 processLoop (+0)
@@ -94,7 +94,7 @@ processLoop (+0)
 **并发约束（注释 :235-237）：** 当前串行处理，并行化需防止同一对象并发处理。
 
 ### 函数：(*DeltaFIFO).Pop
-**源码：** `cache/delta_fifo.go:563`
+**源码：** `cache/delta_fifo.go f.Pop+0`（:563）
 **职责：** 阻塞取一个 key 的全部 Deltas，传给 process；process 成功（含 ErrRequeue 语义）才从队列移除，失败保留重试。
 **实现要点：** 队列空时 `cond.Wait`（:575）；`closed` 时返回 `ErrFIFOClosed`（:572）；首次同步前取项标记 `isInInitialList`（:577）。
 
@@ -132,12 +132,12 @@ DeltaFIFO 与普通 FIFO 的本质区别：**队列元素不是对象，而是�
 4. **所有权转移**：Pop 弹出的 `Deltas` 直接交给 process（:615 ～ +616 无 copy），避免大对象深拷贝。
 
 ### 函数：(*sharedIndexInformer).handleDeltas / handleBatchDeltas
-**源码：** `cache/shared_informer.go:1124 / :1134`
-**职责：** 加 blockDeltas 锁（+1～+3，:1125-1126），调包级 `processDeltas`（controller.go:827）；batch 版本调 `processDeltasInBatch`（controller.go:903）。
+**源码：** `cache/shared_informer.go s.handleDeltas+0 / s.handleBatchDeltas+0`（:1124 / :1134）
+**职责：** 加 blockDeltas 锁（+1～+3，:1125-1126），调包级 `processDeltas+0`（controller.go :827）；batch 版本调 `processDeltasInBatch+0`（controller.go :903）。
 **锁语义：** distribute 在 blockDeltas 保护下执行，通知分发与状态更新原子交错。
 
 ### 函数：OnAdd / OnUpdate / OnDelete
-**源码：** `cache/shared_informer.go:1141 / :1149 / :1171`
+**源码：** `cache/shared_informer.go s.OnAdd+0 / s.OnUpdate+0 / s.OnDelete+0`（:1141 / :1149 / :1171）
 **职责：** mutation detector 记录后经 processor.distribute 分发：
 - OnAdd（:1141）：`cacheMutationDetector.AddObject(obj)` → `distribute(addNotification{newObj: obj, isInInitialList: isInInitialList}, false)`（+3～+5，:1144-1145），对全部监听者广播
 - OnUpdate（:1149）：计算 `isSync`（RV 未变化即 resync，+7～+13，:1156-1161），`distribute(updateNotification{oldObj: old, newObj: new}, isSync)`，只投递给接受 resync 的监听者
@@ -155,18 +155,18 @@ DeltaFIFO 与普通 FIFO 的本质区别：**队列元素不是对象，而是�
 | 序 | 环节 | 符号 | 做什么 |
 |---|---|---|---|
 | 1 | etcd watch 回调 | etcd → `wres.Events` | etcd 推送一个 `EventTypePut` 事件（key=`/registry/pods/default/nginx`） |
-| 2 | parseEvent | `event.go:66` | 转成内部 `event{key, value, rev, isCreated=true}` |
-| 3 | DeltaFIFO.Add | `delta_fifo.go:387` → `queueActionLocked(Added, obj)` | 追加 `Delta{Added, obj}` 到 `items[key]`，key 入 `queue` |
-| 4 | DeltaFIFO.Pop | `delta_fifo.go:563` | 弹出 `Deltas`（含一个 Added Delta） |
-| 5 | handleDeltas | `shared_informer.go:1124` | 调 `processDeltas`（controller.go:827） |
-| 6 | processDeltas | `controller.go:827` | `Sync/Replaced/Added/Updated` 分支：`clientState.Get` 查旧对象 → 不存在 → `clientState.Add` + `handler.OnAdd(obj, isInInitialList)` |
-| 7 | OnAdd | `shared_informer.go:1141` | mutation detector 记录 → `distribute(addNotification, false)` |
+| 2 | parseEvent | `etcd3/event.go parseEvent+0`（:66） | 转成内部 `event{key, value, rev, isCreated=true}` |
+| 3 | DeltaFIFO.Add | `delta_fifo.go f.Add+0`（:387） → `queueActionLocked(Added, obj)` | 追加 `Delta{Added, obj}` 到 `items[key]`，key 入 `queue` |
+| 4 | DeltaFIFO.Pop | `delta_fifo.go f.Pop+0`（:563） | 弹出 `Deltas`（含一个 Added Delta） |
+| 5 | handleDeltas | `shared_informer.go s.handleDeltas+0`（:1124） | 调 `processDeltas+0`（controller.go :827） |
+| 6 | processDeltas | `controller.go processDeltas+0`（:827） | `Sync/Replaced/Added/Updated` 分支：`clientState.Get` 查旧对象 → 不存在 → `clientState.Add` + `handler.OnAdd(obj, isInInitialList)` |
+| 7 | OnAdd | `shared_informer.go s.OnAdd+0`（:1141） | mutation detector 记录 → `distribute(addNotification, false)` |
 | 8 | distribute | `shared_informer.go`（distribute） | 投递给**所有** listener（非 sync 事件） |
-| 9 | processorListener.add | `shared_informer.go:1495` | 写 `addCh`（阻塞，慢监听者背压） |
-| 10 | processorListener.run | `shared_informer.go:1610` 附近 | `handler.OnAdd(newObj, isInInitialList)` |
+| 9 | processorListener.add | `shared_informer.go p.add+0`（:1495） | 写 `addCh`（阻塞，慢监听者背压） |
+| 10 | processorListener.run | `shared_informer.go p.run+0`（:1536） | `handler.OnAdd(newObj, isInInitialList)`（p.run+31，:1567） |
 | 11 | 控制器 handler | 控制器的 OnAdd | keyFunc 算 key → workqueue.Add → worker 调谐 |
 
-**processDeltas 的关键分支（controller.go:827）：**
+**processDeltas 的关键分支（`controller.go processDeltas+0`，:827）：**
 ```text
 processDeltas (从 oldest 到 newest 遍历 Deltas)
 ├── ReplacedAll → processReplacedAllInfo（替换全部）
@@ -194,11 +194,11 @@ processDeltas (从 oldest 到 newest 遍历 Deltas)
 ## 4. Workqueue 函数级
 
 ### 函数：NewTyped / NewTypedWithConfig
-**源码：** `workqueue/queue.go:127 / :143`
+**源码：** `workqueue/queue.go NewTyped+0 / NewTypedWithConfig+0`（:127 / :143）
 **职责：** 初始化三集合（queue/dirty/processing）、metrics 与 cond；`NewTyped` 用空配置调 `NewTypedWithConfig`（:128-130），后者经 `newQueueWithConfig`（:158）落 `newQueue`（:180）。
 
 ### 函数：(*Typed[T]).Add
-**源码：** `workqueue/queue.go:246`
+**源码：** `workqueue/queue.go q.Add+0`（:246）
 **职责：** 去并入队。
 **执行流程：**
 1. 加锁；shuttingDown 时忽略（+3，:249）
@@ -209,22 +209,22 @@ processDeltas (从 oldest 到 newest 遍历 Deltas)
 **去重语义：** 处理前任意次 Add 合并为一次；处理中的 Add 保证处理完后再入队一次。
 
 ### 函数：(*Typed[T]).Get
-**源码：** `workqueue/queue.go:284`
+**源码：** `workqueue/queue.go q.Get+0`（:284）
 **职责：** 阻塞取出一个待处理项。
 **内部动作：** queue 空且未关闭时 cond.Wait（+4，:288）；Pop 后插入 processing、从 dirty 删除（+12～+16，:296-301）。
 **shutdown 语义：** 队列排空后返回 shutdown=true，worker 据此退出。
 
 ### 函数：(*Typed[T]).Done
-**源码：** `workqueue/queue.go:309`
+**源码：** `workqueue/queue.go q.Done+0`（:309）
 **职责：** 标记处理完成。
 **关键分支：** item 处理期间再次变脏（dirty 命中）→ 重新 Push 并 Signal（+6～+11，:315-320）；否则 processing 清空时 Signal 供关闭等待（+9～+11，:319-321）。
 
 ### 函数：AddAfter / Delaying queue
-**源码：** `workqueue/delaying_queue.go:280`（`(*delayingType[T]).AddAfter`；`TypedDelayingInterface` :37）
+**源码：** `workqueue/delaying_queue.go q.AddAfter+0`（:280）（`(*delayingType[T]).AddAfter`；`TypedDelayingInterface[T]+0` :37）
 **职责：** item 与 readyAt 放入堆，后台 goroutine 到点转入主队列；控制器用它做延迟重试与周期性兜底。shutting down 直接忽略（+2～+4，:282-284），duration ≤ 0 立即 `Add`（+9～+12，:289-292）。
 
 ### 函数：AddRateLimited / Forget（rate_limiting_queue.go）
-**源码：** `workqueue/rate_limiting_queue.go:157 / :165`（`NewTypedRateLimitingQueue` :86）
+**源码：** `workqueue/rate_limiting_queue.go q.AddRateLimited+0 / q.Forget+0`（:157 / :165）（`NewTypedRateLimitingQueue+0` :86）
 **职责：** `AddRateLimited` 按 rate limiter（默认指数+上限）计算延迟并 `AddAfter`（+1～+2，:157-159）；成功处理后 `Forget` 清除该 item 的失败记录（+1，:165-167）。ReplicaSet 等控制器的失败重试即此路径。
 
 ## 5. 两条机制如何拼合
@@ -250,8 +250,8 @@ flowchart LR
 | dirty/processing 双集合 | 去重且不丢失"处理期间发生的变化" |
 | rate limiting | 失败指数退避，成功后 Forget 重置 |
 | resync（isSync） | 周期把缓存对象重投给需要的监听者，驱动纯声明式兜底调谐 |
-| batch 处理（FeatureGate） | `InOrderInformersBatchProcess` 开启且 Queue 实现 `QueueWithBatch` 时，processLoop 走 `PopBatch`/`processDeltasInBatch`（controller.go:240-243、:903） |
-| processor 停止顺序 | `context.WithoutCancel` 使 processor 只随自身 stop 原因退出，严格在 controller 之后停止（shared_informer.go:937） |
+| batch 处理（FeatureGate） | `InOrderInformersBatchProcess` 开启且 Queue 实现 `QueueWithBatch` 时，processLoop 走 `PopBatch`/`processDeltasInBatch`（`c.processLoop+2~+5`，controller.go :240-243；`processDeltasInBatch+0`，:903） |
+| processor 停止顺序 | `context.WithoutCancel` 使 processor 只随自身 stop 原因退出，严格在 controller 之后停止（`s.RunWithContext+40`，shared_informer.go :937） |
 
 ## 7. 设计意图与验证
 **设计意图：**
@@ -260,7 +260,7 @@ flowchart LR
 - rate limiter 与延迟队列把失败重试与周期性兜底统一到「时间驱动」路径，`Forget` 在成功后重置退避，使失败重试不无限积累。
 
 **验证（本稿锚点与源码逐条核对，2026-11-18）：**
-- 类型级：`sharedIndexInformer` :753、`controller` :117、`Reflector` :106、`DeltaFIFO` :108、`sharedProcessor` :1221、`Typed[T]` queue.go:208、`TypedRateLimitingInterface` rate_limiting_queue.go:30 —— 全部与定义行一致。
+- 类型级：`sharedIndexInformer+0`（:753）、`controller+0`（:117）、`Reflector+0`（:106）、`DeltaFIFO+0`（:108）、`sharedProcessor+0`（:1221）、`Typed[T]+0`（queue.go :208）、`TypedRateLimitingInterface[T]+0`（rate_limiting_queue.go :30）—— 全部与定义行一致。
 - 函数级：Run :893、RunWithContext :897、handleDeltas :1124、OnAdd :1141、OnUpdate :1149、OnDelete :1171、NewSharedIndexInformer :427；controller.RunWithContext :172、processLoop :238、processDeltas :827、processDeltasInBatch :903；DeltaFIFO.Pop :563；NewTyped :127、NewTypedWithConfig :143、Add :246、Get :284、Done :309；AddAfter :280、AddRateLimited :157、Forget :165。
 - 关键偏移：RunWithContext 内 DeltaFIFO 构造 +13（:910）、processorStopCtx +40（:937）、cacheMutationDetector/processor.run +46～+47（:943-944）、synced +52～+54（:949-951）、controller.RunWithContext +63（:960）；controller.RunWithContext 内 Queue.Close +4（:176）、Reflector +7～+18（:179-190）、wg.StartWithContext :207、wait.UntilWithContext :209、wg.Wait :210；processLoop 内 batch +1～+5（:239-243）；Typed.Add 内 shuttingDown +3（:249）、Touch +10（:256）、dirty.Insert +17（:263）、processing +18（:264）、Push+Signal +22～+23（:268-269）；Typed.Get 内 cond.Wait +4（:288）、Pop+processing +12～+16（:296-301）；Typed.Done 内 dirty +6～+7（:315-316）、Signal +9～+11（:318-320）。
 - 未确认项：`[源码未确认]`（无）。
