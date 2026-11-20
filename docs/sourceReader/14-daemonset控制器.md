@@ -77,25 +77,25 @@ flowchart TD
 
 | 类型 | 文件 | 职责 |
 |---|---|---|
-| `DaemonSetsController` | `daemon_controller.go:103` | 持有 podControl、crControl、ds/node/pod/history Lister、podIndexer（按 node 名与 ControllerRef UID 双索引）、burstReplicas、nodeUpdateQueue、failedPodsBackoff、consistencyStore |
+| `DaemonSetsController` | `DaemonSetsController+0` | 持有 podControl、crControl、ds/node/pod/history Lister、podIndexer（按 node 名与 ControllerRef UID 双索引）、burstReplicas、nodeUpdateQueue、failedPodsBackoff、consistencyStore |
 | `history` | update.go | 当前/历史 ControllerRevision 的包装（rollingUpdate 的局部辅助） |
 
 ## 4. 运行函数级
 
 ### 函数：NewDaemonSetsController
 
-**源码：** `daemon_controller.go:158`
+**源码：** `NewDaemonSetsController+0`
 **职责：** 注册四类 informer handler（Node 事件进 nodeUpdateQueue，其余进主 queue），赋值 syncHandler=syncDaemonSet。
 **关键点：** 构造入参含 failedPodsBackoff（:165），字段赋值含 burstReplicas、nodeUpdateQueue、consistencyStore。
 
 ### 函数：Run
 
-**源码：** `daemon_controller.go:359`
+**源码：** `dsc.Run+0`
 **执行流程：** WaitForNamedCacheSync 后启动主 worker（runWorker:395/processNextWorkItem:401）、额外启动 `runNodeUpdateWorker`（节点事件独立消费）与 backoff GC（`wait.Until(dsc.failedPodsBackoff.GC, BackoffGCInterval, ctx.Done())`，BackoffGCInterval=1min，:72）。
 
 ### 函数：syncDaemonSet
 
-**源码：** `daemon_controller.go:1281`
+**源码：** `dsc.syncDaemonSet+0`
 **执行流程：**
 
 ```text
@@ -103,12 +103,12 @@ syncDaemonSet (+0)
 ├── 1. consistencyStore.EnsureReady (+21)   # 写一致性闸门，见 §8
 ├── 2. dsLister.Get (+32)
 ├── 3. nodeLister.List (+43)
-├── 4. constructHistory（update.go:299，cur/old ControllerRevision）(+75)
+├── 4. constructHistory（`constructHistory+0`，cur/old ControllerRevision）(+75)
 ├── 5. expectations 未满足 → 跳过 manage 只更新 status (+81)
 ├── 6. updateDaemonSet（:973）(+86)
 │      ├─ manage（:1003）
-│      ├─ rollingUpdate（update.go:46）
-│      └─ cleanupHistory（update.go:356）
+│      ├─ rollingUpdate（`dsc.rollingUpdate+0`）
+│      └─ cleanupHistory（`dsc.cleanupHistory+0`）
 └── 7. updateDaemonSetStatus（:1211）(+87)
 ```
 
@@ -118,7 +118,7 @@ syncDaemonSet (+0)
 
 ### 函数：updateDaemonSet
 
-**源码：** `daemon_controller.go:973`
+**源码：** `dsc.updateDaemonSet+0`
 **职责：** 期望侧变更：manage 求节点-Pod 差集，rollingUpdate 处理滚动节奏，cleanupHistory 按 revisionHistoryLimit 删旧 ControllerRevision。
 **流程：** `manage`（:975）→ 若 expectations 满足则按 `UpdateStrategy.Type` 分派 `rollingUpdate`（:984）→ `cleanupHistory`（:995）。
 
@@ -126,7 +126,7 @@ syncDaemonSet (+0)
 
 ### 函数：manage
 
-**源码：** `daemon_controller.go:1003`
+**源码：** `dsc.manage+0`
 **职责：** 逐节点比对，产出待创建节点与待删除 Pod。
 **执行流程：**
 1. `getNodesToDaemonPods`（:796；内部 getDaemonPods:764，按 `util.GetTargetNodeName` 分组）（+2）
@@ -137,7 +137,7 @@ syncDaemonSet (+0)
 
 ### 函数：podsShouldBeOnNode
 
-**源码：** `daemon_controller.go:849`
+**源码：** `dsc.podsShouldBeOnNode+0`
 **职责：** 单节点上的全部判定，返回节点名（需创建）与 Pod 名（需删除）。
 **前置：** `nodeShouldRunDaemonPod`（:1413）先算两个布尔：shouldRun（是否该有 Pod）、shouldContinueRunning（现存 Pod 是否该继续）。
 **分支：**
@@ -158,11 +158,11 @@ podsShouldBeOnNode (+0)
 
 ### 函数：nodeShouldRunDaemonPod / NodeShouldRunDaemonPod
 
-**源码：** `daemon_controller.go:1413`（nodeShouldRunDaemonPod）/ `:1392`（NodeShouldRunDaemonPod）
+**源码：** `nodeShouldRunDaemonPod+0` / `NodeShouldRunDaemonPod+0`
 **职责：** 节点准入：taint 是否被 toleration 容忍、required node affinity 是否匹配。
-**跨包迁移（关键修正）：** 准入谓词 `predicates` 已**移出 daemon 包**，迁至 `staging/src/k8s.io/component-helpers/apps/daemonset/helpers.go:79`（**包私有**，由 `NodeShouldRunDaemonPodWithPrecomputed` :53 调用；daemon 包零引用）。旧文「predicates（:1439）」失效，须以 helpers.go 为准。`nodeShouldRunDaemonPod` 委托 `NodeShouldRunDaemonPodWithPrecomputed`，并传入 `TaintTolerationComparisonOperators` feature 开关。
+**跨包迁移（关键修正）：** 准入谓词 `predicates` 已**移出 daemon 包**，迁至 `staging/src/k8s.io/component-helpers/apps/daemonset/helpers.go` 的 `predicates+0`（**包私有**，由 `NodeShouldRunDaemonPodWithPrecomputed` :53 调用；daemon 包零引用）。旧文「predicates（:1439）」失效，须以 helpers.go 为准。`nodeShouldRunDaemonPod` 委托 `NodeShouldRunDaemonPodWithPrecomputed`，并传入 `TaintTolerationComparisonOperators` feature 开关。
 
-**谓词语义（helpers.go:79）：**
+**谓词语义（`predicates+0`）：**
 - `predicates` 返回 `fitsNodeAffinity`、`fitsTaints` 两个布尔：`requiredNodeAffinity.Match(node)` 匹配亲和性；`FindMatchingUntoleratedTaint` 检查 taint 是否被 toleration 容忍（NoExecute / NoSchedule 任一未容忍即不匹配）。
 - `NodeShouldRunDaemonPodWithPrecomputed` 组合：模板 `nodeName` 非空且 ≠ node.Name → 直接 false；亲和性不匹配 → false；taint 不匹配 → 若未容忍的是 NoExecute taint 则 `shouldContinueRunning=true`（已调度的 Pod 在节点故障时继续跑），否则 false。
 
@@ -170,7 +170,7 @@ podsShouldBeOnNode (+0)
 
 ### 函数：syncNodes
 
-**源码：** `daemon_controller.go:1040`
+**源码：** `dsc.syncNodes+0`
 **执行流程：**
 1. SetExpectations（+18）
 2. `util.CreatePodTemplate`（:1071，加 hash/generation label）（+31）
@@ -196,15 +196,15 @@ podsShouldBeOnNode (+0)
 
 ### 死代码标注（关键修正）：`NewPod`
 
-**源码：** `daemon_controller.go:1419`
-**结论：** **死代码**。定义 :1419，全仓库（含测试）零调用点——它直接设 `spec.nodeName` 绑定节点，但主 sync 流程未接入（实际绑定走亲和性注入 + 默认调度器）。标注为遗留的旧路径，勿据此推断当前绑定机制。
+**源码：** `NewPod+0`
+**结论：** **死代码**。定义 `NewPod+0`，全仓库（含测试）零调用点——它直接设 `spec.nodeName` 绑定节点，但主 sync 流程未接入（实际绑定走亲和性注入 + 默认调度器）。标注为遗留的旧路径，勿据此推断当前绑定机制。
 
 #### surge 与非 surge 的节点内决策深度拆解
 
-DaemonSet 滚动更新的核心是：**每个节点上「保留哪个 Pod、删哪个 Pod、是否新建」**。决策在 `podsShouldBeOnNode`（`daemon_controller.go:849`）内按节点逐一做出，surge 开关走两条完全不同的分支。
+DaemonSet 滚动更新的核心是：**每个节点上「保留哪个 Pod、删哪个 Pod、是否新建」**。决策在 `podsShouldBeOnNode`（`dsc.podsShouldBeOnNode+0`）内按节点逐一做出，surge 开关走两条完全不同的分支。
 
 **surge 开关：**
-- `util.AllowsSurge`（`util/daemonset_util.go:126`）：`SurgeCount(ds,1) > 0` 即允许 surge。
+- `util.AllowsSurge`（`AllowsSurge+0`）：`SurgeCount(ds,1) > 0` 即允许 surge。
 - `util.SurgeCount`（:134）：非 `RollingUpdate` 策略或 `RollingUpdate.MaxSurge == nil` 时返回 0（即不 surge）；否则按 `intstrutil.GetScaledValueFromIntOrPercent(MaxSurge, numberToSchedule, true)` 解析（支持绝对数与百分比）。
 
 **非 surge 分支（`podsShouldBeOnNode` 内，surge 注释 :907 ～ :916）：**
@@ -239,21 +239,21 @@ DaemonSet 滚动更新的核心是：**每个节点上「保留哪个 Pod、删�
 
 ### 函数：updateDaemonSetStatus
 
-**源码：** `daemon_controller.go:1211`
+**源码：** `dsc.updateDaemonSetStatus+0`
 **职责：** 状态计算与写回（无独立 calculateStatus 符号，计算内联）。
 **内部步骤：** 逐节点用 nodeShouldRunDaemonPod（+13）的结果统计 `DesiredNumberScheduled`、`CurrentNumberScheduled`、`NumberMisscheduled`、`NumberReady`、`NumberAvailable`、`UpdatedNumberScheduled`（+48 得 `numberUnavailable = desired - available`），随后 `storeDaemonSetStatus`（+50）写回。
 **consistencyStore 写一致性（关键修正，见 §8）：** 写回成功后若 `updatedDS != nil`，在函数末尾调 `consistencyStore.WroteAt`（+55，行 :1266-:1271），记录本次写回的时间戳/UID/ResourceVersion。
 
 ### 函数：rollingUpdate（update.go）
 
-**源码：** `update.go:46`
-**职责：** 滚动更新的删除节奏。当 `maxSurge == 0` 时按 `maxUnavailable` 挑出可替换的旧 Pod 删除（不可用旧 Pod 优先、否则按候选数），让核心循环在相应节点创建新 Pod；surge 路径由 `updatedDesiredNodeCounts`（update.go:590）计算上下限。
+**源码：** `dsc.rollingUpdate+0`
+**职责：** 滚动更新的删除节奏。当 `maxSurge == 0` 时按 `maxUnavailable` 挑出可替换的旧 Pod 删除（不可用旧 Pod 优先、否则按候选数），让核心循环在相应节点创建新 Pod；surge 路径由 `updatedDesiredNodeCounts`（`dsc.updatedDesiredNodeCounts+0`）计算上下限。
 
 #### rollingUpdate 两分支深度拆解（第二层补充视角）
 
 DaemonSet 滚动更新有两条分支：**maxSurge == 0**（先删后建，无 surge）与 **maxSurge > 0**（先建后删，有 surge）。本节走一遍这两条分支，看每轮 reconcile 如何推进滚动更新。
 
-**rollingUpdate（update.go:46）入口：**
+**rollingUpdate（`dsc.rollingUpdate+0`）入口：**
 ```text
 rollingUpdate (+0)
 ├── getNodesToDaemonPods（:49）→ 按 node 分组当前 Pod
@@ -265,7 +265,7 @@ rollingUpdate (+0)
 
 **分支一：maxSurge == 0（先删后建，:62 ～ :126）**
 ```text
-逐节点 findUpdatedPodsOnNode（update.go:272）区分 newPod/oldPod
+逐节点 findUpdatedPodsOnNode（`findUpdatedPodsOnNode+0`）区分 newPod/oldPod
 ├── oldPod == nil && newPod == nil，或都存在 → numUnavailable++（跳过）
 ├── newPod != nil：
 │    └── !IsPodAvailable(newPod) → numUnavailable++（新 Pod 不可用占预算）
@@ -305,7 +305,7 @@ surge 分支：允许节点上短暂出现 2 个 Pod（一个旧、一个新）
 
 ### 函数：constructHistory / cleanupHistory（update.go）
 
-**源码：** `update.go:299` / `:356`
+**源码：** `constructHistory+0` / `dsc.cleanupHistory+0`
 **职责：** `constructHistory` 生成当前与历史 ControllerRevision（含 hash label）；`cleanupHistory` 按 `revisionHistoryLimit` 删旧。
 
 ## 8. consistencyStore 写一致性机制（新增观察）
@@ -314,7 +314,7 @@ surge 分支：允许节点上短暂出现 2 个 Pod（一个旧、一个新）
 
 | 项 | 值 |
 |---|---|
-| FeatureGate 常量 | `pkg/features/kube_features.go:1116` |
+| FeatureGate 常量 | `StaleControllerConsistencyDaemonSet+0` |
 | 默认值 | Beta，默认 `true`（v1.36，`kube_features.go:2082`） |
 | syncDaemonSet 首步 | `consistencyStore.EnsureReady(dsNamespacedName)`（:1302）——若前次写还未被 informer 观察到则返回一致性错误，跳过本次调谐 |
 | 写回侧 | `updateDaemonSetStatus` 末尾调 `consistencyStore.WroteAt`（:1266-:1271，传入 NamespacedName、UID、GroupResource、ResourceVersion） |
@@ -363,7 +363,7 @@ syncDaemonSet
 
 | 项 | 旧文 | 当前基准 | 结论 |
 |---|---|---|---|
-| `predicates` | daemon_controller.go:1439 | 跨包迁至 component-helpers/apps/daemonset/helpers.go:79（包私有） | 更正，daemon 包零引用 |
+| `predicates` | daemon_controller.go:1439 | 跨包迁至 component-helpers/apps/daemonset/helpers.go 的 `predicates+0`（包私有） | 更正，daemon 包零引用 |
 | `NewPod` | :1450（未使用） | :1419，零调用点 | 死代码，行号 -31 |
 | `getUnscheduledPodsWithoutNode` | :1488 | :1457 | 漂移 -31 |
 | consistencyStore | 未覆盖 | daemon_controller.go:50/:154，EnsureReady :1302，WroteAt :1266-1271 | 新增观察 |

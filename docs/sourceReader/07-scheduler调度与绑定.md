@@ -53,14 +53,14 @@
 
 #### 函数：New
 
-**源码：** `scheduler.go:327`
+**源码：** `New+0`
 **职责：** 装配 Scheduler：构造 Pod/PodGroup informer 的事件处理、队列、framework profiles、Cache、algorithm。
 **返回值：** `(*Scheduler, error)`。
 **关键动作：** 事件处理器（`eventhandlers.go`）把 Pod 的 add/update/delete 映射为队列操作（AddPod/UpdatePod/DeletePod）。
 
 #### 函数：(*Scheduler).Run
 
-**源码：** `scheduler.go:538`
+**源码：** `sched.Run+0`
 **执行流程：**
 1. `SchedulingQueue.Run`（+2）：启动 heap 搬运与调度周期计数
 2. `APIDispatcher.Run`（+5，可选；`SchedulerAsyncAPICalls` 特性门开启时非 nil）
@@ -71,7 +71,7 @@
 
 #### 函数：(*Scheduler).ScheduleOne
 
-**源码：** `schedule_one.go:68`
+**源码：** `sched.ScheduleOne+0`
 **职责：** 单个 worker 的循环体：取实体并分派。
 **执行流程：**
 1. `sched.NextEntity(logger)`：阻塞 Pop（+2）
@@ -81,7 +81,7 @@
 
 #### 函数：(*Scheduler).scheduleOnePod
 
-**源码：** `schedule_one.go:94`
+**源码：** `sched.scheduleOnePod+0`
 **职责：** 单个 Pod 的端到端调度编排。
 **执行流程：**
 ```text
@@ -97,12 +97,12 @@ scheduleOnePod (+0)
 
 #### 函数：(*Scheduler).schedulingCycle
 
-**源码：** `schedule_one.go:170`
+**源码：** `sched.schedulingCycle+0`
 **执行流程：** `Cache.UpdateSnapshot`（+8）刷新节点快照 → `refreshResizingPodFromCache`（+12，deferred resize Pod 从缓存快照回填最新资源）→ `schedulingAlgorithm`（+16）→ `prepareForBindingCycle`（+21，assume + Permit）。
 
 #### 函数：(*Scheduler).schedulingAlgorithm
 
-**源码：** `schedule_one.go:287`
+**源码：** `sched.schedulingAlgorithm+0`
 **职责：** 执行 SchedulePod 并处理失败：无节点/FitError → PostFilter（抢占）。
 **关键分支：**
 - defer 延迟指标（+7 ～ +13）：deferred resize Pod 走 `ResizeSchedulingAlgorithmLatency`，其余走 `SchedulingAlgorithmLatency`
@@ -113,7 +113,7 @@ scheduleOnePod (+0)
 
 #### 函数：(*SchedulingAlgorithm).SchedulePod
 
-**源码：** `algorithm.go:162`
+**源码：** `a.SchedulePod+0`
 **职责：** 同步算法主体。
 **执行流程：**
 1. 快照无节点 → ErrNoNodesAvailable（+5 ～ +6）
@@ -126,27 +126,27 @@ scheduleOnePod (+0)
 
 #### 函数：(*SchedulingAlgorithm).findNodesThatFitPod / prefilterNodes
 
-**源码：** `algorithm.go:351 / :252`
+**源码：** `a.findNodesThatFitPod+0 / :252`
 **职责：** PreFilter 缩小候选集（可能返回节点子集），Filter 逐节点执行过滤。
-**关键数据结构：** `preFilterOutcome`（result 候选子集、allNodes 全量快照、diagnosis），保留全量列表用于维护 nextStartNodeIndex 防止节点饥饿（`algorithm.go:228` 注释）。
-**关键子函数：** `findNodesThatPassFilters`（`algorithm.go:449`）：内部对每个节点调用 `RunFilterPluginsWithNominatedPods`（`algorithm.go:506`，+57），不再直接位于 findNodesThatFitPod。过滤可并行评估节点（`parallelize`）；结果按节点聚合进 diagnosis。
-**调用链：** `findNodesThatFitPod`（+2 prefilterNodes）→ 候选集 → `findNodesThatPassFilters`（+44）→ `RunFilterPluginsWithNominatedPods`（定义 `framework/runtime/framework.go:1467`）。
+**关键数据结构：** `preFilterOutcome`（result 候选子集、allNodes 全量快照、diagnosis），保留全量列表用于维护 nextStartNodeIndex 防止节点饥饿（`preFilterOutcome+0` 注释）。
+**关键子函数：** `findNodesThatPassFilters`（`a.findNodesThatPassFilters+0`）：内部对每个节点调用 `RunFilterPluginsWithNominatedPods`（`a.findNodesThatPassFilters+57`，+57），不再直接位于 findNodesThatFitPod。过滤可并行评估节点（`parallelize`）；结果按节点聚合进 diagnosis。
+**调用链：** `findNodesThatFitPod`（+2 prefilterNodes）→ 候选集 → `findNodesThatPassFilters`（+44）→ `RunFilterPluginsWithNominatedPods`（定义 `framework/runtime/framework.go:f.RunFilterPluginsWithNominatedPods+0`）。
 
 #### 函数：prioritizeNodes
 
-**源码：** `schedule_one.go:644`
+**源码：** `prioritizeNodes+0`
 **职责：** 打分阶段：先按 minRank 过滤最低排名节点（+14 ～ +27），`RunPreScorePlugins`（+43）→ `RunScorePlugins`（+49）对可行节点打分，归一化并汇总 extender 分数。
 **返回值：** `[]NodeScore`。
-**调用链：** `RunScorePlugins` 调用在 `schedule_one.go:693`（prioritizeNodes 内 +49），定义 `framework/runtime/framework.go:1598`。
+**调用链：** `RunScorePlugins` 调用在 `prioritizeNodes+49`（prioritizeNodes 内 +49），定义 `framework/runtime/framework.go:f.RunScorePlugins+0`。
 
 #### 函数：(*Scheduler).prepareForBindingCycle
 
-**源码：** `schedule_one.go:228`
+**源码：** `sched.prepareForBindingCycle+0`
 **执行流程：** `algorithm.AssumeAndReserveInCache`（+8，改 nodeName 写入调度缓存）→ `RunPermitPlugins`（+15）：Wait → AddWaitingPod；Reject → Unreserve 回滚并返回 FitError（+20 ～ +35）。
 
 #### 函数：(*Scheduler).runBindingCycle / bindingCycle
 
-**源码：** `schedule_one.go:146 / :352`
+**源码：** `sched.runBindingCycle+0 / :352`
 **职责：** 绑定周期全流程。
 **runBindingCycle 执行流程：** `bindingCycle`（+14）；失败 → `handleBindingCycleError`（+16）。
 **bindingCycle 执行流程：**
@@ -165,7 +165,7 @@ bindingCycle (+0)
 
 #### 函数：(*Scheduler).bind
 
-**源码：** `schedule_one.go:780`
+**源码：** `sched.bind+0`
 **职责：** 执行实际绑定。
 **优先级：** 先 `extendersBinding`（+6）；未绑定则 `RunBindPlugins`（+10）。
 **默认 bind 插件：** 向 apiserver POST Pod 的 binding 子资源（`/api/v1/namespaces/<ns>/pods/<name>/binding`），apiserver 据此持久化 `spec.nodeName`。
@@ -198,27 +198,27 @@ bindingCycle (+0)
 
 抢占是 Filter 全失败后的兜底路径：当所有节点都因资源/亲和不足判 Unschedulable 时，调度器选一批「低优先级受害者 Pod」驱逐，为高优先级 Pod 腾出空间。入口是 PostFilter 扩展点。
 
-**触发点：** `schedule_one.go:333` 调 `RunPostFilterPlugins(ctx, state, pod, fitError.Diagnosis.NodeToStatus)`；`RunPostFilterPlugins` 定义在 `framework/runtime/framework.go:1337`。默认 PostFilter 插件为 `DefaultPreemption`（`plugins/defaultpreemption/default_preemption.go`，`Name = names.DefaultPreemption` +46，`var _ fwk.PostFilterPlugin` +105，同时实现 `fwk.PodGroupPostFilterPlugin` +107）。
+**触发点：** `sched.schedulingAlgorithm+46` 调 `RunPostFilterPlugins(ctx, state, pod, fitError.Diagnosis.NodeToStatus)`；`RunPostFilterPlugins` 定义在 `framework/runtime/framework.go:f.RunPostFilterPlugins+0`。默认 PostFilter 插件为 `DefaultPreemption`（`plugins/defaultpreemption/default_preemption.go`，`Name = names.DefaultPreemption` +46，`var _ fwk.PostFilterPlugin` +105，同时实现 `fwk.PodGroupPostFilterPlugin` +107）。
 
 **完整链路（`pkg/scheduler/framework/preemption/` + `plugins/defaultpreemption/`）：**
 
 ```text
-PostFilter (default_preemption.go:163)
-  └─ Evaluator.Preempt (preemption.go:196)
-       ├─ evaluate (preemption.go:93)
+PostFilter (pl.PostFilter+0)
+  └─ Evaluator.Preempt (ev.Preempt+0)
+       ├─ evaluate (ev.evaluate+0)
        │    ├─ 0) PodLister 取最新 preemptor；deferred resize 的新鲜度校验
        │    │     + NominatedNodeName 内存修正（防重复抢占）
-       │    ├─ 1) PodEligibleToPreemptOthers (default_preemption.go:458) 资格检查
-       │    ├─ 2) findCandidates (preemption.go:220)
+       │    ├─ 1) PodEligibleToPreemptOthers (pl.PodEligibleToPreemptOthers+0) 资格检查
+       │    ├─ 2) findCandidates (ev.findCandidates+0)
        │    │     ├─ NodesForStatusCode(Unschedulable) 筛出"删点 Pod 就能放下"的节点
        │    │     ├─ getPodDisruptionBudgets 取 PDB
-       │    │     ├─ GetOffsetAndNumCandidates (default_preemption.go:266) 采样
-       │    │     └─ DryRunPreemption (preemption.go:476) 并行试算受害者
-       │    ├─ 3) callExtenders (preemption.go:253) 让扩展器增删候选
-       │    └─ 4) SelectCandidate (preemption.go:344) → pickOneNodeForPreemption (:383)
-       └─ 5) ActuatePodPreemption (executor.go:205) 真正驱逐
-            ├─ EnableAsyncPreemption → prepareCandidateAsync (executor.go:234, KEP-4832)
-            └─ 否则 prepareCandidate (executor.go:370) 同步驱逐
+       │    │     ├─ GetOffsetAndNumCandidates (pl.GetOffsetAndNumCandidates+0) 采样
+       │    │     └─ DryRunPreemption (ev.DryRunPreemption+0) 并行试算受害者
+       │    ├─ 3) callExtenders (ev.callExtenders+0) 让扩展器增删候选
+       │    └─ 4) SelectCandidate (ev.SelectCandidate+0) → pickOneNodeForPreemption (:383)
+       └─ 5) ActuatePodPreemption (e.ActuatePodPreemption+0) 真正驱逐
+            ├─ EnableAsyncPreemption → prepareCandidateAsync (e.prepareCandidateAsync+0, KEP-4832)
+            └─ 否则 prepareCandidate (e.prepareCandidate+0) 同步驱逐
        返回 NewPostFilterResultWithNominatedNode(bestCandidate.Name())
 ```
 
@@ -226,20 +226,20 @@ PostFilter (default_preemption.go:163)
 
 | 函数 | 位置 | 职责 |
 |---|---|---|
-| `PostFilter` | `default_preemption.go:163` | 扩展点入口；递增 `PreemptionAttempts`（deferred resize 走 `ResizePreemptionAttempts`）；转调 `Evaluator.Preempt` |
-| `Evaluator.Preempt` | `preemption.go:196` | 编排 evaluate→actuate；成功返回带 NominatedNode 的 PostFilterResult |
-| `Evaluator.evaluate` | `preemption.go:93` | 0 取最新 preemptor → 1 资格 → 2 findCandidates → 3 extenders → 4 SelectCandidate |
-| `PodEligibleToPreemptOthers` | `default_preemption.go:458` | 抢占资格：优先级、是否已 nominated、preemptionPolicy |
-| `findCandidates` | `preemption.go:220` | 只考虑 `NodesForStatusCode(Unschedulable)` 的节点；无候选则提前返回 |
-| `DryRunPreemption` | `preemption.go:476` | 并行对候选节点试算「驱逐哪些 Pod 能放下 preemptor」，产出 `PreemptionCandidate` |
-| `SelectCandidate` | `preemption.go:344` | 多候选时选一个节点 |
-| `pickOneNodeForPreemption` | `preemption.go:383` | 打分选节点 |
-| `ActuatePodPreemption` | `executor.go:205` | 同步/异步驱逐受害者 |
-| `prepareCandidateAsync` | `executor.go:234` | 异步驱逐（KEP-4832）：goroutine 驱逐 + 拒绝 waitingPod + 清低优 nominatedNodeName；完成前 Pod 不重试 |
+| `PostFilter` | `pl.PostFilter+0` | 扩展点入口；递增 `PreemptionAttempts`（deferred resize 走 `ResizePreemptionAttempts`）；转调 `Evaluator.Preempt` |
+| `Evaluator.Preempt` | `ev.Preempt+0` | 编排 evaluate→actuate；成功返回带 NominatedNode 的 PostFilterResult |
+| `Evaluator.evaluate` | `ev.evaluate+0` | 0 取最新 preemptor → 1 资格 → 2 findCandidates → 3 extenders → 4 SelectCandidate |
+| `PodEligibleToPreemptOthers` | `pl.PodEligibleToPreemptOthers+0` | 抢占资格：优先级、是否已 nominated、preemptionPolicy |
+| `findCandidates` | `ev.findCandidates+0` | 只考虑 `NodesForStatusCode(Unschedulable)` 的节点；无候选则提前返回 |
+| `DryRunPreemption` | `ev.DryRunPreemption+0` | 并行对候选节点试算「驱逐哪些 Pod 能放下 preemptor」，产出 `PreemptionCandidate` |
+| `SelectCandidate` | `ev.SelectCandidate+0` | 多候选时选一个节点 |
+| `pickOneNodeForPreemption` | `pickOneNodeForPreemption+0` | 打分选节点 |
+| `ActuatePodPreemption` | `e.ActuatePodPreemption+0` | 同步/异步驱逐受害者 |
+| `prepareCandidateAsync` | `e.prepareCandidateAsync+0` | 异步驱逐（KEP-4832）：goroutine 驱逐 + 拒绝 waitingPod + 清低优 nominatedNodeName；完成前 Pod 不重试 |
 
-**选节点 6 条 tie-break（`pickOneNodeForPreemption` 注释 +383）：** scoreFuncs 为空时按——① PDB 违规最少 → ② 最高优先级受害者最小 → ③ 所有受害者优先级之和最小 → ④ 受害者数量最少 → ⑤ 最高优先级受害者启动时间最晚 → ⑥ 仍平则取首个节点。`OrderedScoreFuncs`（`default_preemption.go:512`）可注入自定义打分。
+**选节点 6 条 tie-break（`pickOneNodeForPreemption` 注释 +383）：** scoreFuncs 为空时按——① PDB 违规最少 → ② 最高优先级受害者最小 → ③ 所有受害者优先级之和最小 → ④ 受害者数量最少 → ⑤ 最高优先级受害者启动时间最晚 → ⑥ 仍平则取首个节点。`OrderedScoreFuncs`（`pl.OrderedScoreFuncs+0`）可注入自定义打分。
 
-**受害者与 PDB：** `defaultPreemptionManager.GenerateVictims`（`manager.go:54`）、`CompareVictimSets`（`:90`）按 PDB 违规数比较（`countPDBViolations` :151）；`victims.go` 提供 `getWorkloadPreemptionVictims`（:74，Workload API 聚合）与 `getCrossNodesVictims`（:87，跨节点收集）。
+**受害者与 PDB：** `defaultPreemptionManager.GenerateVictims`（`m.GenerateVictims+0`）、`CompareVictimSets`（`:90`）按 PDB 违规数比较（`countPDBViolations` :151）；`victims.go` 提供 `getWorkloadPreemptionVictims`（:74，Workload API 聚合）与 `getCrossNodesVictims`（:87，跨节点收集）。
 
 **被抢占方状态：** `prepareCandidate` 驱逐受害者后，preemptor 的 `Status.NominatedNodeName` 被写为目标节点，Pod 回队列；下一轮调度 `PodEligibleToPreemptOthers` 凭该字段避免对同一节点重复抢占；若驱逐未完成，`bindingCycle` 的「PreBind 期间被抢占」分支以 `context.Cause` 中止绑定。
 
@@ -267,23 +267,23 @@ PostFilter (default_preemption.go:163)
 
 **Filter 阶段：逐插件判「这个节点能不能放」**
 
-`noderesources.Fit.Filter`（`noderesources/fit.go:617`）：
+`noderesources.Fit.Filter`（`noderesources/fit.go:f.Filter+0`）：
 - 从 CycleState 取 `PreFilter` 算好的 `preFilterState`（Pod 的资源请求）。
-- 调 `helper.FitsRequest`（`helper/resource_fit.go:124`）逐资源比对：
+- 调 `helper.FitsRequest`（`helper/resource_fit.go:FitsRequest+0`）逐资源比对：
   - **Pod 数上限**：`len(nodeInfo.GetPods()) >= allowedPodNumber` → `"Too many pods"`。
   - **CPU**：`podRequest.MilliCPU > allocatable.MilliCPU - requested.MilliCPU` → `"Insufficient cpu"`；若请求 > 节点总量则标 `Unresolvable`（抢占也救不了）。
   - **内存**：同构判断 → `"Insufficient memory"`。
   - **EphemeralStorage / ScalarResources**：同构。
 - 任一资源不足 → 返回 Unschedulable（带全部失败原因，供抢占/事件用）。
 
-`tainttoleration.Filter`（`tainttoleration/taint_toleration.go:102`）：
+`tainttoleration.Filter`（`tainttoleration/taint_toleration.go:pl.Filter+0`）：
 - `FindMatchingUntoleratedTaint`（:87/:90）检查节点 taint 是否被 Pod toleration 容忍；`DoNotScheduleTaintsFilterFunc()` 只看 NoSchedule/NoExecute。
 
 `nodeaffinity.Filter` / `nodeunschedulable.Filter` / `nodename.Filter`：分别判 required node affinity、`spec.unschedulable`、`spec.nodeName`。
 
 **Score 阶段：逐插件给「这个节点有多好」打分**
 
-`noderesources.BalancedAllocation.Score`（`balanced_allocation.go:227 balancedResourceScorer`）：
+`noderesources.BalancedAllocation.Score`（`balancedResourceScorer+0 balancedResourceScorer`）：
 - 同时算「加了这个 Pod 后」与「加之前」的 CPU/内存占用均衡度（`balancedResourceScore`，按各资源 fraction 的标准差）。
 - 分数 = `MaxNodeScore/2 + (MaxNodeScore/2 + scoreWithPod - scoreWithoutPod)/2`：
   - 均衡度变化小 → 约 75。
@@ -295,7 +295,7 @@ PostFilter (default_preemption.go:163)
 
 **Bind 阶段：写 Binding**
 
-`defaultbinder.Bind`（`defaultbinder/default_binder.go:52`）：
+`defaultbinder.Bind`（`defaultbinder/default_binder.go:b.Bind+0`）：
 ```text
 Bind(ctx, state, pod, nodeName)
 ├── 构造 v1.Binding{ObjectMeta{ns,name,uid}, Target{Kind:"Node", Name:nodeName}}
@@ -335,11 +335,11 @@ Bind(ctx, state, pod, nodeName)
 
 ## 4. 与旧版差异
 
-- **文件归属修正**：`CycleState` 现于 `framework/cycle_state.go:29`（旧误归 interface.go）；`ScheduleResult` 现于 `scheduler.go:183`（旧误归 schedule_one.go）。
+- **文件归属修正**：`CycleState` 现于 `framework/cycle_state.go:29`（旧误归 interface.go）；`ScheduleResult` 现于 `ScheduleResult+0`（旧误归 schedule_one.go）。
 - **函数行号漂移**：全部函数定义行按当前基准重定（如 `Run` :456 → :538、`bind` :681 → :780、`prioritizeNodes` :565 → :644）。
 - **函数内偏移漂移**：`scheduleOnePod` 内 `go runBindingCycle` +73 → +48；`schedulingAlgorithm` 内 `ErrNoNodesAvailable` +5 ～ +8 → +20、`FitError/PostFilter` +31/+49 → +40/+46；`SchedulePod` 内 `prioritizeNodes` +36 → +42、`Pop` +42 ～ +43 → +47 ～ +48、单节点跳过打分 +24 ～ +34 → +24 ～ +40；`prepareForBindingCycle` 内 `AssumeAndReserveInCache` +12 → +8、`RunPermitPlugins` +22 → +15；`bindingCycle` 内 `RunPreBindPreFlights` +12 ～ +31 → +15、`WaitOnPermit` +33 ～ +48 → +35 ～ +49、`Done` +56 → +60、`AddPodInPreBind` +63 ～ +69 → +69、`RunPreBindPlugins` +72 ～ +74、被抢占校验 +77 ～ +81、`bind` +84；`bind` 内 `extendersBinding` +6、`RunBindPlugins` +9 → +10。
-- **PodGroup 调度整体拆出**：`scheduleOnePodGroup`（`schedule_one_podgroup.go:45`）、`podGroupCycle`（`:340`），本场景裸 Pod 不走该路径；旧文「schedulingAlgorithm 内 PodGroup 跳过 PostFilter」已不存在，从正文删除。
-- **assume 语义更新**：`AssumeAndReserveInCache`（`algorithm.go:770`）= `AssumePod` 写缓存 + Reserve 插件，失败回滚 `UnreserveAndForgetFromCache`（`:801`）；deferred resize Pod 跳过 assume。
-- **新增**：`schedulingCycle` 内插 `refreshResizingPodFromCache`（定义 `schedule_one.go:201`，调用 +12）；`schedulingAlgorithm` 顶部新增延迟指标 defer；`prioritizeNodes` 内新增 minRank 过滤与 `RunPreScorePlugins`；`RunFilterPluginsWithNominatedPods` 调用点移至 `findNodesThatPassFilters`（`algorithm.go:506`）。
+- **PodGroup 调度整体拆出**：`scheduleOnePodGroup`（`sched.scheduleOnePodGroup+0`）、`podGroupCycle`（`:340`），本场景裸 Pod 不走该路径；旧文「schedulingAlgorithm 内 PodGroup 跳过 PostFilter」已不存在，从正文删除。
+- **assume 语义更新**：`AssumeAndReserveInCache`（`a.AssumeAndReserveInCache+0`）= `AssumePod` 写缓存 + Reserve 插件，失败回滚 `UnreserveAndForgetFromCache`（`:801`）；deferred resize Pod 跳过 assume。
+- **新增**：`schedulingCycle` 内插 `refreshResizingPodFromCache`（定义 `sched.refreshResizingPodFromCache+0`，调用 +12）；`schedulingAlgorithm` 顶部新增延迟指标 defer；`prioritizeNodes` 内新增 minRank 过滤与 `RunPreScorePlugins`；`RunFilterPluginsWithNominatedPods` 调用点移至 `findNodesThatPassFilters`（`a.findNodesThatPassFilters+57`）。
 
 [上一篇](06-apiserver请求处理与etcd.md) · [总目录](README.md) · [下一篇](08-controller副本控制.md)

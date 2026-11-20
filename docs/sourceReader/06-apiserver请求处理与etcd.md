@@ -43,30 +43,30 @@ POST /api/v1/namespaces/default/pods/nginx  # 命名创建（name 来自 URL 路
 ## 2. 类型级
 | 类型 | 文件 | 职责 |
 |---|---|---|
-| `podStrategy` | `pkg/registry/core/pod/strategy.go:61` | Pod 的 RESTCreateStrategy；单例 `Strategy`（:68），组合 `rest.DeclarativeValidation` 与 SimpleNameGenerator |
+| `podStrategy` | `pkg/registry/core/pod/strategy.go` | Pod 的 RESTCreateStrategy（`podStrategy+0`，:61）；单例 `Strategy+0`（:68），组合 `rest.DeclarativeValidation` 与 SimpleNameGenerator |
 | `Store` | `[staging] generic/registry/store.go` | 泛型资源存储，持有 CreateStrategy、KeyFunc、Storage（storage.Interface） |
 | `store`（etcd3） | `[staging] storage/etcd3/store.go` | storage.Interface 的 etcd 实现，持有 codec、versioner、transformer、leaseManager、client |
 | `ValidateObjectFunc` | `[staging] registry/rest/types.go` | validating admission 回调的函数类型 |
 
 ## 3. 函数级
 
-> 偏移记法：`文件:符号+偏移` 表示符号当前行号与内部语句的相对位置；`create.go` 的 createHandler 闭包基线 = 闭包开括号行 `create.go:54`（函数定义 `create.go:53`）；其余函数基线 = 函数体首个语句行。本节所有行号均已按基准 HEAD 复核。
+> 偏移记法：`文件:符号+偏移` 表示符号当前行号与内部语句的相对位置；`create.go` 的 createHandler 闭包基线 = 闭包开括号行 `createHandler+1`（:54，函数定义 `createHandler+0` :53）；其余函数基线 = 函数体首个语句行。本节所有行号均已按基准 HEAD 复核。
 
 ### 函数：CreateResource
-**源码：** `[staging] endpoints/handlers/create.go:245`
+**源码：** `[staging] endpoints/handlers/create.go CreateResource+0`（:245）
 **职责：** 入口适配，直接返回 `createHandler(r, scope, admission, false)` 构造的 handler 闭包。
 **参数：** `r rest.Creater`、`scope *RequestScope`、`admission admission.Interface`。
 **调用方：** 资源 REST 安装（`InstallREST` 为每个 resource 注册该 HandlerFunc）。
 
 ### 函数：createHandler
-**源码：** `[staging] endpoints/handlers/create.go:53`
+**源码：** `[staging] endpoints/handlers/create.go createHandler+0`（:53）
 **所属：** 包 handlers
 **职责：** Pod 创建的完整请求处理。
 **参数（外层）：** `r rest.NamedCreater`、`scope *RequestScope`、`admit admission.Interface`、`includeName bool`（集合创建为 false）。
 **返回（闭包）：** 无返回值；经 `ResponseWriter` 输出。
 **前置条件：** 请求已通过全部 filter（认证/鉴权等），context 中带 user 与 RequestInfo。
 **后置条件：** 成功时对象已持久化，201 已写出。
-**执行流程（偏移相对闭包开括号行 create.go:54 计 +0）：**
+**执行流程（偏移相对闭包开括号行 `createHandler+1`（:54）计 +0）：**
 ```text
 闭包入口 (+0)
 ├── 1. tracing span "Create" (+1 ～ +5)
@@ -101,7 +101,7 @@ POST /api/v1/namespaces/default/pods/nginx  # 命名创建（name 来自 URL 路
 **副作用：** 审计日志、span、watch 广播（存储成功后由 storage 层触发）。
 
 ### 函数：AdmissionToValidateObjectFunc
-**源码：** `[staging] registry/rest/create.go:218`
+**源码：** `[staging] registry/rest/create.go AdmissionToValidateObjectFunc+0`（:218）
 **职责：** 把 admission 的 validating 阶段（固定 Attributes）包成 Store 需要的 `ValidateObjectFunc`。
 **关键逻辑：** 返回的函数在被调用时执行 `admit.Validate(ctx, finalAttributes, o)`（finalAttributes 重建，把 staticAttributes 的 name 换为对象实际 name 以覆盖 generateName）；deep copy 语义由调用侧保证（Store.create 传入 deep copy）。
 
@@ -132,15 +132,15 @@ POST /api/v1/namespaces/default/pods/nginx  # 命名创建（name 来自 URL 路
 **validating webhook：** `[staging] admission/plugin/webhook/validating/plugin.go`
 - `Struct：Plugin 偏移：+51`；`NewValidatingAdmissionWebhook`（+74）；`Validate`（+93）同构，只判允许/拒绝不改对象。
 
-#### handler 内的执行位置（createHandler 内，偏移以闭包 :54 为基线）
+#### handler 内的执行位置（createHandler 内，偏移以闭包入口 `createHandler+1`（:54）为基线）
 
-1. `admissionAttributes := admission.NewAttributesRecord(...)`（+128，`create.go:182`）：构造本次请求的固定 Attributes（Create 操作、目标 kind/resource/subresource、userInfo、dryRun）。
-2. `requestFunc` 闭包（+134，`create.go:188`）内把 `rest.AdmissionToValidateObjectFunc(admit, admissionAttributes, scope)` 作为 `ValidateObjectFunc` 传给 `r.Create`——**validating 阶段在此刻才被延迟绑定**，真正执行在 `Store.create` 内。
-3. `admit = fieldmanager.NewManagedFieldsValidatingAdmissionController(admit)`（+146，`create.go:200`）：装饰一层 managed fields 校验。
-4. `mutatingAdmission.Admit(ctx, admissionAttributes, scope)`（+149 ～ +151，`create.go:203`）：**mutating 阶段同步执行**——仅当 `admit` 实现 `MutationInterface` 且 `Handles(Create)`。
-5. `dedupOwnerReferencesAndAddWarning(..., true)`（+154，`create.go:208`）：mutating 改写后**再次**去重 ownerReferences（mutating 前已去过一次，见 +125 附近）。
-6. `requestFunc()`（+158，`create.go:212`）→ `r.Create` → `Store.Create/create` → 内部 `createValidation` 执行 validating 阶段。
-7. `isTooLargeError(err)`（+161，`create.go:215`）：对象序列化过大时清空 managedFields 重试一次。
+1. `admissionAttributes := admission.NewAttributesRecord(...)`（`createHandler+129`）：构造本次请求的固定 Attributes（Create 操作、目标 kind/resource/subresource、userInfo、dryRun）。
+2. `requestFunc` 闭包（`createHandler+135`）内把 `rest.AdmissionToValidateObjectFunc(admit, admissionAttributes, scope)` 作为 `ValidateObjectFunc` 传给 `r.Create`——**validating 阶段在此刻才被延迟绑定**，真正执行在 `Store.create` 内。
+3. `admit = fieldmanager.NewManagedFieldsValidatingAdmissionController(admit)`（`createHandler+147`）：装饰一层 managed fields 校验。
+4. `mutatingAdmission.Admit(ctx, admissionAttributes, scope)`（`createHandler+150~+152`）：**mutating 阶段同步执行**——仅当 `admit` 实现 `MutationInterface` 且 `Handles(Create)`。
+5. `dedupOwnerReferencesAndAddWarning(..., true)`（`createHandler+155`）：mutating 改写后**再次**去重 ownerReferences（mutating 前已去过一次，见 `createHandler+125` 附近）。
+6. `requestFunc()`（`createHandler+159`）→ `r.Create` → `Store.Create/create` → 内部 `createValidation` 执行 validating 阶段。
+7. `isTooLargeError(err)`（`createHandler+162`）：对象序列化过大时清空 managedFields 重试一次。
 
 #### 插件注册与执行顺序
 
@@ -149,7 +149,7 @@ POST /api/v1/namespaces/default/pods/nginx  # 命名创建（name 来自 URL 路
 - `RegisterAllAdmissionPlugins`（偏移：+128）：把插件注册进 `admission.Plugins`。
 - 默认开启集与全量集之差（偏移：+196，`sets.New(AllOrderedPlugins...).Difference(defaultOnPlugins)`）决定哪些需显式 `--enable-admission-plugins`。
 
-**审计装饰：** `admission.WithAudit`（`[staging] apiserver/pkg/admission/audit.go:39`）在 handler 内包裹链，使每个插件决策都进审计日志。
+**审计装饰：** `admission.WithAudit`（`[staging] apiserver/pkg/admission/audit.go WithAudit+0`，:39）在 handler 内包裹链，使每个插件决策都进审计日志。
 
 #### 两阶段对比
 
@@ -167,15 +167,15 @@ POST /api/v1/namespaces/default/pods/nginx  # 命名创建（name 来自 URL 路
 3. **顺序即语义**：`AllOrderedPlugins` 固定执行顺序，内置插件间有依赖（如 NamespaceLifecycle 须早于依赖 namespace 的插件）；注册顺序无关，避免初始化竞态。
 
 ### 函数：(*Store).Create
-**源码：** `[staging] generic/registry/store.go:564`
+**源码：** `[staging] generic/registry/store.go e.Create+0`（:564）
 **职责：** 命名创建分流：对象带 `generateName` 而无 `name` 走 `createWithGenerateNameRetry`（最多 `maxNameGenerationCreateAttempts` 次冲突重试），否则直接委托 `e.create`。
 
 ### 函数：(*Store).create
-**源码：** `[staging] generic/registry/store.go:595`
+**源码：** `[staging] generic/registry/store.go e.create+0`（:595）
 **职责：** 通用创建主流程。
 **参数：** `ctx`、`obj`（Pod）、`createValidation rest.ValidateObjectFunc`、`options *metav1.CreateOptions`。
 **返回值：** `runtime.Object, error`。
-**执行流程（以函数体首语句 store.go:596 为基线 +0）：**
+**执行流程（以函数体首语句 `e.create+1`（:596）为基线 +0）：**
 1. meta.Accessor（+3）→ `FillObjectMetaSystemFields`：填 UID/CreationTimestamp（+6）
 2. GenerateName 场景调 `CreateStrategy.GenerateName`（+7 ～ +9；本场景 name 已指定，跳过）
 3. `BeginCreate` 钩子（+12 ～ +21，Pod 未用，finishCreate=finishNothing）
@@ -191,7 +191,7 @@ POST /api/v1/namespaces/default/pods/nginx  # 命名创建（name 来自 URL 路
 **被调用：** BeforeCreate、createValidation、KeyFunc、etcd3 store.Create、AfterCreate。
 **状态变化：** 对象系统字段填充；etcd 新增；本地无持久状态。
 **关键数据结构：** storage key、QualifiedResource。
-**后置加工说明：** create 成功后仅调用 `e.AfterCreate(out, options)`（store.go:669 ～ :671，AfterCreate 字段定义 :189），**无对象后置 Decorator**——`Decorator` 词仅出现在存储配置装饰（:1747 DecodeDecorator、:1750、:1757 opts.Decorator，装饰 storage.Interface 后端），create 期无对象 Decorator。
+**后置加工说明：** create 成功后仅调用 `e.AfterCreate(out, options)`（`e.create+74~+76`，AfterCreate 字段定义 `Store+88`），**无对象后置 Decorator**——`Decorator` 词仅出现在存储配置装饰（`e.CompleteWithOptions+109` DecodeDecorator、`e.CompleteWithOptions+112`、`e.CompleteWithOptions+119` opts.Decorator，装饰 storage.Interface 后端），create 期无对象 Decorator。
 
 ### 函数：BeforeCreate
 **源码：** `[staging] registry/rest/create.go:103`

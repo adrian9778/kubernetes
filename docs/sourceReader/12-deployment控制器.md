@@ -35,20 +35,20 @@ Deployment 是用户面向 `apps/v1` 声明的工作负载抽象：期望副本�
 
 | 类型 | 文件 | 职责 |
 |---|---|---|
-| `DeploymentController` | `deployment_controller.go:71` | 持有 `rsControl`、`client`、`dLister`/`rsLister`/`podLister`、`podIndexer`、三个 `Synced`（+ 可选的 `workloadLister`/`workloadListerSynced`）、`syncHandler`、`enqueueDeployment`、`queue` |
-| `RSControlInterface` | `pkg/controller/controller_utils.go:441` | 认领/释放 RS 的抽象：`PatchReplicaSet`（当前仅此一方法） |
-| `RealRSControl` | `pkg/controller/controller_utils.go:446` | `RSControlInterface` 默认实现：`PatchReplicaSet`（:453，经 `StrategicMergePatchType` 打补丁） |
+| `DeploymentController` | `DeploymentController+0` | 持有 `rsControl`、`client`、`dLister`/`rsLister`/`podLister`、`podIndexer`、三个 `Synced`（+ 可选的 `workloadLister`/`workloadListerSynced`）、`syncHandler`、`enqueueDeployment`、`queue` |
+| `RSControlInterface` | `RSControlInterface+0` | 认领/释放 RS 的抽象：`PatchReplicaSet`（当前仅此一方法） |
+| `RealRSControl` | `RealRSControl+0` | `RSControlInterface` 默认实现：`PatchReplicaSet`（:453，经 `StrategicMergePatchType` 打补丁） |
 | （RS 侧类型见 08 篇） | — | — |
 
 `DeploymentController` 关键字段：
 
 | 字段 | 锚点 | 说明 |
 |---|---|---|
-| `rsControl` | `deployment_controller.go:73` | `controller.RSControlInterface`，认领/释放 RS 的归属 |
-| `queue` | `deployment_controller.go:109` | `workqueue.TypedRateLimitingInterface[string]`，键为 `namespace/name` |
-| `syncHandler` | `deployment_controller.go:80` | 可注入的调谐入口，绑定 `dc.syncDeployment` |
-| `enqueueDeployment` | `deployment_controller.go:82` | 可注入的入队函数，绑定 `dc.enqueue` |
-| `workloadLister` / `workloadListerSynced` | `deployment_controller.go:95-96` | `WorkloadWithDeployment` 特性开启时非 nil，否则 nil |
+| `rsControl` | `DeploymentController+2` | `controller.RSControlInterface`，认领/释放 RS 的归属 |
+| `queue` | `DeploymentController+38` | `workqueue.TypedRateLimitingInterface[string]`，键为 `namespace/name` |
+| `syncHandler` | `DeploymentController+9` | 可注入的调谐入口，绑定 `dc.syncDeployment` |
+| `enqueueDeployment` | `DeploymentController+11` | 可注入的入队函数，绑定 `dc.enqueue` |
+| `workloadLister` / `workloadListerSynced` | `DeploymentController+24~+25` | `WorkloadWithDeployment` 特性开启时非 nil，否则 nil |
 
 ## 3. 控制器运行函数级
 
@@ -87,7 +87,7 @@ Deployment 是用户面向 `apps/v1` 声明的工作负载抽象：期望副本�
 - Deployment：`addDeployment`（:223）/ `updateDeployment`（:229）/ `deleteDeployment`（:236，tombstone 兜底）——直接入队。
 - RS：`addReplicaSet`（:255，`DeletionTimestamp` 非空时转 `deleteReplicaSet`；有 ControllerRef 则反查，否则按孤儿匹配）/ `updateReplicaSet`（:311，ResourceVersion 相同直接返回；ControllerRef 变化时反查新旧两侧）/ `deleteReplicaSet`（:358，tombstone 兜底）。
 - Pod：只注册 `deletePod`（:392），沿 Pod→RS→Deployment 反查（`getDeploymentForPod`，:453）；仅当所属 Deployment 是 Recreate 策略时入队（:416-418）。
-- Workload（特性开启时）：`enqueueDeploymentForWorkload`（deployment_scheduling_manager.go:60），沿 Workload→Deployment 反查入队。
+- Workload（特性开启时）：`enqueueDeploymentForWorkload`（`dc.enqueueDeploymentForWorkload+0`），沿 Workload→Deployment 反查入队。
 
 ## 4. sync 主流程函数级
 
@@ -133,7 +133,7 @@ syncDeployment (+0)
 1. `FindNewReplicaSet` 找到新 RS；不存在且 `createIfNotExisted=false` 返回 nil。
 2. 已存在：同步注解（`SetNewReplicaSetAnnotations`）、`MinReadySeconds`、把 revision 写回 Deployment（+13 ～ +43）。
 3. 不存在且 `createIfNotExisted=true`：构造 `apps.ReplicaSet`（template + `pod-template-hash` label + ControllerRef），`NewRSNewReplicas` 算初始副本数，`SetNewReplicaSetAnnotations`，`ReplicaSets().Create`（+51 ～ +116）。
-4. `WorkloadWithDeployment` 特性下给新 RS 打 `WorkloadNameAnnotation`/`GroupTemplateNameAnnotation`（+114 ～ +123，sync.go:230-240）；delegated PodGroup 场景继承 Deployment 上的同名注解。
+4. `WorkloadWithDeployment` 特性下给新 RS 打 `WorkloadNameAnnotation`/`GroupTemplateNameAnnotation`（+114 ～ +123，`getNewReplicaSet+82~+92`）；delegated PodGroup 场景继承 Deployment 上的同名注解。
 5. 已存在冲突：校验 ControllerRef UID 与 template 语义相等，相等则复用，否则 `CollisionCount++` 并重排重试（+129 ～ +165）。
 
 ### 函数：FindNewReplicaSet / FindOldReplicaSets
@@ -168,16 +168,16 @@ syncDeployment (+0)
 rolloutRolling (+0)
 ├── 1. getAllReplicaSetsAndSyncRevision(ctx, d, rsList, createIfNotExisted=true) (+1)
 ├── 2. reconcileRollingReplicaSets（+7）：内部先扩后缩，完成后清理超限旧 RS
-│    ├── reconcileNewReplicaSet（reconcileRollingReplicaSets+2，rolling.go:44）——扩了立即返回
-│    ├── reconcileOldReplicaSets（reconcileRollingReplicaSets+8，rolling.go:50）——缩了立即返回
-│    └── DeploymentComplete 后 cleanupDeployment（reconcileRollingReplicaSets+13，rolling.go:56）
+│    ├── reconcileNewReplicaSet（rolling.go:reconcileRollingReplicaSets+2）——扩了立即返回
+│    ├── reconcileOldReplicaSets（rolling.go:reconcileRollingReplicaSets+8）——缩了立即返回
+│    └── DeploymentComplete 后 cleanupDeployment（rolling.go:reconcileRollingReplicaSets+14）
 └── 3. syncRolloutStatusAfter（+8，progress.go:syncRolloutStatusAfter+0）——包装 reconcile 错误与状态错误
 ```
 
 ### 函数：reconcileRollingReplicaSets
 
 **源码：** `rolling.go:reconcileRollingReplicaSets+0`
-**职责：** 新增的滚动协调骨架，把「先扩、后缩、清理」三步收拢进一个函数；`rolloutRolling` 不再直接调用三个子步骤，而是调本函数并在返回后统一走 `syncRolloutStatusAfter`。内部：`reconcileNewReplicaSet`（+2）→ 若有错或已扩则返回 → `reconcileOldReplicaSets`（+8）→ 若有错或已缩则返回 → `DeploymentComplete` 时 `cleanupDeployment`（+13）。
+**职责：** 新增的滚动协调骨架，把「先扩、后缩、清理」三步收拢进一个函数；`rolloutRolling` 不再直接调用三个子步骤，而是调本函数并在返回后统一走 `syncRolloutStatusAfter`。内部：`reconcileNewReplicaSet`（+2）→ 若有错或已扩则返回 → `reconcileOldReplicaSets`（+8）→ 若有错或已缩则返回 → `DeploymentComplete` 时 `cleanupDeployment`（+14）。
 
 ### 函数：reconcileNewReplicaSet
 
@@ -195,7 +195,7 @@ newRSUnavailablePodCount = newRS.replicas - newRS.available
 maxScaledDown = allPodsCount - minAvailable - newRSUnavailablePodCount
 ```
 该公式保证新 RS 未就绪的 Pod 也占用「不可用预算」，旧 RS 不会被过早缩掉（注释 +11 ～ +40 给出配额场景推演）。`maxScaledDown <= 0` 时直接返回（+44 ～ +46）。
-**内部步骤：** `cleanupUnhealthyReplicas`（+69，rolling.go:149，先缩旧 RS 的不健康副本）→ `scaleDownOldReplicaSetsForRollingUpdate`（+107，rolling.go:187，按 `maxScaledDown` 在旧 RS 间分配）。返回 `totalScaledDown > 0`（+64 ～ +65）。
+**内部步骤：** `cleanupUnhealthyReplicas`（+69，`cleanupUnhealthyReplicas+0`，先缩旧 RS 的不健康副本）→ `scaleDownOldReplicaSetsForRollingUpdate`（+107，`scaleDownOldReplicaSetsForRollingUpdate+0`，按 `maxScaledDown` 在旧 RS 间分配）。返回 `totalScaledDown > 0`（+64 ～ +65）。
 
 ### 函数：cleanupUnhealthyReplicas / scaleDownOldReplicaSetsForRollingUpdate
 
@@ -253,7 +253,7 @@ maxScaledDown            = allPodsCount - minAvailable - newRSUnavailablePodCoun
 ### 函数：calculateStatus / syncDeploymentStatus
 
 **源码：** `sync.go:calculateStatus+0` / `syncDeploymentStatus+0`
-**职责：** `calculateStatus`（:506）汇总 `Replicas`/`UpdatedReplicas`/`ReadyReplicas`/`AvailableReplicas`/`UnavailableReplicas`（`GetActualReplicaCountForReplicaSets` 系列，负数归零）；`DeploymentReplicaSetTerminatingReplicas` 特性开启时补 `TerminatingReplicas`（+20 ～ +22，sync.go:526-528）；据 `availableReplicas >= replicas - MaxUnavailable` 判定 `Available` condition（+30 ～ +36）。`syncDeploymentStatus`（:492）deep-equal 后 `UpdateStatus`。
+**职责：** `calculateStatus`（:506）汇总 `Replicas`/`UpdatedReplicas`/`ReadyReplicas`/`AvailableReplicas`/`UnavailableReplicas`（`GetActualReplicaCountForReplicaSets` 系列，负数归零）；`DeploymentReplicaSetTerminatingReplicas` 特性开启时补 `TerminatingReplicas`（+20 ～ +22，`calculateStatus+20~+22`）；据 `availableReplicas >= replicas - MaxUnavailable` 判定 `Available` condition（+30 ～ +36）。`syncDeploymentStatus`（:492）deep-equal 后 `UpdateStatus`。
 
 ### 函数：syncRolloutStatusAfter / syncRolloutStatus / requeueStuckDeployment
 
@@ -287,7 +287,7 @@ syncDeployment
 
 滚动更新不是瞬时完成，而是跨多个调度周期逐步推进。本节把「一轮 reconcile 后 Deployment 的 status 与 condition 如何变化」展开成时间线——这是用户 `kubectl rollout status` / `kubectl describe deployment` 看到的可见状态机。
 
-**每轮 reconcile 的状态计算：`calculateStatus`（`sync.go:506`）**
+**每轮 reconcile 的状态计算：`calculateStatus`（`calculateStatus+0`）**
 ```text
 availableReplicas   = Σ newRS + oldRSs 的 AvailableReplicas
 totalReplicas       = Σ 所有 RS 的 Spec.Replicas
@@ -297,14 +297,14 @@ ReadyReplicas       = Σ 所有 RS 的 ReadyReplicaCount
 ```
 - **Available condition**：`availableReplicas >= spec.Replicas - MaxUnavailable` → `Available=True`（`MinimumReplicasAvailable`）；否则 `Available=False`（`MinimumReplicasUnavailable`）。
 
-**Progressing condition 三分支（`syncRolloutStatus`，progress.go:49）：**
+**Progressing condition 三分支（`syncRolloutStatus+0`）：**
 | 分支 | 判定（`util` 函数） | Progressing condition | reason |
 |---|---|---|---|
 | 完成 | `DeploymentComplete`（util:744，`Replicas==UpdatedReplicas` 且已 Available） | True | `NewReplicaSetAvailable`（:83） |
 | 进行中 | `DeploymentProgressing`（util:755，新 RS 副本数有变化） | True | `ReplicaSetUpdated`（:73） |
 | 超时 | `DeploymentTimedOut`（util:774，超过 `progressDeadlineSeconds`） | **False** | `ProgressDeadlineExceeded`（:86） |
 
-**condition 迁移的精妙处（progress.go:76 ～ :95 注释）：**
+**condition 迁移的精妙处（`syncRolloutStatus+27` ～ 起的注释）：**
 - **仅 Progressing 是特例**：其它 condition 若新 reason 与旧 reason 相同则不更新；但 Progressing 要在「有进展」时**更新 lastUpdateTime、保留 lastTransitionTime**——即"仍在推进，别重置计时"。这正是 `progressDeadlineSeconds` 超时判定的计时基准。
 - **无 progressDeadlineSeconds** → 直接移除 Progressing condition（:52 ～ :54），不做进度估算。
 - **已完成（isCompleteDeployment）** → 不再估算进度（:58 ～ :62）。
@@ -322,7 +322,7 @@ ReadyReplicas       = Σ 所有 RS 的 ReadyReplicaCount
 **设计要点（源码可证）：**
 1. **Progressing 的 lastUpdateTime 与 lastTransitionTime 分离**：有进展时只刷 lastUpdateTime（保留 lastTransitionTime），使 `progressDeadlineSeconds` 度量「自上次真实进展以来的时长」而非「自 condition 创建以来的时长」。
 2. **超时置 False 而非删除**：`ProgressDeadlineExceeded` 把 Progressing 置 False，用户 `kubectl rollout status` 能看到明确的失败态，而非一直 Pending。
-3. **`syncRolloutStatusAfter` 包装**（progress.go:34）：即使 reconcile 出错也照样跑进度检查，防止「reconcile 失败 → 跳过超时判定 → 卡死在 Progressing」。
+3. **`syncRolloutStatusAfter` 包装**（`syncRolloutStatusAfter+0`）：即使 reconcile 出错也照样跑进度检查，防止「reconcile 失败 → 跳过超时判定 → 卡死在 Progressing」。
 4. **Available 与 Progressing 独立**：Available 看 minAvailable（是否够用），Progressing 看是否还在向新版本收敛——一个 Pod 滚动更新期间 Available 可为 True 而 Progressing 仍为 True。
 
 ## 9. 设计意图（源码可证）
@@ -337,7 +337,7 @@ ReadyReplicas       = Σ 所有 RS 的 ReadyReplicaCount
 
 - **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`，工作区 `.go` 文件干净（仅 docs 有未提交文档修改）。Go 1.27.4。
 - **证据索引**：`docs/sourceReader/.progress/evidence/12.md`，生成于 2026-11-18 21:10+08:00，与本文档锚点逐项一致。
-- **本次修正**：① 弃用裸行号，全部改「符号+偏移」（函数定义行 = +0）；② 补写 `reconcileRollingReplicaSets`（rolling.go:42）与 `syncRolloutStatusAfter`（progress.go:34）两处重构；③ `syncDeployment` 补 `SelectingAll` 检查（+26 ～ +34）与 workload 检查（+48 ～ +52）；④ `reconcileOldReplicaSets` 的 `maxScaledDown` 公式改为相对偏移 +41 ～ +43；⑤ `RealRSControl` 位置改为 `pkg/controller/controller_utils.go:446`，接口方法更新为 `PatchReplicaSet`（旧文误记为 Create/Update）。
+- **本次修正**：① 弃用裸行号，全部改「符号+偏移」（函数定义行 = +0）；② 补写 `reconcileRollingReplicaSets`（`reconcileRollingReplicaSets+0`）与 `syncRolloutStatusAfter`（`syncRolloutStatusAfter+0`）两处重构；③ `syncDeployment` 补 `SelectingAll` 检查（+26 ～ +34）与 workload 检查（+48 ～ +52）；④ `reconcileOldReplicaSets` 的 `maxScaledDown` 公式改为相对偏移 +41 ～ +43；⑤ `RealRSControl` 位置改为 `RealRSControl+0`，接口方法更新为 `PatchReplicaSet`（旧文误记为 Create/Update）。
 - **未确认项**：无。所有锚点均已按当前源码逐一核对。
 
 [上一篇](11-informer与workqueue机制.md) · [总目录](README.md) · [下一篇](13-job与cronjob控制器.md)

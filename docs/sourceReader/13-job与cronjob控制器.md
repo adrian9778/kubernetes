@@ -36,15 +36,15 @@
 ### 2. 类型级
 | 类型 | 锚点 | 职责 |
 |---|---|---|
-| `Controller` | `Controller @ job_controller.go:91` | Job 控制器主体（本分支无 Job 后缀，不存在 `JobController` 符号；已确认 grep 无匹配） |
-| `syncJobCtx` | `syncJobCtx @ job_controller.go:152` | 一次 sync 的聚合上下文：`job`、`pods`、`finishedCondition`、`activePods`、`succeeded`/`failed`、indexes、`newBackoffRecord`、`expectedRmFinalizers`、`uncounted`、`podsWithDelayedDeletionPerIndex`、`terminating`、`ready`、`podGroup`（仅 workload 集成 Job 设置，见 `shouldManageWorkloadForJob`） |
-| `uidTrackingExpectations` | `uidTrackingExpectations @ tracking_utils.go:51` | 记录「已请求摘除但 informer 尚未观测」的 tracking finalizer（UID 集合） |
-| `podBackoffStore`（字段） | `podBackoffStore @ job_controller.go:142`（字段声明）；`backoffStore` 类型定义 `backoff_utils.go:39` | 保存各 Job 的失败退避时间点 |
+| `Controller` | `Controller @ +0` | Job 控制器主体（本分支无 Job 后缀，不存在 `JobController` 符号；已确认 grep 无匹配） |
+| `syncJobCtx` | `syncJobCtx @ +0` | 一次 sync 的聚合上下文：`job`、`pods`、`finishedCondition`、`activePods`、`succeeded`/`failed`、indexes、`newBackoffRecord`、`expectedRmFinalizers`、`uncounted`、`podsWithDelayedDeletionPerIndex`、`terminating`、`ready`、`podGroup`（仅 workload 集成 Job 设置，见 `shouldManageWorkloadForJob`） |
+| `uidTrackingExpectations` | `uidTrackingExpectations @ +0` | 记录「已请求摘除但 informer 尚未观测」的 tracking finalizer（UID 集合） |
+| `podBackoffStore`（字段） | `podBackoffStore @ +51`（字段声明）；`backoffStore` 类型定义 `backoffStore+0` | 保存各 Job 的失败退避时间点 |
 
 ### 3. 函数级
 
 #### 函数：NewController / Run
-**锚点：** `NewController+0 @ job_controller.go:210`（内部 `newControllerWithClock+0 @ :219`）、`Run+0 @ :338`
+**锚点：** `NewController+0 @ +0`（内部 `newControllerWithClock+0 @ :219`）、`Run+0 @ :338`
 **执行流程：** `NewController` 注册 Job/Pod handler；`Run` 在 `WaitForNamedCacheSync` 后同时启动 `jm.worker` 与 `jm.orphanWorker`（孤儿 Pod 单独队列）。
 
 #### 函数：worker / processNextWorkItem
@@ -52,7 +52,7 @@
 **流程：** Get key → syncHandler（`syncJob`）→ 成功 `Forget`；失败 `AddRateLimited`。孤儿侧：`orphanWorker+0 @ :772` / `processNextOrphanPod+0 @ :777`。
 
 #### 函数：syncJob
-**锚点：** `syncJob+0 @ job_controller.go:929`
+**锚点：** `syncJob+0 @ +0`
 **职责：** Job 单次调谐主体。
 **执行流程：**
 ```text
@@ -157,14 +157,14 @@ remaining = backoffDuration - clock.Since(lastFailureTime)
 
 Job 怎么从「Pod 跑完」走到「Job 标记 Complete/Failed」？这不是一步完成的——中间有**未计数 Pod 门控**、**terminating 门控**、**两段 condition 转换**。本节把这条落定流程拆开。
 
-**finishedCondition 的诞生（syncJob，job_controller.go:1085 ～ :1143）：**
+**finishedCondition 的诞生（syncJob，jm.syncJob+156 ～ :1143）：**
 1. `jobCtx.finishedCondition = hasSuccessCriteriaMetCondition(&job)`（:1089）：先看是否已有 SuccessCriteriaMet condition（Indexed Job 的 successPolicy 满足）。
 2. 若无：把 FailureTarget condition 转成 Failed（:1097），或按 podFailurePolicy 新建 `JobFailureTarget`（:1101）。
 3. **BackoffLimit / Deadline 兜底**（:1105 ～ :1111）：`BackoffLimitExceeded`（:1109）、`DeadlineExceeded`（:1111）。
 4. **Indexed Job 的 failed indexes**（:1125 ～ :1129）：`MaxFailedIndexesExceeded`、`FailedIndexes`。
 5. **SuccessCriteriaMet**（:1135 ～ :1137）：成功策略满足 → `JobSuccessCriteriaMet` condition。
 
-**落定门控（`enactJobFinished`，job_controller.go:1628）：** 即使 finishedCondition 已定，也不立即落定——有两个门控：
+**落定门控（`enactJobFinished`，jm.enactJobFinished+0）：** 即使 finishedCondition 已定，也不立即落定——有两个门控：
 1. **未计数 Pod 门控**：`UncountedTerminatedPods` 里还有 succeeded/failed Pod 未被计数（`count > 0`）→ 延迟落定（:1635 ～ :1641）。这保证每个终止 Pod 都被精确计数一次（配合 tracking finalizer）。
 2. **terminating 门控**：`*jobCtx.terminating > 0`（还有正在删除的 Pod）→ 延迟落定（:1644 ～ :1649）。
 
@@ -215,8 +215,8 @@ SuccessCriteriaMet (ConditionTrue) ──(同上)──▶  Complete
 ### 6. 类型级
 | 类型 | 锚点 | 职责 |
 |---|---|---|
-| `ControllerV2` | `ControllerV2 @ cronjob_controllerv2.go:66` | 持有 queue、`jobControl`、`cjControl`、`cronJobLister`、`jobIndexer`、`now func() time.Time` |
-| `jobControlInterface` | `jobControlInterface @ injection.go:81` | `GetJob`/`CreateJob`/`DeleteJob` 的抽象（**定义在 injection.go，不在 cronjob_controllerv2.go**；旧文档未注文件，本次已更正） |
+| `ControllerV2` | `ControllerV2 @ +0` | 持有 queue、`jobControl`、`cjControl`、`cronJobLister`、`jobIndexer`、`now func() time.Time` |
+| `jobControlInterface` | `jobControlInterface @ +0` | `GetJob`/`CreateJob`/`DeleteJob` 的抽象（**定义在 injection.go，不在 cronjob_controllerv2.go**；旧文档未注文件，本次已更正） |
 
 ### 7. 函数级
 
@@ -229,22 +229,22 @@ SuccessCriteriaMet (ConditionTrue) ──(同上)──▶  Complete
 **sync 步骤：** lister 取 CronJob → `getCronJobJobsByIndexer`（`+0 @ :263`，枚举子 Job）→ `cleanupFinishedJobs`（`+0 @ :705`，history limit 超限走 `removeOldestJobs+0 @ :751`）→ `syncCronJob` → UpdateStatus。
 
 #### 函数：syncCronJob
-**锚点：** `syncCronJob+0 @ cronjob_controllerv2.go:449`（多行签名 :449-452）
+**锚点：** `syncCronJob+0 @ +0`（多行签名 :449-452）
 **执行流程：**
 ```text
 syncCronJob (+0 @ :449)
-├── 1. 遍历子 Job：inActiveList（utils.go:59）核对 Active；
-│      finished → deleteFromActiveList（utils.go:79）并更新 LastSuccessfulTime (+8～+46 :457-495)
+├── 1. 遍历子 Job：inActiveList（inActiveList+0）核对 Active；
+│      finished → deleteFromActiveList（deleteFromActiveList+0）并更新 LastSuccessfulTime (+8～+46 :457-495)
 ├── 2. Active 中已不存在的 Job（GetJob NotFound，MissingJob）摘除 (+48～+70 :497-519)
 ├── 3. DeletionTimestamp 直接返回；校验 timeZone；spec.Suspend 直接返回 (+72～+91 :521-540)
 ├── 4. parsers.ParseCronScheduleWithPanicRecovery（经 formatSchedule 包装）(+93 :542)
-├── 5. nextScheduleTime（utils.go:210）(+102 :551)；无 unmet 则返回下次时长
+├── 5. nextScheduleTime（nextScheduleTime+0）(+102 :551)；无 unmet 则返回下次时长
 ├── 6. startingDeadlineSeconds：tooLate=scheduledTime+deadline<now → MissSchedule (+120～+137 :569-586)
 ├── 7. inActiveListByName 防重名 (+138 :587)
 ├── 8. 并发策略（内联，无独立函数）:
 │      ForbidConcurrent 且 Active 非空 → JobAlreadyActive (+147～+158 :596-609)
 │      ReplaceConcurrent → 遍历 Active deleteJob (+160～+175 :611-624)
-├── 9. getJobFromTemplate2（utils.go:244）构造 Job (+178 :627)
+├── 9. getJobFromTemplate2（getJobFromTemplate2+0）构造 Job (+178 :627)
 └── 10. jobControl.CreateJob（AlreadyExists 且被本 CJ 拥有则补 Active）；
          追加 Active、设 LastScheduleTime (+183～+224 :632-673)
 ```
@@ -262,8 +262,8 @@ CronJob sync
       ├── getJobFromTemplate2
       └── jobControl.CreateJob
 ```
-**cron 解析锚点：** `ParseCronScheduleWithPanicRecovery @ pkg/util/parsers/parsers.go:59`（内部 `cron.ParseStandard`，robfig/cron；`cronjob_controllerv2.go:542` 调用，经 `formatSchedule` 包装）。
-**utils.go 锚点：** `inActiveList @ utils.go:59`、`deleteFromActiveList @ :79`、`mostRecentScheduleTime @ :100`、`nextScheduleTime @ :210`、`getJobFromTemplate2 @ :244`。
+**cron 解析锚点：** `ParseCronScheduleWithPanicRecovery @ pkg/util/parsers/parsers.go`（内部 `cron.ParseStandard`，robfig/cron；`jm.syncCronJob+93` 调用，经 `formatSchedule` 包装）。
+**utils.go 锚点：** `inActiveList @ inActiveList+0`、`deleteFromActiveList @ :79`、`mostRecentScheduleTime @ :100`、`nextScheduleTime @ :210`、`getJobFromTemplate2 @ :244`。
 
 ## 9. 两控制器的错误处理
 | 场景 | 行为 |
@@ -283,7 +283,7 @@ CronJob sync
 
 ### 验证
 - 证据索引：`docs/sourceReader/.progress/evidence/13.md`（2026-11-18 21:17+08:00 生成）。
-- 本轮核对：HEAD `8893923938107170c86eb4b8cc2b7225b4e44e9b`；Job 17 个函数锚点、CronJob 14 个符号锚点逐行回源码验证成立；`exceedsBackoffLimit` 确认为 `syncJob` 内局部变量（:1087）；`jobControlInterface` 确认在 `injection.go:81`；`syncJobCtx` 确认含 `podGroup`/`ready`/`terminating`/`podsWithDelayedDeletionPerIndex` 新增字段。
+- 本轮核对：HEAD `8893923938107170c86eb4b8cc2b7225b4e44e9b`；Job 17 个函数锚点、CronJob 14 个符号锚点逐行回源码验证成立；`exceedsBackoffLimit` 确认为 `syncJob` 内局部变量（:1087）；`jobControlInterface` 确认在 `jobControlInterface+0`；`syncJobCtx` 确认含 `podGroup`/`ready`/`terminating`/`podsWithDelayedDeletionPerIndex` 新增字段。
 - 未确认项：无（本文件全部锚点均已回源码验证，无 `[源码未确认]` 项）。
 
 [上一篇](12-deployment控制器.md) · [总目录](README.md) · [下一篇](14-daemonset控制器.md)

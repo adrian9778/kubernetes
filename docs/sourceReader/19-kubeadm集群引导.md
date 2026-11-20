@@ -49,13 +49,13 @@ kubeadm 是**引导**（bootstrap）而不是**管理**集群的工具：它把�
 | workflow `Runner` | `cmd/kubeadm/app/cmd/phases/workflow/runner.go#Runner+0`（:48） | 按 `AppendPhase`（:113）的顺序执行阶段，支持 phases 子命令单跑；`NewRunner`（:106）、`SetDataInitializer`（:174）、`InitData`（:181）、`Run`（:193）、`BindToCommand`（:317） |
 | `Phase` | `cmd/kubeadm/app/cmd/phases/workflow/phase.go` | 阶段接口：Name/Short/Example/Init/Run/PostRun |
 
-> **修正说明（相对旧版）**：workflow 包实际路径为 `cmd/kubeadm/app/cmd/phases/workflow/`（旧文写 `app/cmd/workflow/`），Runner 定义在 runner.go:48。
+> **修正说明（相对旧版）**：workflow 包实际路径为 `cmd/kubeadm/app/cmd/phases/workflow/`（旧文写 `app/cmd/workflow/`），Runner 定义在 `Runner+0`。
 
 ### 2.3 命令组织函数级
 
 #### 函数：Run / NewKubeadmCommand
 **源码：** `cmd/kubeadm/app/kubeadm.go#Run+0`（:32，:47 调 `cmd.NewKubeadmCommand`）/ `cmd/kubeadm/app/cmd/cmd.go#NewKubeadmCommand+0`（:32）
-**子命令注册（cmd.go:83 ～ :94，`NewKubeadmCommand` 内）：** certs（:83）、completion（:84）、config（:85）、init（:86）、join（:87）、reset（:88）、version（:89）、token（:90）、upgrade（`upgrade.NewCmdUpgrade`，:91）、alpha（:92）、kubeconfig（:94）。
+**子命令注册（`NewKubeadmCommand+51~+62`，`NewKubeadmCommand` 内）：** certs（:83）、completion（:84）、config（:85）、init（:86）、join（:87）、reset（:88）、version（:89）、token（:90）、upgrade（`upgrade.NewCmdUpgrade`，:91）、alpha（:92）、kubeconfig（:94）。
 
 > **修正说明（相对旧版）**：子命令注册起始由旧文「:82 起」变为 **:83 起**（:83～:94，+1）；旧文把范围写成「:82 ～ +95」，现按逐条 AddCommand 精确列位。
 
@@ -74,7 +74,7 @@ kubeadm 是**引导**（bootstrap）而不是**管理**集群的工具：它把�
 **源码：** `cmd/kubeadm/app/cmd/init.go#newCmdInit+0`（:112）
 **执行流程：** `workflow.NewRunner()` → `initRunner.SetDataInitializer`（`newInitData`，:307：加载配置、生成证书材料、准备 clientset）→ `initRunner.Run` 按阶段顺序执行；阶段构造器在 `cmd/kubeadm/app/cmd/phases/init/`。
 
-#### init 阶段顺序（init.go:157 ～ :170，`newCmdInit` 内 AppendPhase）
+#### init 阶段顺序（`newCmdInit+45~+58`，`newCmdInit` 内 AppendPhase）
 ```text
 NewPreflightPhase        # 环境检查（端口、内核、容器运行时、swap）
 NewCertsPhase            # 证书与 CA
@@ -151,7 +151,7 @@ NewShowJoinCommandPhase  # 打印 join 命令
 
 ### 2.6 join 与 bootstrap token 函数级
 
-#### join 阶段（join.go:222 ～ :229，`newCmdJoin` 内 AppendPhase）
+#### join 阶段（`newCmdJoin+57~+64`，`newCmdJoin` 内 AppendPhase）
 ```text
 Preflight → ControlPlanePrepare（仅 control-plane 节点）→ CheckEtcd
 → KubeletStart → EtcdJoin → KubeletWaitBootstrap
@@ -165,9 +165,9 @@ Preflight → ControlPlanePrepare（仅 control-plane 节点）→ CheckEtcd
 | `token.BuildInsecureBootstrapKubeConfig` | 定义 `cmd/kubeadm/app/discovery/token/token.go#BuildInsecureBootstrapKubeConfig+0`（:155）；调用点 `cmd/kubeadm/app/cmd/join.go#newCmdJoin+433`（:598） | 用 token 建临时 bootstrap kubeconfig |
 | `configutil.FetchInitConfigurationFromCluster` | 定义 `cmd/kubeadm/app/util/config/cluster.go#FetchInitConfigurationFromCluster+0`（:58）；调用点 `cmd/kubeadm/app/cmd/join.go#newCmdJoin+557`（:722） | 拉集群配置（API bind 端口、版本） |
 | `CreateBootstrapConfigMapIfNotExists` | `cmd/kubeadm/app/phases/bootstraptoken/clusterinfo/clusterinfo.go#CreateBootstrapConfigMapIfNotExists+0`（:42） | 建 `cluster-info` ConfigMap |
-| `NewKubeletStartPhase` | `cmd/kubeadm/app/cmd/phases/join/kubelet.go#NewKubeletStartPhase+0`（:50） | TryStopKubelet → WriteInstanceConfigToDisk/WriteConfigToDisk → kubeletphase.TryStartKubelet（join/kubelet.go:230，调用点） |
+| `NewKubeletStartPhase` | `cmd/kubeadm/app/cmd/phases/join/kubelet.go#NewKubeletStartPhase+0`（:50） | TryStopKubelet → WriteInstanceConfigToDisk/WriteConfigToDisk → kubeletphase.TryStartKubelet（`NewKubeletStartPhase+180`，调用点） |
 
-> **修正说明（相对旧版）**：`BuildInsecureBootstrapKubeConfig` 与 `FetchInitConfigurationFromCluster` 的**定义**均不在 join.go 内——分别迁移至 `discovery/token/token.go:155` 与 `util/config/cluster.go:58`，join.go:598/722 现仅剩调用点（旧文按「join.go 内定义」标注需更正）。
+> **修正说明（相对旧版）**：`BuildInsecureBootstrapKubeConfig` 与 `FetchInitConfigurationFromCluster` 的**定义**均不在 join.go 内——分别迁移至 `discovery/token/token.go#BuildInsecureBootstrapKubeConfig+0` 与 `util/config/cluster.go#FetchInitConfigurationFromCluster+0`，join.go 的 `newCmdJoin+433`/`newCmdJoin+557` 现仅剩调用点（旧文按「join.go 内定义」标注需更正）。
 
 **证书引导语义：** kubelet 先用 bootstrap token 向 apiserver 申请客户端证书（CSR），`AutoApproveNodeBootstrapTokens` 等预置 RBAC 自动批准；后续证书轮转走 `AutoApproveNodeCertificateRotation`。kubelet 取得正式证书后脱离 bootstrap 身份。
 
@@ -177,8 +177,8 @@ Preflight → ControlPlanePrepare（仅 control-plane 节点）→ CheckEtcd
 
 ### 2.8 调用关系总览
 ```text
-main（kubeadm.go:24）→ Run（app/kubeadm.go:32）→ NewKubeadmCommand（cmd/cmd.go:32）
- └── init RunE（init.go:112）: newInitData（:307）→ workflow.Runner.Run
+main（`main+0`）→ Run（`Run+0`）→ NewKubeadmCommand（`NewKubeadmCommand+0`）
+ └── init RunE（`newCmdInit+0`）: newInitData（`newInitData+0`）→ workflow.Runner.Run
       ├── CreatePKIAssets / CreateKubeConfigFile
       ├── CreateLocalEtcdStaticPodManifestFile
       ├── CreateInitStaticPodManifestFiles
@@ -187,7 +187,7 @@ main（kubeadm.go:24）→ Run（app/kubeadm.go:32）→ NewKubeadmCommand（cmd
       ├── WaitControlPlane
       ├── UpdateOrCreateTokens / AutoApproveNodeBootstrapTokens
       └── EnsureDNSAddon / EnsureProxyAddon
- join（join.go:165）: BuildInsecureBootstrapKubeConfig（定义 discovery/token/token.go:155）
+ join（`newCmdJoin+0`）: BuildInsecureBootstrapKubeConfig（定义 `BuildInsecureBootstrapKubeConfig+0`）
       → CreateBootstrapConfigMapIfNotExists → TryStartKubelet →（control-plane）ControlPlaneJoin
 ```
 
@@ -204,16 +204,16 @@ kubeadm 的设计把「引导」与「运行」彻底分离：它只负责把集
 
 ## 4. 验证
 
-本稿按当前代码基准核实：所有源码锚点以「符号+偏移」（函数定义行=+0）标注，关键定义行已逐一 grep 复核；kubeadm 未迁移 staging、定义文件迁移（discovery/token/token.go:155、util/config/cluster.go:58）与 `WriteStaticPodToDisk` 定位（:191）均按当前值照抄。无消失符号。
+本稿按当前代码基准核实：所有源码锚点以「符号+偏移」（函数定义行=+0）标注，关键定义行已逐一 grep 复核；kubeadm 未迁移 staging、定义文件迁移（`BuildInsecureBootstrapKubeConfig+0`、`FetchInitConfigurationFromCluster+0`）与 `WriteStaticPodToDisk` 定位（`WriteStaticPodToDisk+0`）均按当前值照抄。无消失符号。
 
 | 核对项 | 结果 |
 |---|---|
 | kubeadm 是否在 staging | 否（`staging/src/k8s.io/kubeadm/` 不存在，go.mod 无引用） |
 | `cmd/kubeadm/` 是否只剩 main | 否（仍含完整 `app/`、`apis/`、`discovery/`、`util/`、`constants/`） |
-| `WriteStaticPodToDisk` 定义 | `util/staticpod/utils.go:191`（旧 :175，+16） |
-| `BuildInsecureBootstrapKubeConfig` 定义 | `discovery/token/token.go:155`（join.go:598 仅调用点） |
-| `FetchInitConfigurationFromCluster` 定义 | `util/config/cluster.go:58`（join.go:722 仅调用点） |
-| workflow Runner 路径 | `cmd/kubeadm/app/cmd/phases/workflow/runner.go:48`（旧文 `app/cmd/workflow/` 需更正） |
+| `WriteStaticPodToDisk` 定义 | `WriteStaticPodToDisk+0`（旧 :175，+16） |
+| `BuildInsecureBootstrapKubeConfig` 定义 | `BuildInsecureBootstrapKubeConfig+0`（`newCmdJoin+433` 仅调用点） |
+| `FetchInitConfigurationFromCluster` 定义 | `FetchInitConfigurationFromCluster+0`（`newCmdJoin+557` 仅调用点） |
+| workflow Runner 路径 | `cmd/kubeadm/app/cmd/phases/workflow/runner.go#Runner+0`（旧文 `app/cmd/workflow/` 需更正） |
 | 其余锚点 | 零漂移（main :24、Run :32、NewKubeadmCommand :32、newCmdInit :112、newInitData :307、newCmdJoin :165、newCmdReset :214、NewCmdUpgrade :44、phases 全部、ComponentPod :63、GetStaticPodFilepath :603、NewKubeletStartPhase :50、TryStartKubelet 调用点 :230、CreateBootstrapConfigMapIfNotExists :42） |
 
 ---
