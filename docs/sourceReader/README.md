@@ -76,6 +76,7 @@ flowchart TD
 | [aggregator 代理转发](topics/aggregator代理转发.md) | kube-aggregator 代理转发 | proxyHandler.ServeHTTP 五个早退守卫（local/不可用/transport 错/缺用户）→ResolveEndpoint 后端解析→NewAuthProxyRoundTripper 身份透传→NewUpgradeAwareHandler 转发；transport 复用 |
 | [CRD conversion webhook](topics/CRD-conversion-webhook.md) | CRD 多版本转换 | 转换器工厂按策略分派（nopConverter/webhookConverter）→webhookConverter.Convert（getObjectsToConvert batch 打包→webhook /convert→validateConvertedObject 校验）→safeConverterWrapper 防御性拷贝 |
 | [conntrack 与 ServiceCIDR](topics/conntrack与ServiceCIDR.md) | conntrack 清理与 ServiceCIDR | CleanStaleEntries（ListEntries→MatchConntrackFlow 筛陈旧→DeleteEntries 删死路径）+ flowFilter 去重；ServiceCIDRConfig 独立 informer（iptables OnServiceCIDRsChanged 为 no-op） |
+| [kubelet volume manager](topics/kubelet-volume-manager.md) | kubelet 卷挂载调谐 | 双状态模型（desired/actual state）→reconciler 调谐循环（unmountVolumes→mountOrAttachVolumes→expandVolume→unmountDetachDevices）→operationexecutor 两阶段挂载（attach→mount）；populator 异步填充 desired |
 
 新增专题：在 `topics/` 下建 `中文名.md`，按单篇专题骨架（先总结、再生产、再开发、末验证）写，并在本表追加一行。
 
