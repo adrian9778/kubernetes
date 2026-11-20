@@ -78,6 +78,7 @@ flowchart TD
 | [conntrack 与 ServiceCIDR](topics/conntrack与ServiceCIDR.md) | conntrack 清理与 ServiceCIDR | CleanStaleEntries（ListEntries→MatchConntrackFlow 筛陈旧→DeleteEntries 删死路径）+ flowFilter 去重；ServiceCIDRConfig 独立 informer（iptables OnServiceCIDRsChanged 为 no-op） |
 | [kubelet volume manager](topics/kubelet-volume-manager.md) | kubelet 卷挂载调谐 | 双状态模型（desired/actual state）→reconciler 调谐循环（unmountVolumes→mountOrAttachVolumes→expandVolume→unmountDetachDevices）→operationexecutor 两阶段挂载（attach→mount）；populator 异步填充 desired |
 | [kubelet image pull 与背压](topics/kubelet-image-pull背压.md) | kubelet 镜像拉取与背压 | EnsureImageExists 拉取决策→pull backoff（podUID_image 指数退避）+QPS 节流（throttleImagePulling）+parallel/serial puller 并发控制；image GC 按磁盘水位清理 |
+| [apiserver discovery 与 OpenAPI](topics/apiserver-discovery与OpenAPI.md) | discovery 与 OpenAPI 生成 | discovery 三层 handler（root `/apis`→group→version 资源列表）+aggregated discovery 聚合一次返回；OpenAPI v2/v3（DefaultOpenAPIConfig/DefaultOpenAPIV3Config）；CRD/聚合 API 动态并入 |
 
 新增专题：在 `topics/` 下建 `中文名.md`，按单篇专题骨架（先总结、再生产、再开发、末验证）写，并在本表追加一行。
 
