@@ -10,7 +10,7 @@
 
 ### 1. CRD：用户眼中的效果
 - 用户创建 `CustomResourceDefinition` 后，`/apis/<group>/<version>/<resource>` 即出现一组可增删改查的 REST 端点，行为与内置资源一致（同样走 generic Store、支持 list/watch/status/scale 子资源、结构化 schema 校验与默认值注入）。
-- CR 请求**不**经 go-restful 路由：`crdHandler` 注册在 NonGoRestfulMux 的 `/apis` 与 `/apis/` 前缀（`apiserver.go:208` ～ +209），请求到达时才按 CRD 构造 serving info，即「懒安装」。
+- CR 请求**不**经 go-restful 路由：`crdHandler` 注册在 NonGoRestfulMux 的 `/apis` 与 `/apis/` 前缀（`c.New+80` ～ +81），请求到达时才按 CRD 构造 serving info，即「懒安装」。
 - 对用户透明：CRD 更新（spec 或 acceptedNames 变化）后，旧版本存储缓存先失效，下次请求自动重建；CRD 删除后，对应存储随 tearDown 释放。
 - 边界行为：请求的 scope 与 CRD 不符、版本未 served、NamespaceAccepted/Established 条件不满足时，请求落到 delegate（404 语义）；`crdLister.Get` 未命中同样委托 delegate。
 
@@ -35,18 +35,18 @@
 ### 4. 类型级
 | 类型 | 文件 | 职责 |
 |---|---|---|
-| `CustomResourceDefinitions` | `pkg/apiserver/apiserver.go:108` | 内嵌 GenericAPIServer 与 Informers；CRD server 主体 |
+| `CustomResourceDefinitions` | `pkg/apiserver/apiserver.go CustomResourceDefinitions+0`（:108） | 内嵌 GenericAPIServer 与 Informers；CRD server 主体 |
 | `Config/CompletedConfig` | :93/:103 | 装配配置 |
-| `crdHandler` | `pkg/apiserver/customresource_handler.go:92` | 持有 `customStorage atomic.Value`（crdStorageMap）、crdLister、restOptionsGetter、admission、converterFactory |
+| `crdHandler` | `pkg/apiserver/customresource_handler.go crdHandler+0`（:92） | 持有 `customStorage atomic.Value`（crdStorageMap）、crdLister、restOptionsGetter、admission、converterFactory |
 | `crdInfo` | :137 | 单个 CRD 的运行态：spec、acceptedNames、`storages map[string]CustomResourceStorage`、requestScopes、storageVersion、deprecated、warnings、waitGroup |
 | `crdStorageMap` | :168 | `map[types.UID]*crdInfo` |
-| `CustomResourceStorage` | `pkg/registry/customresource/etcd.go:39` | 一个版本的 CR 存储集合：CustomResource/Status/Scale 三个 REST |
-| `REST`（customresource） | `etcd.go:105` | 内嵌 genericregistry.Store，CR 实例的实际存储 |
+| `CustomResourceStorage` | `pkg/registry/customresource/etcd.go CustomResourceStorage+0`（:39） | 一个版本的 CR 存储集合：CustomResource/Status/Scale 三个 REST |
+| `REST`（customresource） | `etcd.go REST+0`（:105） | 内嵌 genericregistry.Store，CR 实例的实际存储 |
 
 ### 5. 装配函数级
 
 #### 函数：completedConfig.New
-**源码：** `pkg/apiserver/apiserver.go:128`
+**源码：** `pkg/apiserver/apiserver.go c.New+0`（:128）
 **执行流程：**
 1. `customresourcedefinition.NewREST`（:151）+ NewStatusREST 放入 storage map
 2. `GenericAPIServer.InstallAPIGroup` 注册 `customresourcedefinitions` 资源本身（:162）
@@ -56,11 +56,11 @@
 ### 6. 动态安装与请求分发函数级
 
 #### 函数：NewCustomResourceDefinitionHandler
-**源码：** `pkg/apiserver/customresource_handler.go:170`
+**源码：** `pkg/apiserver/customresource_handler.go NewCustomResourceDefinitionHandler+0`（:170）
 **注册：** `crdInformer.AddEventHandler`（:202）→ createCustomResourceDefinition:460 / updateCustomResourceDefinition:479 / removeDeadStorage；spec 或 acceptedNames 变化时 `removeStorage_locked`（:520，tearDown:566）使对应 crdInfo 缓存失效。
 
 #### 函数：(*crdHandler).ServeHTTP
-**源码：** `pkg/apiserver/customresource_handler.go:229`
+**源码：** `pkg/apiserver/customresource_handler.go r.ServeHTTP+0`（:229）
 **职责：** 全部 CR 实例请求的统一入口。
 **执行流程：**
 ```text
@@ -83,7 +83,7 @@ ServeHTTP (+0)
 **懒安装语义：** CRD 对象存在后，第一次 CR 请求才触发版本存储构造；CRD 更新则先失效缓存，下次请求重建。
 
 #### 函数：(*crdHandler).serveResource
-**源码：** `pkg/apiserver/customresource_handler.go:369`
+**源码：** `pkg/apiserver/customresource_handler.go r.serveResource+0`（:369）
 **流程：** 取 `requestScopes[version]` 与 `storages[version].CustomResource`，按 verb 分派：get（+5）、list（+7）、watch（+10）、create（+13，HA 下 Established 后 2s 内创建会 sleep 2s）、update（+27）、patch（+29）、delete、deletecollection。
 
 #### 函数：(*crdHandler).serveStatus / serveScale
@@ -91,14 +91,14 @@ ServeHTTP (+0)
 **流程：** 分别取 `statusRequestScopes`/`scaleRequestScopes` 与 `Status`/`Scale` 存储，按 get/update/patch 分派。
 
 #### 函数：(*crdHandler).getOrCreateServingInfoFor
-**源码：** `pkg/apiserver/customresource_handler.go:617`
+**源码：** `pkg/apiserver/customresource_handler.go r.getOrCreateServingInfoFor+0`（:617）
 **流程：** `customStorage.Load`（+1）命中即返回；未命中加锁（+6），锁内重新 `crdLister.Get`（+13）双检，再按版本构造 structural schema（PruneDefaults 注入默认值）、`customresource.NewStorage`、converter、scope 并写回 atomic map。
 
 #### CR 创建请求流解剖（第二层补充视角）
 
 CR（Custom Resource）实例的创建与内置资源走**不同的路由机制**：CR 不经 go-restful，而是 crdHandler 注册在 NonGoRestfulMux 的 `/apis` 前缀。本节走一个 `POST /apis/example.com/v1/namespaces/default/widgets` 请求，看它如何被 crdHandler 处理。
 
-**第一步：crdHandler.ServeHTTP 入口分流（customresource_handler.go:229）**
+**第一步：crdHandler.ServeHTTP 入口分流（`customresource_handler.go r.ServeHTTP+0`，:229）**
 ```text
 ServeHTTP (+0)
 ├── RequestInfoFrom(ctx) 无 → InternalError
@@ -158,9 +158,9 @@ serveResource（:369）
 ### 7. CR 实例存储
 | 函数/类型 | 文件 | 职责 |
 |---|---|---|
-| `NewStorage` | `staging/src/k8s.io/apiextensions-apiserver/pkg/registry/customresource/etcd.go:45` | 构造一个版本的 CustomResourceStorage（本分支无 `NewResourceHandler`，全仓 grep 无） |
-| `customResourceStrategy` | `strategy.go:54` | CR 的默认化与声明式校验（含 structural schema、CEL 校验） |
-| `REST` | etcd.go:105 | 复用 generic Store，CR 的增删改查行为与内置资源一致 |
+| `NewStorage` | `staging/src/k8s.io/apiextensions-apiserver/pkg/registry/customresource/etcd.go NewStorage+0`（:45） | 构造一个版本的 CustomResourceStorage（本分支无 `NewResourceHandler`，全仓 grep 无） |
+| `customResourceStrategy` | `strategy.go customResourceStrategy+0`（:54） | CR 的默认化与声明式校验（含 structural schema、CEL 校验） |
+| `REST` | etcd.go `REST+0`（:105） | 复用 generic Store，CR 的增删改查行为与内置资源一致 |
 | `StatusREST/ScaleREST` | :119/:150 | 子资源 |
 
 ## 第三部分：开发视角——聚合层
@@ -177,40 +177,40 @@ serveResource（:369）
 ### 9. 类型级
 | 类型 | 文件 | 职责 |
 |---|---|---|
-| `APIAggregator` | `pkg/apiserver/apiserver.go:148` | 内嵌 GenericAPIServer、delegateHandler、`proxyHandlers map[string]*proxyHandler`、handledGroupVersions、lister、serviceResolver、proxyTransportDial |
-| `APIServiceRegistrationController` | `pkg/apiserver/apiservice_controller.go:45` | watch APIService，调 APIHandlerManager（Add/RemoveAPIService） |
-| `proxyHandler` | `pkg/apiserver/handler_proxy.go:51` | 单个 group/version 的代理：localDelegate、proxyTransportDial、handlingInfo atomic |
+| `APIAggregator` | `pkg/apiserver/apiserver.go APIAggregator+0`（:148） | 内嵌 GenericAPIServer、delegateHandler、`proxyHandlers map[string]*proxyHandler`、handledGroupVersions、lister、serviceResolver、proxyTransportDial |
+| `APIServiceRegistrationController` | `pkg/apiserver/apiservice_controller.go APIServiceRegistrationController+0`（:45） | watch APIService，调 APIHandlerManager（Add/RemoveAPIService） |
+| `proxyHandler` | `pkg/apiserver/handler_proxy.go proxyHandler+0`（:51） | 单个 group/version 的代理：localDelegate、proxyTransportDial、handlingInfo atomic |
 | `proxyHandlingInfo` | :71 | local 标记、TLS 配置、proxyRoundTripper、后端 service/namespace/port、serviceAvailable |
-| `ServiceResolver` | `pkg/apiserver/resolvers.go:27` | 解析后端 Service 的 endpoint（EndpointSlice/ClusterIP/Loopback 三种实现） |
+| `ServiceResolver` | `pkg/apiserver/resolvers.go ServiceResolver+0`（:27） | 解析后端 Service 的 endpoint（EndpointSlice/ClusterIP/Loopback 三种实现） |
 
 ### 10. 装配函数级
 
 #### 函数：completedConfig.NewWithDelegate
-**源码：** `pkg/apiserver/apiserver.go:212`
+**源码：** `pkg/apiserver/apiserver.go c.NewWithDelegate+0`（:212）
 **执行流程：**
 1. `apiservicerest.NewRESTStorage`（:266）+ InstallAPIGroup（:267）
 2. `NewAPIServiceRegistrationController`（:303）
 3. 装配 proxyTransportDial（egress dialer 或 ExtraConfig，:244/:247）
 
 #### 函数：NewAPIServiceRegistrationController
-**源码：** `pkg/apiserver/apiservice_controller.go:60`
+**源码：** `pkg/apiserver/apiservice_controller.go NewAPIServiceRegistrationController+0`（:60）
 **sync（:82）：** NotFound → RemoveAPIService；存在 → AddAPIService；标准 workqueue worker 模式（Run :96，单 worker :131）。
 
 ### 11. 注册与代理函数级
 
 #### 函数：(*APIAggregator).AddAPIService
-**源码：** `pkg/apiserver/apiserver.go:530`
+**源码：** `pkg/apiserver/apiserver.go s.AddAPIService+0`（:530）
 **执行流程：**
 1. 已存在 → 对应 proxyHandler.updateAPIService（:534）
 2. 新建：proxyPath = `/apis/<group>/<version>`（legacy `v1.` 特例为 `/api`），构造 proxyHandler（:557）
 3. 注册到 NonGoRestfulMux（Handle + UnlistedHandlePrefix，:577/578）；记录 handledGroupVersions（:608）
 
 #### 函数：(*APIAggregator).RemoveAPIService
-**源码：** `pkg/apiserver/apiserver.go:614`
+**源码：** `pkg/apiserver/apiserver.go s.RemoveAPIService+0`（:614）
 **动作：** NonGoRestfulMux.Unregister(proxyPath 及 /) + 删除 proxyHandlers 条目；group 下无剩余版本时注销 groupPath。
 
 #### 函数：(*proxyHandler).ServeHTTP
-**源码：** `pkg/apiserver/handler_proxy.go:107`
+**源码：** `pkg/apiserver/handler_proxy.go r.ServeHTTP+0`（:107）
 **执行流程：**
 ```text
 ServeHTTP (+0)
@@ -224,11 +224,11 @@ ServeHTTP (+0)
 └── 8. NewUpgradeAwareHandler（+75，upgrade 走 SetAuthProxyHeaders 直连）
          .ServeHTTP（支持 WebSocket/SPDY 升级与流式响应）
 ```
-`NewUpgradeAwareHandler` 定义于 `[staging] k8s.io/apimachinery/pkg/util/proxy/upgradeaware.go:181`（handler_proxy.go:25 经 `k8s.io/apimachinery/pkg/util/proxy` 导入）。
+`NewUpgradeAwareHandler` 定义于 `[staging] k8s.io/apimachinery/pkg/util/proxy/upgradeaware.go NewUpgradeAwareHandler+0`（:181）（handler_proxy.go:25 经 `k8s.io/apimachinery/pkg/util/proxy` 导入）。
 
 #### ServeHTTP 五个早退守卫与升级分支深度拆解
 
-`proxyHandler.ServeHTTP`（`handler_proxy.go:107`）是聚合层请求的必经点。它在真正转发前有 **5 个顺序早退守卫**，每个对应一种「无法代理」的形态：
+`proxyHandler.ServeHTTP`（`handler_proxy.go r.ServeHTTP+0`，:107）是聚合层请求的必经点。它在真正转发前有 **5 个顺序早退守卫**，每个对应一种「无法代理」的形态：
 
 | 序 | 守卫条件 | 动作 | 含义 |
 |---|---|---|---|
@@ -260,14 +260,14 @@ ServeHTTP (+0)
 4. **升级与非升级双路径**：WebSocket/SPDY 升级必须绕过 RoundTripper 直连，故身份头需提前写入请求；这是聚合层最易出错的分支。
 
 #### 函数：(*proxyHandler).updateAPIService
-**源码：** `pkg/apiserver/handler_proxy.go:215`
-**职责：** `remote.BuildTransportConfig`（`staging/src/k8s.io/kube-aggregator/pkg/controllers/status/remote/remote_available_controller.go:163`，TLS ServerName `<svc>.<ns>.svc`，CA/Cert/Key，InsecureSkipTLSVerify）→ `transport.New(transportConfig)`（:237）构造 RoundTripper，更新 handlingInfo（:241）。
+**源码：** `r.updateAPIService+0`
+**职责：** `BuildTransportConfig+0`（TLS ServerName `<svc>.<ns>.svc`，CA/Cert/Key，InsecureSkipTLSVerify）→ `transport.New(transportConfig)`（:237）构造 RoundTripper，更新 handlingInfo（:241）。
 
 ### 12. APIService registry
 | 函数/文件 | 行 | 职责 |
 |---|---|---|
-| `NewREST/NewStatusREST` | `staging/src/k8s.io/kube-aggregator/pkg/registry/apiservice/etcd/etcd.go:42/:130` | APIService 对象存储 |
-| `NewRESTStorage` | `staging/src/k8s.io/kube-aggregator/pkg/registry/apiservice/rest/storage_apiservice.go:33` | APIGroupInfo 装配 |
+| `NewREST/NewStatusREST` | `NewREST+0`/`NewStatusREST+0` | APIService 对象存储 |
+| `NewRESTStorage` | `NewRESTStorage+0` | APIGroupInfo 装配 |
 
 ## 第四部分：两种扩展机制对比
 
