@@ -64,6 +64,7 @@ flowchart TD
 | [scheduler 过滤打分框架](topics/scheduler过滤打分框架.md) | kube-scheduler 调度周期 | SchedulePod 两阶段：PreFilter→Filter（并行逐节点）→PostFilter、PreScore→Score（分×权重选节点）；10 个扩展点接口 |
 | [Deployment 滚动更新](topics/deployment滚动更新.md) | Deployment 滚动更新 | syncDeployment 策略分派→rolloutRolling 先扩后缩（maxSurge/maxUnavailable）、比例伸缩 GetReplicaSetProportion、回滚=模板回退 |
 | [kubelet 同步循环与 PLEG](topics/kubelet同步循环与PLEG.md) | kubelet 主循环与状态探测 | 三源 PodConfig→syncLoop 事件分派→podWorkers per-Pod 串行（podWorkerLoop）→SyncPod；GenericPLEG 周期 Relist 生成容器事件驱动自愈 |
+| [garbage-collector 依赖图与级联删除](topics/garbage-collector依赖图与级联删除.md) | GC 依赖图与级联删除 | GraphBuilder 依赖图装配→classifyReferences/isDangling 判定→attemptToDeleteItem 按 finalizer 选策略；Foreground/Background/Orphan 三路径 |
 
 新增专题：在 `topics/` 下建 `中文名.md`，按单篇专题骨架（先总结、再生产、再开发、末验证）写，并在本表追加一行。
 
