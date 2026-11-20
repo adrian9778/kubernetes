@@ -194,9 +194,9 @@ POST /api/v1/namespaces/default/pods/nginx  # 命名创建（name 来自 URL 路
 **后置加工说明：** create 成功后仅调用 `e.AfterCreate(out, options)`（`e.create+74~+76`，AfterCreate 字段定义 `Store+88`），**无对象后置 Decorator**——`Decorator` 词仅出现在存储配置装饰（`e.CompleteWithOptions+109` DecodeDecorator、`e.CompleteWithOptions+112`、`e.CompleteWithOptions+119` opts.Decorator，装饰 storage.Interface 后端），create 期无对象 Decorator。
 
 ### 函数：BeforeCreate
-**源码：** `[staging] registry/rest/create.go:103`
+**源码：** `[staging] registry/rest/create.go BeforeCreate+0`（:103）
 **职责：** 校验前置元数据 + 执行 strategy 的默认化与声明式校验。
-**执行流程（以函数体首语句 create.go:104 为基线 +0）：**
+**执行流程（以函数体首语句 `BeforeCreate+1`（:104）为基线 +0）：**
 1. `objectMetaAndKind` 取 meta 与 kind（+0）
 2. 确认系统字段已被填充（Store.create 第 1 步已做，+6 ～ +8）
 3. 确认 GenerateName 已生成（+11 ～ +13）
@@ -206,9 +206,9 @@ POST /api/v1/namespaces/default/pods/nginx  # 命名创建（name 来自 URL 路
 7. warnings（+31 ～ +33）；Canonicalize（+35）
 
 ### 函数：podStrategy.PrepareForCreate
-**源码：** `pkg/registry/core/pod/strategy.go:88`
+**源码：** `pkg/registry/core/pod/strategy.go podStrategy.PrepareForCreate+0`（:88）
 **职责：** Pod 创建默认化。
-**内部步骤（以函数体首语句 strategy.go:89 为基线 +0）：**
+**内部步骤（以函数体首语句 `podStrategy.PrepareForCreate+1`（:89）为基线 +0）：**
 1. Generation 置 1（+1）
 2. Status 重置为 `{Phase: Pending}`（+3 ～ +5）
 3. `DropDisabledPodFields`：按 feature gate 丢弃未启用字段（+7）
@@ -219,16 +219,16 @@ POST /api/v1/namespaces/default/pods/nginx  # 命名创建（name 来自 URL 路
 **副作用：** 就地修改 Pod；无 IO。
 
 ### 函数：podStrategy.Validate
-**源码：`pkg/registry/core/pod/strategy.go:128`
+**源码：`pkg/registry/core/pod/strategy.go podStrategy.Validate+0`（:128）`
 **职责：** 组装校验选项后调用 `corevalidation.ValidatePodCreate`（容器规范、资源、安全上下文、卷、亲和等的声明式校验全集）。
 **返回值：** `field.ErrorList`；非空即导致 422。
 
 ### 函数：etcd3 store.Create
-**源码：** `[staging] storage/etcd3/store.go:293`
+**源码：** `[staging] storage/etcd3/store.go s.Create+0`（:293）
 **职责：** 对象落 etcd。
 **参数：** `ctx`、`key`、`obj`、`out`、`ttl uint64`。
 **返回值：** `error`。
-**执行流程（以函数体首语句 store.go:294 为基线 +0）：**
+**执行流程（以函数体首语句 `s.Create+1`（:294）为基线 +0）：**
 ```text
 Create (+0)
 ├── 1. prepareKey 加命名空间前缀 (+0 ～ +3)
@@ -283,26 +283,26 @@ CreateResource → createHandler 闭包
 
 写入成功不只返回 201——apiserver 同时通过 **watch** 把这次变更推给所有订阅者（各控制器的 informer、scheduler、kubelet 配置源）。这是「声明式调谐」的起点：没有 watch，控制器就只能靠轮询。本节拆解 etcd3 层如何把一次 etcd 写变成一条 watch 事件并送达客户端。
 
-**入口：** `[staging] storage/etcd3/store.go 函数：Watch 偏移：+0`（:1115）→ `watcher.createWatchChan`（watcher.go:175）建立到 etcd 的 watch 通道。
+**入口：** `[staging] storage/etcd3/store.go 函数：Watch 偏移：+0`（:1115）→ `w.createWatchChan+0`（:175）建立到 etcd 的 watch 通道。
 
 #### 从 etcd 事件到客户端事件
 
 | 环节 | 符号 | 做什么 |
 |---|---|---|
-| etcd watch 回调 | `startWatching`（watcher.go 内，:520 起） | 收 etcd `wres.Events`，逐个 `parseEvent`（:540） |
-| 解析 | `parseEvent`（`event.go:66`） | etcd `Event` → 内部 `event{key, value, rev, isDeleted, isCreated, prevValue}`；`expectPrevKV` 且 `PrevKv==nil`（已被 compact）则报错 |
-| 进度通知 | `progressNotifyEvent`（event.go:80） | etcd bookmark（仅 rev、无对象），维持客户端 revision 前进 |
-| 排队 | `queueEvent`（watcher.go:843） | 推入 `incomingEventChan`，**channel 满则阻塞上游**（不丢事件） |
-| 并发转换 | `scheduleEventProcessing`/`collectEventProcessing`（watcher.go:529/:552） | 用 `processingQueue` 保序地把事件交给 worker 做 transform |
+| etcd watch 回调 | `wc.startWatching+0`（watcher.go :468） | 收 etcd `wres.Events`，逐个 `parseEvent`（调用点 `wc.startWatching+72`，:540） |
+| 解析 | `parseEvent+0`（event.go :66） | etcd `Event` → 内部 `event{key, value, rev, isDeleted, isCreated, prevValue}`；`expectPrevKV` 且 `PrevKv==nil`（已被 compact）则报错 |
+| 进度通知 | `progressNotifyEvent+0`（event.go :80） | etcd bookmark（仅 rev、无对象），维持客户端 revision 前进 |
+| 排队 | `wc.queueEvent+0`（watcher.go :843） | 推入 `incomingEventChan`，**channel 满则阻塞上游**（不丢事件） |
+| 并发转换 | `p.scheduleEventProcessing+0`（watcher.go :627）/ `p.collectEventProcessing+0`（:653） | 用 `processingQueue` 保序地把事件交给 worker 做 transform |
 | 转换 | `wc.transform` | 内部 event → `watch.Event`（Added/Modified/Deleted，带对象） |
-| 送达 | `sendEvent`（watcher.go:829） | `resultChan <- *event`；客户端接收不够快则**阻塞**（同样不丢） |
+| 送达 | `wc.sendEvent+0`（watcher.go :829） | `resultChan <- *event`；客户端接收不够快则**阻塞**（同样不丢） |
 
 **Create 对应的 watch 事件：** 一次 `OptimisticPut` 成功后，etcd 产生 `EventTypePut`；`parseEvent` 判 `isCreated = e.IsCreate()`（首次 Put）→ 上层转成 **ADDED** 事件，携带存回的 Pod 对象（`spec.nodeName` 仍空）。这正是 scheduler / ReplicaSet 控制器 informer 收到的第一个信号。
 
 #### watch 的两个关键保证（源码可证）
 
-1. **不丢事件（背压而非丢弃）**：`sendEvent`/`queueEvent` 都是阻塞 `select`（watcher.go:836 ～ :841、:847 ～ :852）——客户端消费慢时反向阻塞 etcd 事件读取，而非像 PLEG 那样丢弃。这保证 informer 不会漏掉任何变更。
-2. **保序**：`concurrentOrderedEventProcessing` 用 `processingQueue`（无缓冲，容量 `processEventConcurrency-1`）串行化转换结果（watcher.go:532 ～ :553），同一 watch 的事件按 etcd revision 顺序送达。
+1. **不丢事件（背压而非丢弃）**：`wc.sendEvent`/`wc.queueEvent` 都是阻塞 `select`（`wc.sendEvent+6~+11`、`wc.queueEvent+3~+6`）——客户端消费慢时反向阻塞 etcd 事件读取，而非像 PLEG 那样丢弃。这保证 informer 不会漏掉任何变更。
+2. **保序**：`concurrentOrderedEventProcessing`（类型 :618，`processingQueue` 字段 :621，缓冲容量 `processEventConcurrency-1`，见 `wc.concurrentProcessEvents+3`）经 `p.scheduleEventProcessing+0~+25` / `p.collectEventProcessing+0~+26` 串行化转换结果，同一 watch 的事件按 etcd revision 顺序送达。
 
 **与 PLEG 的对比（为何一个丢弃一个背压）：**
 - PLEG 面向「最新状态对账」，丢一次事件下轮 relist 会重新发现 → 丢弃安全。
@@ -310,17 +310,17 @@ CreateResource → createHandler 闭包
 
 #### 设计要点（源码可证）
 
-1. **watch 从 etcd 直接起**：`Watch`（store.go:1115）在 etcd3 层就建 watch 通道，apiserver 不轮询 etcd——一次 etcd watch 服务所有订阅该资源的客户端。
-2. **prevKV 用于计算旧对象**：`parseEvent` 带 `prevValue`（event.go:80 ～ :82），使 `OnUpdate` 能拿到 oldObj 算 diff（见篇 11 informer）。
-3. **compact 防御**：`expectPrevKV && PrevKv==nil` 报错（event.go:69 ～ :72），处理 etcd 历史已被 compact 的场景。
-4. **progress notify 维持 revision**：bookmark 事件（watcher.go:524 ～ :527）让客户端 revision 前进，避免长时间无事件后重连从旧 revision 开始。
+1. **watch 从 etcd 直接起**：`s.Watch+0`（:1115）在 etcd3 层就建 watch 通道，apiserver 不轮询 etcd——一次 etcd watch 服务所有订阅该资源的客户端。
+2. **prevKV 用于计算旧对象**：`parseEvent` 带 `prevValue`（`parseEvent+14~+16`），使 `OnUpdate` 能拿到 oldObj 算 diff（见篇 11 informer）。
+3. **compact 防御**：`expectPrevKV && PrevKv==nil` 报错（`parseEvent+3~+6`），处理 etcd 历史已被 compact 的场景。
+4. **progress notify 维持 revision**：bookmark 事件（`wc.startWatching+56~+59`）让客户端 revision 前进，避免长时间无事件后重连从旧 revision 开始。
 
 ## 6. 设计意图与验证
 **设计意图（源码可证）：**
-- **先解码后默认化再校验再持久化**：decode（create.go:127）在 handler 层完成版本转换；`PrepareForCreate` 只做就地默认化（strategy.go:88）；`ValidateCreate` 聚合并把错误转成 422 Invalid（rest/create.go:130 ～ :132）；持久化只在全部通过后进入 etcd3。职责分层清晰：handler 管协议/协商，strategy 管资源语义，generic store 管通用编排，etcd3 管持久化与冲突。
-- **写路径始终密文**：etcd3 `TransformToStorage`（store.go:328）在 `OptimisticPut`（store.go:336）之前，落盘 data 恒为变换后密文；读回 out 用加密前明文 data（store.go:349），调用方不接触解密读路径。
-- **创建冲突用 expectedRev=0 表达**：`OptimisticPut` 以 expectedRev=0 构造「仅当 key 不存在才成功」的事务，失败返回 `KeyExists`（store.go:345），由 Store.create 解释为 AlreadyExists（409）；这保证同一 key 不可能被两个并发创建同时写入。
-- **幂等与重试**：对象过大时清 managedFields 重试一次（create.go:212 ～ :217）；generateName 冲突由 `createWithGenerateNameRetry` 重试。
+- **先解码后默认化再校验再持久化**：decode（`createHandler+74`）在 handler 层完成版本转换；`PrepareForCreate` 只做就地默认化（`podStrategy.PrepareForCreate+0`）；`ValidateCreate` 聚合并把错误转成 422 Invalid（`BeforeCreate+27~+29`）；持久化只在全部通过后进入 etcd3。职责分层清晰：handler 管协议/协商，strategy 管资源语义，generic store 管通用编排，etcd3 管持久化与冲突。
+- **写路径始终密文**：etcd3 `TransformToStorage`（`s.Create+35`）在 `OptimisticPut`（`s.Create+43`）之前，落盘 data 恒为变换后密文；读回 out 用加密前明文 data（`s.Create+56`），调用方不接触解密读路径。
+- **创建冲突用 expectedRev=0 表达**：`OptimisticPut` 以 expectedRev=0 构造「仅当 key 不存在才成功」的事务，失败返回 `KeyExists`（`s.Create+52`），由 Store.create 解释为 AlreadyExists（409）；这保证同一 key 不可能被两个并发创建同时写入。
+- **幂等与重试**：对象过大时清 managedFields 重试一次（`createHandler+159~+164`）；generateName 冲突由 `createWithGenerateNameRetry` 重试。
 
 **验证结论（基准 HEAD 8893923）：**
 - 本目录全部符号在位，签名与旧文档一致，无消失项。

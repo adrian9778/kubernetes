@@ -160,7 +160,7 @@ manageReplicas (+0，:678)
 
 ManageReplicas 决定「要建 N 个 Pod」后，实际创建不是一次性发 N 个请求，而是经 **slowStartBatch 慢启动**分批并发创建。本节解剖慢启动算法与单个 Pod 的创建报文。
 
-**慢启动算法（`slowStartBatch`，replica_set.go:944）：**
+**慢启动算法（`slowStartBatch+0`）：**
 ```text
 slowStartBatch(count, initialBatchSize, fn)
   remaining = count
@@ -256,7 +256,7 @@ expectations 解决的问题是「控制器刚下发一批 create/delete，但 i
 
 ### 2.5 Deployment → ReplicaSet 层级
 
-- `kubectl create deployment`（或 `kubectl run` 不带 `--restart=Never`）创建的是 Deployment（`pkg/controller/deployment`，`NewDeploymentController` 于 `deployment_controller.go:115`）。
+- `kubectl create deployment`（或 `kubectl run` 不带 `--restart=Never`）创建的是 Deployment（`pkg/controller/deployment`，`NewDeploymentController` 于 `deployment_controller.go` `NewDeploymentController+0`）。
 - Deployment 控制器调谐时按 `pod-template-hash` 维护 ReplicaSet 集合（滚动更新即新旧 RS 之间按比例切 Replicas）。
 - ReplicaSet 再按本文件所述维护 Pod。三层同属 informer→queue→sync 的调谐模式；本文档库只对 ReplicaSet 层做函数级展开。
 
@@ -286,7 +286,7 @@ expectations 解决的问题是「控制器刚下发一批 create/delete，但 i
 - **scheduling 集成防御**：避免混合 schedulingGroup（防止 gang 调度 PodGroup 永远达不到 minCount）；podTemplate 深拷贝（不污染存储模板）。
 
 **验证（如何确认实现与本文一致）：**
-- **锚点核对**：本文所有「符号+偏移」均可按代码基准 HEAD 复现——结构体 :101、NewReplicaSetController :168、syncHandler :296、Run :302、enqueueRS :396、enqueueRSAfter :406、worker :651、processNextWorkItem :656、manageReplicas :678、syncReplicaSet :808、calculateStatus `replica_set_utils.go:96`、updateReplicaSetStatus `replica_set_utils.go:41`、RealPodControl `controller_utils.go:492`、expectations 三类型 `controller_utils.go` :169/:271/:350、常量 :72/:87。
+- **锚点核对**：本文所有「符号+偏移」均可按代码基准 HEAD 复现——结构体 :101、NewReplicaSetController :168、syncHandler :296、Run :302、enqueueRS :396、enqueueRSAfter :406、worker :651、processNextWorkItem :656、manageReplicas :678、syncReplicaSet :808、calculateStatus（`replica_set_utils.go`，`calculateStatus+0`）、updateReplicaSetStatus（`replica_set_utils.go`，`updateReplicaSetStatus+0`）、RealPodControl（`controller_utils.go`，`RealPodControl+0`）、expectations 三类型 `controller_utils.go` :169/:271/:350、常量 :72/:87。
 - **行为验证**：`go test ./pkg/controller/replicaset/...`（含 expectations、slowStartBatch、getPodsToDelete 单测）可作为实现级回归；`hack/verify-gofmt.sh` 与 `make verify` 验证代码基准。
 - **未确认项**：无。scheduling 相关（PodGroup）行为以 feature gate `WorkloadWithDeployment` 与 `EnableWorkloadScheduling` 门控（`replica_set.go :154~:163`），默认开启；本文对新增参数与两处新增逻辑的偏移均按当前源码逐行核对。
 

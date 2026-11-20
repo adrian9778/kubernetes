@@ -44,15 +44,15 @@ flowchart TD
 
 ## 2. 类型级
 
-| 类型 | 文件 | 职责 |
+| 类型 | 文件 / 锚点（符号+偏移） | 职责 |
 |---|---|---|
-| `Provider`（interface） | `pkg/proxy/types.go:28` | 组合 Service/EndpointSlice/NodeTopology/ServiceCIDR handler 接口加 `Sync()`/`SyncLoop()`（**无 provider.go 文件**：iptables/ipvs/nftables 下均无，确认） |
-| `metaProxier` | `metaproxier/meta_proxier.go:26` | 双栈包装：持有 ipv4/ipv6 两个 Provider，按 EndpointSlice 地址类型分发 |
-| `ServiceConfig` | `config/config.go:167` | Service 事件入口，持有 eventHandlers |
-| `EndpointSliceConfig` | `config/config.go:73` | EndpointSlice 事件入口（**本分支无 EndpointsConfig**，grep `type EndpointsConfig` 无命中） |
-| iptables `Proxier` | `iptables/proxier.go:127` | 持有 serviceChanges、endpointsChanges、svcPortMap、endpointsMap、syncRunner、nat/filter LineBuffer |
-| ipvs `Proxier` | `ipvs/proxier.go:148` | ipvs 模式实现（结构同构） |
-| nftables `Proxier` | `nftables/proxier.go:146` | nftables 模式实现（结构同构，文件 2021 行） |
+| `Provider`（interface） | `pkg/proxy/types.go` `Provider+0` | 组合 Service/EndpointSlice/NodeTopology/ServiceCIDR handler 接口加 `Sync()`/`SyncLoop()`（**无 provider.go 文件**：iptables/ipvs/nftables 下均无，确认） |
+| `metaProxier` | `pkg/proxy/metaproxier/meta_proxier.go` `metaProxier+0` | 双栈包装：持有 ipv4/ipv6 两个 Provider，按 EndpointSlice 地址类型分发 |
+| `ServiceConfig` | `pkg/proxy/config/config.go` `ServiceConfig+0` | Service 事件入口，持有 eventHandlers |
+| `EndpointSliceConfig` | `pkg/proxy/config/config.go` `EndpointSliceConfig+0` | EndpointSlice 事件入口（**本分支无 EndpointsConfig**，grep `type EndpointsConfig` 无命中） |
+| iptables `Proxier` | `pkg/proxy/iptables/proxier.go` `Proxier+0` | 持有 serviceChanges、endpointsChanges、svcPortMap、endpointsMap、syncRunner、nat/filter LineBuffer |
+| ipvs `Proxier` | `pkg/proxy/ipvs/proxier.go` `Proxier+0` | ipvs 模式实现（结构同构） |
+| nftables `Proxier` | `pkg/proxy/nftables/proxier.go` `Proxier+0` | nftables 模式实现（结构同构，文件 2021 行） |
 
 ## 3. 启动与事件接入函数级
 
@@ -120,7 +120,7 @@ KUBE-SEP-XXXX（一个 endpoint：MARK-MASQ 判断 + DNAT 到 Pod IP:Port）
 **概率算法：** n 个 endpoint 时每条规则概率 `1/(剩余数)`（`--mode random --probability proxier.probability(numEndpoints-i)`，:1434+35~+40）；最后一条不带 probability 作兜底（i == numEndpoints-1）。
 
 ### 关键差异：RestoreAll 已更名
-旧文 `RestoreAll` 在 `pkg/proxy` 无命中（grep 无），当前为 **`proxier.iptables.Restore`**（`iptables/proxier.go:1388`，即 `syncProxyRules+763`）。`iptables` 接口以 `Restore` 为名。
+旧文 `RestoreAll` 在 `pkg/proxy` 无命中（grep 无），当前为 **`proxier.iptables.Restore`**（`pkg/proxy/iptables/proxier.go`，即 `syncProxyRules+763`）。`iptables` 接口以 `Restore` 为名。
 
 #### 4b. 一个 ClusterIP Service 生成的真实规则解剖
 
@@ -279,7 +279,7 @@ syncProxyRules
 
 **同步到本稿的修正：**
 1. ipvs 方法表：`AddVirtualServer/AddRealServer/UpdateRealServer` 改为 `syncService`/`syncEndpoint`。
-2. `RestoreAll` → `proxier.iptables.Restore`（iptables/proxier.go:1388）。
+2. `RestoreAll` → `proxier.iptables.Restore`（`pkg/proxy/iptables/proxier.go`，`syncProxyRules+763`）。
 3. `writeServiceToEndpointRules` 锚点 :1430 → :1434（Δ+4）。
 4. 新增 nftables 模式完整实现说明。
 

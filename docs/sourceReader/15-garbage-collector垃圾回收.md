@@ -46,7 +46,7 @@ GC 的对外可见行为只有三类：
 | 依赖 | 全资源动态监视器、metadata client（PartialObjectMetadata）、restMapper、三个 `*node`/`*event` 泛型队列、absentOwnerCache |
 | 数据流 | informer 事件 → graphChanges → processGraphChanges 改依赖图 → 节点入 attemptToDelete/attemptToOrphan → worker 核实 owner 状态后删除/patch |
 
-> **文件归属修正**：`GetGraphResources` 是 `(*GraphBuilder)` 方法，定义于 **graph_builder.go**（`GetGraphResources+0`，:1016），**不在** garbagecollector.go；`event`（graph_builder.go:69）、`monitor`（:124）、`monitors`（:139）同样**定义于 graph_builder.go**（旧文把三者列在 garbagecollector.go 名下，属归类偏差）。
+> **文件归属修正**：`GetGraphResources` 是 `(*GraphBuilder)` 方法，定义于 **graph_builder.go**（`GetGraphResources+0`，:1016），**不在** garbagecollector.go；`event`（`event+0`）、`monitor`（`monitor+0`）、`monitors`（`monitors+0`）同样**定义于 graph_builder.go**（旧文把三者列在 garbagecollector.go 名下，属归类偏差）。
 
 ## 2. 开发视角：类型级
 
@@ -65,7 +65,7 @@ GC 的对外可见行为只有三类：
 
 ### 3.1 函数：NewGarbageCollector / NewComposedGarbageCollector
 **源码：** `garbagecollector.go:NewGarbageCollector+0`（:80）/ `NewComposedGarbageCollector+0`（:93）
-**执行流程：** NewGarbageCollector 先建 GraphBuilder；Composed 版经 `GraphBuilder.GetGraphResources+0`（graph_builder.go:1016）取出两队列与 absentOwnerCache 完成 GC 装配。接线处在 `cmd/kube-controller-manager/app/core.go`。
+**执行流程：** NewGarbageCollector 先建 GraphBuilder；Composed 版经 `GraphBuilder.GetGraphResources+0`（:1016）取出两队列与 absentOwnerCache 完成 GC 装配。接线处在 `cmd/kube-controller-manager/app/core.go`。
 
 ### 3.2 函数：Run
 **源码：** `garbagecollector.go:GarbageCollector.Run+0`（:129）
@@ -95,7 +95,7 @@ processGraphChanges+0
 ├── add/update 新节点：建 node（beingDeleted/deletingDependents 由删除戳与 finalizer 推出）
 │   → insertNode(+69) → processTransitions(+72)
 ├── add/update 已有节点：
-│   referencesDiffs(+75，graph_builder.go:577) → addUnblockedOwnersToDeleteQueue(+79，:650)
+│   referencesDiffs(+75，`referencesDiffs+0`) → addUnblockedOwnersToDeleteQueue(+79，:650)
 │   → setOwners(+81)/addDependentToOwners(+83，:450，缺 owner 建 virtual 节点并入删除队列)
 │   → markBeingDeleted(+90) → processTransitions
 └── delete 事件：removeNode，dependents 入删除队列，
@@ -137,7 +137,7 @@ attemptToDeleteItem+0
 │      其余为 solid
 ├── 6. 存在 solid owner → 保留对象，patch 移除 dangling/waiting 的 ownerRef (+85)
 ├── 7. owner 在 waiting 且自身有 dependents → 环检测，
-│      unblockOwnerReferences patch（patch.go:127）后 Foreground 删除 (+93 ～ +125)
+│      unblockOwnerReferences patch（`node.unblockOwnerReferencesStrategicMergePatch+0`）后 Foreground 删除 (+93 ～ +125)
 └── 8. 按现有 finalizer 选 policy 后 deleteObject (+125 前台分支 / +151 默认分支)
 ```
 > **偏移修正**：后半段（环检测/删除分支）相对旧文整体**前移约 9～35 行**：环检测 `unblockOwnerReferences` 现为 **+93～+125**（旧 +119～+158），前台 `deleteObject` 现为 **+125**（旧 +160～+177），默认分支现为 **+151**（旧 +160～+177）；前半段（+9～+56）基本吻合（±5 内）。
@@ -146,7 +146,7 @@ attemptToDeleteItem+0
 
 `attemptToDeleteItem` 的核心是把对象的每个 ownerReference 归为三类，再据此决定「保留 / 摘引用 / 前台删 / 后台删」。
 
-**classifyReferences（偏移：+461）逐 owner 三分类：**
+**classifyReferences（`classifyReferences+0`，:461）逐 owner 三分类：**
 | 分类 | 判定条件 | 含义 |
 |---|---|---|
 | **dangling** | `isDangling`（:380）为真——先查 `absentOwnerCache` 再 metadata Get，owner 确实不存在 | owner 已消失，该引用是悬空的 |
@@ -202,8 +202,8 @@ patch(item, smp, jmp)
        → patchObject(identity, patch, MergePatchType)
 ```
 **为什么要双模式：** 部分 Aggregated APIService / 自定义资源不支持 StrategicMergePatch，此时回落到 JSON merge patch。两个生成器：
-- `deleteOwnerRefJSONMergePatch`（patch.go:109）：**移除**匹配 ownerUIDs 的 ownerReferences——构造 `objectForPatch{expectedObjectMeta}`，遍历现有 refs，**只保留不在 ownerUIDs 里的**，再 `json.Marshal`。
-- `unblockOwnerReferencesStrategicMergePatch`（node 方法，patch.go:127）：把所有 `BlockOwnerDeletion=true` 的 ownerRef 的该字段**置 false**（`falseVar`），用于打破 Foreground 依赖环。
+- `deleteOwnerRefJSONMergePatch`（`GarbageCollector.deleteOwnerRefJSONMergePatch+0`）：**移除**匹配 ownerUIDs 的 ownerReferences——构造 `objectForPatch{expectedObjectMeta}`，遍历现有 refs，**只保留不在 ownerUIDs 里的**，再 `json.Marshal`。
+- `unblockOwnerReferencesStrategicMergePatch`（node 方法，`node.unblockOwnerReferencesStrategicMergePatch+0`）：把所有 `BlockOwnerDeletion=true` 的 ownerRef 的该字段**置 false**（`falseVar`），用于打破 Foreground 依赖环。
 
 **patch 报文内容（以摘 ownerRef 为例）：**
 ```json
@@ -227,7 +227,7 @@ deleteObject(item, resourceVersion, ownersAtResourceVersion, policy)
        │     → 去 RV 重试（deleteObject(item, "", nil, policy)）
        └── 否则返回冲突错误
 ```
-**为什么去 RV 重试：** 注释（operations.go:73 ～ :80）——对象因无关的快速更新导致 RV 变化、但 ownerReferences 没变时，若坚持 RV 前置条件会让 GC 被「饿死」（一直冲突）。去 RV 重试只保留 UID 前置条件，仍能防止删错对象（UID 不匹配则 apiserver 拒绝）。
+**为什么去 RV 重试：** 注释（`GarbageCollector.deleteObject+20 ～ +27`）——对象因无关的快速更新导致 RV 变化、但 ownerReferences 没变时，若坚持 RV 前置条件会让 GC 被「饿死」（一直冲突）。去 RV 重试只保留 UID 前置条件，仍能防止删错对象（UID 不匹配则 apiserver 拒绝）。
 
 #### patch / delete 报文对照
 

@@ -155,43 +155,43 @@ kubeGenericRuntimeManager.SyncPod
 
 ### 镜像拉取：EnsureImageExists
 
-**源码：** `pkg/kubelet/images/image_manager.go EnsureImageExists+0`（:181）
+**源码：** `pkg/kubelet/images/image_manager.go` 的 `m.EnsureImageExists+0`
 **职责：** 确保容器镜像在本节点存在；本地有且策略允许则复用，否则拉取。
 **执行流程：**
-1. `applyDefaultImageTag`（:435）：镜像无 tag/digest 时补默认 tag `:latest`；失败返回 `ErrInvalidImageName`。
+1. `applyDefaultImageTag`（`applyDefaultImageTag+0`）：镜像无 tag/digest 时补默认 tag `:latest`；失败返回 `ErrInvalidImageName`。
 2. 收集 Pod annotation 转 `kubecontainer.Annotation`，连同 `RuntimeHandler` 组成 `kubecontainer.ImageSpec`。
-3. **`imagePullPrecheck`**（:120）：结合 `pullPolicy`（Always/Never/IfNotPresent）与本地是否存在镜像判定「是否需要拉取」；`imageNotPresentOnNeverPolicyError`（:173）处理 `Never` 策略下镜像缺失的错误。
-4. `makeLookupPullCredentialsFunc`（:302）：惰性包装，**只在真正需要时查一次**凭据（imagePullSecrets / imagePullServiceAccount），避免无谓的 Secret 读取。
-5. **`pullImage`**（:335）：真正发起 CRI PullImage，带 `TrackedAuthConfig` 凭据与 PodSandboxConfig；失败经 `evalCRIPullErr`（:402）把 CRI 错误翻译成可读信息。
+3. **`imagePullPrecheck`**（`m.imagePullPrecheck+0`）：结合 `pullPolicy`（Always/Never/IfNotPresent）与本地是否存在镜像判定「是否需要拉取」；`imageNotPresentOnNeverPolicyError`（`m.imageNotPresentOnNeverPolicyError+0`）处理 `Never` 策略下镜像缺失的错误。
+4. `makeLookupPullCredentialsFunc`（`m.makeLookupPullCredentialsFunc+0`）：惰性包装，**只在真正需要时查一次**凭据（imagePullSecrets / imagePullServiceAccount），避免无谓的 Secret 读取。
+5. **`pullImage`**（`m.pullImage+0`）：真正发起 CRI PullImage，带 `TrackedAuthConfig` 凭据与 PodSandboxConfig；失败经 `evalCRIPullErr`（`evalCRIPullErr+0`）把 CRI 错误翻译成可读信息。
 6. `recordEnsureImageRequest`（defer）：按 `pullPolicy`/本地是否存在/是否拉取 记录指标。
 
 **设计要点（源码可证）：**
-- **凭据惰性单次查找**：`lookupPullCredentials` 包装（:302 注释「only look up credentials once and no earlier than needed」）——本地命中镜像时完全不读 Secret。
-- **PullPolicy 分流**：`Never` 缺镜像报错、`Always` 强制拉取、`IfNotPresent` 本地命中跳过（imagePullPrecheck :120）。
+- **凭据惰性单次查找**：`lookupPullCredentials` 包装（`m.makeLookupPullCredentialsFunc+0` 注释「only look up credentials once and no earlier than needed」）——本地命中镜像时完全不读 Secret。
+- **PullPolicy 分流**：`Never` 缺镜像报错、`Always` 强制拉取、`IfNotPresent` 本地命中跳过（`m.imagePullPrecheck+0`）。
 
 ### 镜像 GC：realImageGCManager
 
 **源码：** `pkg/kubelet/images/image_gc_manager.go`
-- `NewImageGCManager`（+192）：构造 `realImageGCManager`，持有 runtime、statsProvider、postGCHooks、policy（`ImageGCPolicy`）。
-- `Start`（+218）：周期驱动 GC。
+- `NewImageGCManager`（`NewImageGCManager+0`）：构造 `realImageGCManager`，持有 runtime、statsProvider、postGCHooks、policy（`ImageGCPolicy`）。
+- `Start`（`im.Start+0`）：周期驱动 GC。
 
-**驱逐候选排序：`imagesInEvictionOrder`（偏移：+549）**
-1. **`detectImages`**（:244）算出当前「在用」镜像集合 `imagesInUse`。
+**驱逐候选排序：`imagesInEvictionOrder`（`im.imagesInEvictionOrder+0`）**
+1. **`detectImages`**（`im.detectImages+0`）算出当前「在用」镜像集合 `imagesInUse`。
 2. 加 `imageRecordsLock`，遍历 `imageRecords`：
-   - `isImageUsed`（:655）命中的跳过（在用，不回收）。
-   - **`record.pinned` 为真的跳过**（防回收，+16 ～ +20）——固定镜像不被 GC。
-   - feature gate `RuntimeClassInImageCriAPI` 开启时用 `getImageTuple`/`getImageIDFromTuple`（:625/:633）处理带 runtime handler 的复合 ID。
-3. **`sort.Sort(byLastUsedAndDetected(images))`**（+43）：按「最后使用时间 → 检测时间」升序，最久未用的排最前，优先驱逐。
+   - `isImageUsed`（`isImageUsed+0`）命中的跳过（在用，不回收）。
+   - **`record.pinned` 为真的跳过**（防回收，`im.imagesInEvictionOrder+16` ～ `+20`）——固定镜像不被 GC。
+   - feature gate `RuntimeClassInImageCriAPI` 开启时用 `getImageTuple`/`getImageIDFromTuple`（`getImageTuple+0`/`getImageIDFromTuple+0`）处理带 runtime handler 的复合 ID。
+3. **`sort.Sort(byLastUsedAndDetected(images))`**（`im.imagesInEvictionOrder+43`）：按「最后使用时间 → 检测时间」升序，最久未用的排最前，优先驱逐。
 
-**GC 主流程：`GarbageCollect`（偏移：+349）**
-1. `imagesInEvictionOrder` 取驱逐序列 → `freeOldImages`（:426）先删超过 `MinAge` 的旧镜像。
+**GC 主流程：`GarbageCollect`（`im.GarbageCollect+0`）**
+1. `imagesInEvictionOrder` 取驱逐序列 → `freeOldImages`（`im.freeOldImages+0`）先删超过 `MinAge` 的旧镜像。
 2. `statsProvider.ImageFsStats` 取镜像文件系统容量/可用空间；容量为 0 报 `InvalidDiskCapacity`。
 3. **阈值判定**：`usagePercent = 100 - available*100/capacity`；`usagePercent >= HighThresholdPercent` 时触发回收。
 4. **`amountToFree = capacity*(100-LowThresholdPercent)/100 - available`**：目标是把占用降到 LowThreshold，而非清到极限。
-5. **`freeSpace`**（:483）按驱逐序列逐个 `freeImage`（:524）删除直到腾出 `amountToFree`；`runPostGCHooks`（:420）通知剩余镜像。
-6. `freed < amountToFree` → 发 `FreeDiskSpaceFailed` 事件并报错——**镜像 GC 无法解决非镜像占用**（日志/卷/其它文件，注释 :405 ～ +410）。
+5. **`freeSpace`**（`im.freeSpace+0`）按驱逐序列逐个 `freeImage`（`im.freeImage+0`）删除直到腾出 `amountToFree`；`runPostGCHooks`（`im.runPostGCHooks+0`）通知剩余镜像。
+6. `freed < amountToFree` → 发 `FreeDiskSpaceFailed` 事件并报错——**镜像 GC 无法解决非镜像占用**（日志/卷/其它文件，注释 `im.GarbageCollect+56` ～ `+61`）。
 
-**驱逐排序比较器：`byLastUsedAndDetected.Less`（偏移：+647）**：先比 lastUsed（越早越先驱逐），再比 detected 兜底。
+**驱逐排序比较器：`byLastUsedAndDetected.Less`（`ev.Less+0`）**：先比 lastUsed（越早越先驱逐），再比 detected 兜底。
 
 **设计要点（源码可证）：**
 1. **双阈值回收**：只在超过 HighThreshold 时启动，降到 LowThreshold 即停——避免频繁 GC 抖动，也为突发留缓冲。
@@ -207,24 +207,24 @@ kubeGenericRuntimeManager.SyncPod
 
 | 序 | CRI gRPC 方法 | 关键请求字段 | 成功信号 | 失败事件（reason） |
 |---|---|---|---|---|
-| 1 | `PullImage` | image、auth（pullSecrets）、sandboxConfig | `imageRef` 返回 | `FailedToPullImage`（image_manager.go:380） |
-| 2 | `RunPodSandbox` | PodSandboxConfig（hostname、dns、logDir、labels、cgroup、linux namespaces） | `podSandboxID` | `FailedCreatePodSandBox`（SyncPod+2038） |
-| 3 | `PodSandboxStatus` | podSandboxID、verbose=false | `resp.Status`（含 podIPs） | `FailedStatusPodSandBox`（SyncPod+2056） |
-| 4 | `CreateContainer`（每容器） | podSandboxID、ContainerConfig、PodSandboxConfig | `containerID` | `FailedToCreateContainer`（kuberuntime_container.go:296） |
-| 5 | `StartContainer`（每容器） | containerID | 无返回体 | `FailedToStartContainer`（:313） |
+| 1 | `PullImage` | image、auth（pullSecrets）、sandboxConfig | `imageRef` 返回 | `FailedToPullImage`（`m.pullImage+45`） |
+| 2 | `RunPodSandbox` | PodSandboxConfig（hostname、dns、logDir、labels、cgroup、linux namespaces） | `podSandboxID` | `FailedCreatePodSandBox`（`m.SyncPod+184`） |
+| 3 | `PodSandboxStatus` | podSandboxID、verbose=false | `resp.Status`（含 podIPs） | `FailedStatusPodSandBox`（`m.SyncPod+196`） |
+| 4 | `CreateContainer`（每容器） | podSandboxID、ContainerConfig、PodSandboxConfig | `containerID` | `FailedToCreateContainer`（`m.startContainer+85`） |
+| 5 | `StartContainer`（每容器） | containerID | 无返回体 | `FailedToStartContainer`（`m.startContainer+100`） |
 
 **调用顺序（源码锚点）：**
 ```text
-SyncPod (kuberuntime_manager.go:1854)
-  ├─ computePodActions (+1388)  ← 决策：建 sandbox + 启哪些容器
-  ├─ createPodSandbox (:2018 调用) → runtimeService.RunPodSandbox
-  ├─ runtimeService.PodSandboxStatus (:2043) → 取 podIPs
-  │     └─ 网络隔离但拿到 IP → StopPodSandbox + 失败（:2073）
-  └─ 逐容器 startContainer (kuberuntime_container.go:213)
-       ├─ imagePuller.EnsureImageExists (:233) → PullImage
-       ├─ runtimeService.CreateContainer (:295) → containerID
-       ├─ internalLifecycle.PreStartContainer (:300)
-       ├─ runtimeService.StartContainer (:313)
+SyncPod (m.SyncPod+0)
+  ├─ computePodActions (m.computePodActions+0)  ← 决策：建 sandbox + 启哪些容器
+  ├─ createPodSandbox (m.createPodSandbox+164 调用) → runtimeService.RunPodSandbox
+  ├─ runtimeService.PodSandboxStatus (m.SyncPod+189) → 取 podIPs
+  │     └─ 网络隔离但拿到 IP → StopPodSandbox + 失败（m.SyncPod+219）
+  └─ 逐容器 startContainer (m.startContainer+0)
+       ├─ imagePuller.EnsureImageExists (m.startContainer+20) → PullImage
+       ├─ runtimeService.CreateContainer (m.startContainer+82) → containerID
+       ├─ internalLifecycle.PreStartContainer (m.startContainer+87)
+       ├─ runtimeService.StartContainer (m.startContainer+97)
        └─ recordContainerEvent: CreatedContainer → StartedContainer（Normal）
 ```
 
@@ -232,24 +232,24 @@ SyncPod (kuberuntime_manager.go:1854)
 
 | gRPC 方法 | 失败事件 reason | 事件类型 | 锚点 |
 |---|---|---|---|
-| `PullImage` | `FailedToPullImage` | Warning | `image_manager.go:380` |
-| `RunPodSandbox` | `FailedCreatePodSandBox` | Warning | `kuberuntime_manager.go:2038` |
-| `PodSandboxStatus` | `FailedStatusPodSandBox` | Warning | `kuberuntime_manager.go:2056` |
-| `CreateContainer` | `FailedToCreateContainer` | Warning | `kuberuntime_container.go:296` |
-| `PreStartContainer` 钩子 | `FailedToStartContainer` | Warning | `kuberuntime_container.go:304` |
-| `StartContainer` | `FailedToStartContainer` | Warning | `kuberuntime_container.go:313` |
-| 成功：容器已建/已启 | `CreatedContainer` / `StartedContainer` | Normal | `kuberuntime_container.go:299` / `:318` |
+| `PullImage` | `FailedToPullImage` | Warning | `m.pullImage+45` |
+| `RunPodSandbox` | `FailedCreatePodSandBox` | Warning | `m.SyncPod+184` |
+| `PodSandboxStatus` | `FailedStatusPodSandBox` | Warning | `m.SyncPod+196` |
+| `CreateContainer` | `FailedToCreateContainer` | Warning | `m.startContainer+85` |
+| `PreStartContainer` 钩子 | `FailedToStartContainer` | Warning | `m.startContainer+91` |
+| `StartContainer` | `FailedToStartContainer` | Warning | `m.startContainer+100` |
+| 成功：容器已建/已启 | `CreatedContainer` / `StartedContainer` | Normal | `m.startContainer+87` / `m.startContainer+103` |
 
 #### gRPC 错误的统一处理
 
-- 每个 CRI 调用的 gRPC status 经 `grpcstatus.FromError(err)` 取出 `s.Message()`，包装成 K8s 事件 + Go error（`kuberuntime_container.go:296`、:304、:313）。
-- sandbox 创建失败的错误可能是 CNI/CSI/CRI 任一来源；若 Pod 已被标记删除（`IsPodTerminationRequested`）则**静默返回**、不记失败（SyncPod:2020 ～ :2026）。
-- PodSandboxStatus 拿到 IP 后，若 Pod 要求网络隔离但运行时仍配了网（`IsNetworkIsolatedPod && len(podIPs)>0`），则 `StopPodSandbox` 拆掉 sandbox 并失败（:2073）。
+- 每个 CRI 调用的 gRPC status 经 `grpcstatus.FromError(err)` 取出 `s.Message()`，包装成 K8s 事件 + Go error（`m.startContainer+85`、`m.startContainer+91`、`m.startContainer+100`）。
+- sandbox 创建失败的错误可能是 CNI/CSI/CRI 任一来源；若 Pod 已被标记删除（`IsPodTerminationRequested`）则**静默返回**、不记失败（`m.SyncPod+166` ～ `+172`）。
+- PodSandboxStatus 拿到 IP 后，若 Pod 要求网络隔离但运行时仍配了网（`IsNetworkIsolatedPod && len(podIPs)>0`），则 `StopPodSandbox` 拆掉 sandbox 并失败（`m.SyncPod+219`）。
 
 #### 关键 gRPC 调用的顺序依赖（源码可证）
 
 1. **RunPodSandbox 必须先于 CreateContainer**：容器建在 sandbox 的 network namespace 内，sandbox 没起来就没有可加入的网络。
-2. **PodSandboxStatus 必须在 CreateContainer 前**：容器的 IP 来自 sandbox status（`determinePodSandboxIPs`，:2061），要先把 IP 填进容器环境。
+2. **PodSandboxStatus 必须在 CreateContainer 前**：容器的 IP 来自 sandbox status（`m.determinePodSandboxIPs`，`m.SyncPod+209`），要先把 IP 填进容器环境。
 3. **PullImage 必须先于 CreateContainer**：CreateContainer 的 config 引用镜像引用，镜像不在本地则 Create 失败。
 4. **CreateContainer 必须先于 StartContainer**：先建后启，PreStartContainer 钩子夹在两者之间。
 

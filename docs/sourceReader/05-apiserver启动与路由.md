@@ -57,15 +57,15 @@ director.ServeHTTP（按已注册 webservice 分流）
 
 | 类型 | 文件 | 职责 |
 |---|---|---|
-| `Config`（controlplane） | `pkg/controlplane/apiserver/config.go:70` | KubeAPIServer 的构造配置，内嵌 `genericapiserver.Config` 与 `Extra` |
-| `Server`（controlplane） | `pkg/controlplane/apiserver/server.go:80` | KubeAPIServer 实例：持有 `GenericAPIServer`、资源配置源、RESTOptionsGetter；`InstallAPIs` 方法挂在它上面 |
-| `GenericAPIServer` | `[staging] apiserver/pkg/server/genericapiserver.go:111` | 通用 API server：持有 Handler、APIGroup 安装、委托目标、discovery |
-| `APIGroupInfo` | `[staging] apiserver/pkg/server/genericapiserver.go:73` | 一个 group 的版本 → RESTStorage map 与序列化协商 |
-| `APIGroupVersion` | `[staging] endpoints/groupversion.go:50` | 单个 group/version 的安装输入（Storage map、Creater、converter、根前缀） |
-| `APIInstaller` | `[staging] endpoints/installer.go:63` | 把每个 rest.Storage 的能力接口翻译成一组 go-restful 路由 |
-| `APIServerHandler` | `[staging] apiserver/pkg/server/handler.go:42` | FullHandlerChain + GoRestfulContainer + NonGoRestfulMux + Director 的聚合体 |
-| `director` | `director+0` | 按已注册 webservice 判断，把请求分给 go-restful 或 NonGoRestfulMux |
-| `PodStorage` | `pkg/registry/core/pod/storage/storage.go:58` | Pod 主资源与全部子资源的 RESTStorage 集合 |
+| `Config`（controlplane） | `pkg/controlplane/apiserver/config.go` | KubeAPIServer 的构造配置，内嵌 `genericapiserver.Config` 与 `Extra`（`Config+0`，:70） |
+| `Server`（controlplane） | `pkg/controlplane/apiserver/server.go` | KubeAPIServer 实例：持有 `GenericAPIServer`、资源配置源、RESTOptionsGetter；`InstallAPIs` 方法挂在它上面（`Server+0`，:80） |
+| `GenericAPIServer` | `[staging] apiserver/pkg/server/genericapiserver.go` | 通用 API server：持有 Handler、APIGroup 安装、委托目标、discovery（`GenericAPIServer+0`，:111） |
+| `APIGroupInfo` | `[staging] apiserver/pkg/server/genericapiserver.go` | 一个 group 的版本 → RESTStorage map 与序列化协商（`APIGroupInfo+0`，:73） |
+| `APIGroupVersion` | `[staging] endpoints/groupversion.go` | 单个 group/version 的安装输入（Storage map、Creater、converter、根前缀）（`APIGroupVersion+0`，:50） |
+| `APIInstaller` | `[staging] endpoints/installer.go` | 把每个 rest.Storage 的能力接口翻译成一组 go-restful 路由（`APIInstaller+0`，:63） |
+| `APIServerHandler` | `[staging] apiserver/pkg/server/handler.go` | FullHandlerChain + GoRestfulContainer + NonGoRestfulMux + Director 的聚合体（`APIServerHandler+0`，:42） |
+| `director` | `[staging] apiserver/pkg/server/handler.go` | 按已注册 webservice 判断，把请求分给 go-restful 或 NonGoRestfulMux（`director+0`，:115） |
+| `PodStorage` | `pkg/registry/core/pod/storage/storage.go` | Pod 主资源与全部子资源的 RESTStorage 集合（`PodStorage+0`，:58） |
 
 ---
 
@@ -138,7 +138,7 @@ CreateServerChain (+0)
 2. 安装 `routes.Logs`（+10）或 `routes.NewOpenIDMetadataServer`（+35）
 3. 构造 `&Server{...}`（+38 起），挂 GenericAPIServer、APIResourceConfigSource、RESTOptionsGetter 等
 4. 注册一组 PostStartHook（system-namespaces、coordinated-leader-election、peer-endpoint、cluster-authentication-info、apiserver-identity-lease、storage-readiness、legacy-token-tracking 等，+51 ～ +209）
-**调用点（安装 API 的真实入口）：** `pkg/controlplane/instance.go:345` 处 `controlplane.CompletedConfig.New`（:321）调用 `s.ControlPlane.InstallAPIs(restStorageProviders...)`，即 `Server.InstallAPIs`。
+**调用点（安装 API 的真实入口）：** `pkg/controlplane/instance.go` 的 `c.New+24`（:345）处 `controlplane.CompletedConfig.New`（`c.New+0`，:321）调用 `s.ControlPlane.InstallAPIs(restStorageProviders...)`，即 `Server.InstallAPIs`。
 
 ### 函数：(*Server).InstallAPIs
 
@@ -205,12 +205,12 @@ WithAuthorization（或 ConditionalAuthorization 开启时 WithConditionsAwareAu
 TrackCompleted（最内） → director
 ```
 **关键分支（证据必用）：**
-- **授权分支（:1082-1092）：** `ConditionalAuthorization`（Alpha 1.38 Default:false）开启 **且** `ConditionsEnforcerPluginEnabled` 时用 `WithConditionsAwareAuthorization`；否则默认走 `WithAuthorization`。ConditionalAuthorization 开启但 plugin 未启用时打 Warning（:1094-1096）。
-- **P&F / MaxInFlight（:1100-1109）：** `c.FlowControl != nil` 时用 `WithPriorityAndFairness`（P&F，位于授权**之后**、冒充**之前**）；否则 `WithMaxInFlightLimit`。
-- **冒充分支（:1112-1118）：** `ConstrainedImpersonation`（Beta 1.36 Default:true）默认**开启**，走 `WithConstrainedImpersonation`；关闭时才走旧的 `WithImpersonation`。**默认路径已从 WithImpersonation 切换为 WithConstrainedImpersonation。**
-- **WithRoutine（:1164-1166）：** `APIServingWithRoutine`（Alpha 1.30 Default:false）默认**不包**。
-- **条件包装：** `WithEndpointLoadMetrics`（LoadReporter != nil，:1169-1171）、`WithWatchTerminationDuringShutdown`（GracePeriod > 0，:1148-1150）、`WithProbabilisticGoaway`（SecureServing != nil && !DisableHTTP2 && GoawayChance > 0，:1151-1153）、`WithRetryAfter`（ShutdownSendRetryAfter，:1156-1158）。
-**设计意图（源码可证）：** `filterlatency.TrackStarted/TrackCompleted` 成对包裹每个 filter 以分别记录排队与执行延迟（:1081、:1098、:1104-1106、:1111、:1120、:1130-1131 等）；WithTimeout 把后续处理放进 goroutine，使长请求超时后仍能继续收尾（:1141-1142 注释）。
+- **授权分支（`DefaultBuildHandlerChain+4~+14`）：** `ConditionalAuthorization`（Alpha 1.38 Default:false）开启 **且** `ConditionsEnforcerPluginEnabled` 时用 `WithConditionsAwareAuthorization`；否则默认走 `WithAuthorization`。ConditionalAuthorization 开启但 plugin 未启用时打 Warning（`DefaultBuildHandlerChain+16~+18`）。
+- **P&F / MaxInFlight（`DefaultBuildHandlerChain+22~+31`）：** `c.FlowControl != nil` 时用 `WithPriorityAndFairness`（P&F，位于授权**之后**、冒充**之前**）；否则 `WithMaxInFlightLimit`。
+- **冒充分支（`DefaultBuildHandlerChain+34~+40`）：** `ConstrainedImpersonation`（Beta 1.36 Default:true）默认**开启**，走 `WithConstrainedImpersonation`；关闭时才走旧的 `WithImpersonation`。**默认路径已从 WithImpersonation 切换为 WithConstrainedImpersonation。**
+- **WithRoutine（`DefaultBuildHandlerChain+86~+88`）：** `APIServingWithRoutine`（Alpha 1.30 Default:false）默认**不包**。
+- **条件包装：** `WithEndpointLoadMetrics`（LoadReporter != nil，`DefaultBuildHandlerChain+91~+93`）、`WithWatchTerminationDuringShutdown`（GracePeriod > 0，`DefaultBuildHandlerChain+70~+72`）、`WithProbabilisticGoaway`（SecureServing != nil && !DisableHTTP2 && GoawayChance > 0，`DefaultBuildHandlerChain+73~+75`）、`WithRetryAfter`（ShutdownSendRetryAfter，`DefaultBuildHandlerChain+78~+80`）。
+**设计意图（源码可证）：** `filterlatency.TrackStarted/TrackCompleted` 成对包裹每个 filter 以分别记录排队与执行延迟（`DefaultBuildHandlerChain+3`、`+20`、`+26~+28`、`+33`、`+42`、`+52~+53` 等）；WithTimeout 把后续处理放进 goroutine，使长请求超时后仍能继续收尾（`DefaultBuildHandlerChain+63~+64` 注释）。
 
 ### 4.3b 认证 / 鉴权 filter 深度拆解
 
@@ -389,16 +389,16 @@ apiExtensionsServer（第三层）
 NewConfig → Complete
  ↓
 CreateServerChain
- └── KubeAPIServer.New（controlplane/apiserver server.go:93）
-      └── controlplane.CompletedConfig.New（instance.go:321）→ (*Server).InstallAPIs（apis.go:88）
-           ├── legacyProvider.NewRESTStorage（storage_core.go:140，PodStorage：pod + 子资源）
+ └── KubeAPIServer.New（controlplane/apiserver server.go `c.New+0`）
+      └── controlplane.CompletedConfig.New（instance.go `c.New+0`）→ (*Server).InstallAPIs（apis.go `s.InstallAPIs+0`）
+           ├── legacyProvider.NewRESTStorage（storage_core.go `p.NewRESTStorage+0`，PodStorage：pod + 子资源）
            │    ↓ APIGroupInfo
            ├── legacy 组（group 名空）→ InstallLegacyAPIGroup（/api）→ installAPIResources
            └── 其余组 → InstallAPIGroups（/apis）→ installAPIResources
-                └── APIGroupVersion.InstallREST（groupversion.go:106）
-                     └── APIInstaller.Install → registerResourceHandlers（installer.go:288）
-                          ├── 断言 rest.Creater 等能力接口（installer.go:338 起）
-                          └── ws.POST(...).To(restfulCreateResource → handlers.CreateResource，installer.go:1307/928）
+                └── APIGroupVersion.InstallREST（groupversion.go `g.InstallREST+0`）
+                     └── APIInstaller.Install → registerResourceHandlers（installer.go `a.registerResourceHandlers+0`）
+                          ├── 断言 rest.Creater 等能力接口（installer.go `a.registerResourceHandlers+50` 起）
+                          └── ws.POST(...).To(restfulCreateResource → handlers.CreateResource，installer.go `restfulCreateResource+0`；调用点 `a.registerResourceHandlers+640`）
 ```
 请求运行时方向：SecureServing → FullHandlerChain（filters）→ director → GoRestfulContainer → CreateResource。
 
@@ -410,7 +410,7 @@ CreateServerChain
 
 | 设计点 | 证据 |
 |---|---|
-| 委托链解耦 | 三个 server 以 delegate 链串接，每层只负责自己认领的路径，未命中向下委托；director 解决 go-restful `/apis` webservice 强制 404 破坏 fallthrough 的问题（handler.go:53-64 注释） |
+| 委托链解耦 | 三个 server 以 delegate 链串接，每层只负责自己认领的路径，未命中向下委托；director 解决 go-restful `/apis` webservice 强制 404 破坏 fallthrough 的问题（handler.go `APIServerHandler+11~+22` 注释） |
 | 能力接口驱动路由 | `registerResourceHandlers` 对 `rest.Storage` 做能力断言，能力决定动词，storage 与路由生成解耦 |
 | 中间件顺序固定 | 认证 → 授权 → 限流/冒充 → audit 等顺序经 `filterlatency` 成对包裹，保证排队与执行延迟可分别度量 |
 | legacy /api 与 /apis 分流 | `InstallAPIs` 按组名是否为空分叉：空走 `InstallLegacyAPIGroup`，非空走 `InstallAPIGroups`，二者最终都进 `installAPIResources` |
@@ -420,18 +420,18 @@ CreateServerChain
 
 | 变化 | 说明 | 锚点 |
 |---|---|---|
-| **冒充默认路径切换** | `ConstrainedImpersonation`（Beta 1.36 Default:true）默认开 → 默认走 `WithConstrainedImpersonation`，**不再走 `WithImpersonation`** | config.go:1112-1118；kube_features.go:428-431 |
-| **ConditionsAwareAuthorization 新增** | `ConditionalAuthorization`（Alpha 1.38 Default:false）默认关；需 feature + `ConditionsEnforcerPluginEnabled` 才包 `WithConditionsAwareAuthorization`，否则默认 `WithAuthorization` | config.go:1082-1092；kube_features.go:416-418 |
-| **P&F 位置** | `WithPriorityAndFairness`（c.FlowControl != nil）在授权**之后**、冒充**之前**；否则 `WithMaxInFlightLimit` | config.go:1100-1109 |
-| **WithRoutine** | `APIServingWithRoutine`（Alpha 1.30 Default:false）默认不包 | config.go:1164-1166；kube_features.go:390-392 |
+| **冒充默认路径切换** | `ConstrainedImpersonation`（Beta 1.36 Default:true）默认开 → 默认走 `WithConstrainedImpersonation`，**不再走 `WithImpersonation`** | `DefaultBuildHandlerChain+34~+40`；`defaultVersionedKubernetesFeatureGates+53~+56` |
+| **ConditionsAwareAuthorization 新增** | `ConditionalAuthorization`（Alpha 1.38 Default:false）默认关；需 feature + `ConditionsEnforcerPluginEnabled` 才包 `WithConditionsAwareAuthorization`，否则默认 `WithAuthorization` | `DefaultBuildHandlerChain+4~+14`；`defaultVersionedKubernetesFeatureGates+41~+43` |
+| **P&F 位置** | `WithPriorityAndFairness`（c.FlowControl != nil）在授权**之后**、冒充**之前**；否则 `WithMaxInFlightLimit` | `DefaultBuildHandlerChain+22~+31` |
+| **WithRoutine** | `APIServingWithRoutine`（Alpha 1.30 Default:false）默认不包 | `DefaultBuildHandlerChain+86~+88`；`defaultVersionedKubernetesFeatureGates+15~+17` |
 
 ### 6.3 语义修正（相对旧版）
 
 | 项 | 旧版 | 当前 |
 |---|---|---|
-| `InstallAPIs` | 包级函数 | **方法** `(s *Server).InstallAPIs`（apis.go:88） |
-| `restfulCreateResource` | 方法 | **包级函数**（installer.go:1307），调用点 :928 |
-| `Config.New` | `config.go` | `completedConfig.New`（server.go:93）；API 安装入口在 instance.go:345 |
+| `InstallAPIs` | 包级函数 | **方法** `(s *Server).InstallAPIs`（apis.go `s.InstallAPIs+0`） |
+| `restfulCreateResource` | 方法 | **包级函数**（installer.go `restfulCreateResource+0`），调用点 `a.registerResourceHandlers+640` |
+| `Config.New` | `config.go` | `completedConfig.New`（server.go `c.New+0`）；API 安装入口在 instance.go `c.New+24` |
 
 ### 6.4 行号漂移（相对旧文）
 
