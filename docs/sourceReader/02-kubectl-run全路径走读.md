@@ -142,9 +142,9 @@ nginx   1/1     Running   0          <n>
 |---|---|---|---|
 | 客户端 POST | apiserver 返回 201 + Pod 对象 | 同名 Pod 已存在（409 冲突）、认证/鉴权失败（401/403） | `kubectl run` 终端打印 `pod/nginx created`；无即未成功 |
 | apiserver 写 etcd | Pod 落 etcd，`spec.nodeName` 为空 | 准入拒绝、声明式校验失败（422 Invalid）、etcd 冲突 | `kubectl get pod` 能看到 `STATUS=Pending`（已持久化、未调度） |
-| scheduler 选节点 + bind | `spec.nodeName` 被填入 | 无可行节点（资源/亲和/污点）、抢占也失败 | 事件 `Scheduled`（Normal，reason=Binding，schedule_one.go:824）；失败为 `FailedScheduling`（Warning，:976） |
+| scheduler 选节点 + bind | `spec.nodeName` 被填入 | 无可行节点（资源/亲和/污点）、抢占也失败 | 事件 `Scheduled`（Normal，reason=Binding，sched.finishBinding+9）；失败为 `FailedScheduling`（Warning，:976） |
 | kubelet 创建 sandbox + 容器 | sandbox 与全部容器 Running | 镜像拉取失败、PreCreate/PreStart 钩子失败、资源不足被 kubelet 拒绝 | 事件 `Pulling`/`Pulled`/`Failed`（拉镜像，`pkg/kubelet/events/event.go:47-49`）；`Started`/`Failed`（建/启容器，:22-23） |
-| 状态回报 | Pod status 回写 apiserver/etcd | PATCH 冲突（重读重试）、Pod 被删（丢弃更新） | Pod condition `PodScheduled`、`ContainersReady`、`Ready` 依次为 True（status_manager.go:1060、:659-660）；`STATUS=Running` |
+| 状态回报 | Pod status 回写 apiserver/etcd | PATCH 冲突（重读重试）、Pod 被删（丢弃更新） | Pod condition `PodScheduled`、`ContainersReady`、`Ready` 依次为 True（m.updateStatusInternal+36、:659-660）；`STATUS=Running` |
 
 **用这张表排障的顺序：**
 1. 先看 `kubectl get pod` 的 `STATUS`：`Pending` 说明还没到 kubelet（卡在前两跳）；`Running` 说明前四跳全通。
@@ -167,22 +167,22 @@ POST /api/v1/namespaces/default/pods HTTP/1.1
 ```
 URL 由 `Request.URL`（:556）拼装：
 - `pathPrefix` = `/api/v1`（核心组，见篇 04 `ClientForMapping` 的 `/api` vs `/apis` 分流）
-- `namespaceSet && namespace` → 追加 `/namespaces/default`（`NamespaceIfScoped`，helper.go:242）
-- `resource` → 追加 `/pods`（helper.go:244）
+- `namespaceSet && namespace` → 追加 `/namespaces/default`（`NamespaceIfScoped`，m.createResource+2）
+- `resource` → 追加 `/pods`（m.createResource+4）
 - name 为空（Create 不带 name，由服务端/对象内 name 定）
-- query：`VersionedParams(options, ParameterCodec)`（helper.go:246）追加 `dryRun`/`fieldManager`/`fieldValidation`（本场景均空）
+- query：`VersionedParams(options, ParameterCodec)`（m.createResource+6）追加 `dryRun`/`fieldManager`/`fieldValidation`（本场景均空）
 
 #### 请求头
 
 | 头 | 值（本场景） | 来源锚点 |
 |---|---|---|
-| `Authorization` | `Bearer <token>` | `transport/round_trippers.go:322`（`SetHeader("Authorization", "Bearer "+token)`，`NewBearerAuthRoundTripper` :285） |
-| `Accept` | `application/vnd.kubernetes.protobuf,application/json` | `request.go:199`（`setAcceptHeader`，默认 `AcceptContentTypes`） |
-| `Content-Type` | `application/json` | `request.go:542`（`Body` 内 `SetHeader("Content-Type", ContentType)`）；未设时按 config.go:318 注释回落 `application/json` |
-| `User-Agent` | `kubectl/vX.Y.Z (os/arch) kubernetes/<commit>` | `config.go:545 buildUserAgent` 格式串 / `:550 DefaultKubernetesUserAgent` |
+| `Authorization` | `Bearer <token>` | `rt.RoundTrip+12`（`SetHeader("Authorization", "Bearer "+token)`，`NewBearerAuthRoundTripper` :285） |
+| `Accept` | `application/vnd.kubernetes.protobuf,application/json` | `r.UseProtobufAsDefault+2`（设 `AcceptContentTypes`，默认 protobuf 优先） |
+| `Content-Type` | `application/json` | `r.Body+36`（`Body` 内 `SetHeader("Content-Type", ContentType)`）；未设时按 `ContentConfig+7` 注释回落 `application/json` |
+| `User-Agent` | `kubectl/vX.Y.Z (os/arch) kubernetes/<commit>` | `buildUserAgent+0` 格式串 / `DefaultKubernetesUserAgent+0` |
 | `Content-Length` | body 字节数 | `http` 传输层 |
 
-`Accept` 用 protobuf 优先：client-go 默认 `AcceptContentTypes = "application/vnd.kubernetes.protobuf,application/json"`（request.go:199）——能接受 protobuf 就用（省带宽），否则回落 JSON。`Content-Type` 则由 `Body` 内 `Negotiator.Encoder(ContentType)`（:530）按对象序列化后设置。
+`Accept` 用 protobuf 优先：client-go 默认 `AcceptContentTypes = "application/vnd.kubernetes.protobuf,application/json"`（r.UseProtobufAsDefault+2）——能接受 protobuf 就用（省带宽），否则回落 JSON。`Content-Type` 则由 `Body` 内 `Negotiator.Encoder(ContentType)`（:530）按对象序列化后设置。
 
 #### 请求体
 
@@ -202,7 +202,7 @@ Content-Type: application/json
 - `transformResponse`：读 body → 取 `Content-Type`（空则回落 `ContentType`）→ `Negotiator.Decoder` 解码器 → 按 status code 分流。
 - **2xx**（:1242 附近，`<200` 或 `>206` 为错误）：decode body 为 `runtime.Object`，`Result{obj, body}`。
 - **非 2xx**：`transformUnstructuredResponseError` 把错误体转 `*apierrors.StatusError`（409 冲突 / 422 Invalid / 403 等）。
-- body 再经 `Helper.createResource` 的 `.Get()`（helper.go:249）decode 成存回的 Pod（含服务端分配的 `UID`、`ResourceVersion`）。
+- body 再经 `Helper.createResource` 的 `.Get()`（m.Patch+0）decode 成存回的 Pod（含服务端分配的 `UID`、`ResourceVersion`）。
 
 #### 请求/响应报文对照
 
