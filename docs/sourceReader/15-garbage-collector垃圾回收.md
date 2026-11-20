@@ -304,7 +304,7 @@ orphan workers → orphanDependents → removeFinalizer
 
 ### 10.2 验证
 - **源码锚点**：本稿全部符号+偏移经 grep/read 在当前基准（master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`）逐一核对，证据见 `.progress/evidence/15.md`。
-- **关键修正已落实**：`GetGraphResources` 归属 graph_builder.go:1016；`event`/`monitor`/`monitors` 归属 graph_builder.go；`attemptToDeleteItem` 后半段偏移前移 9～35；`deleteWithPropagationPolicy` 无（0 命中）。
+- **关键修正已落实**：`GetGraphResources` 归属 graph_builder.go（`GetGraphResources+0`）；`event`/`monitor`/`monitors` 归属 graph_builder.go；`attemptToDeleteItem` 后半段偏移前移 9～35；`deleteWithPropagationPolicy` 无（0 命中）。
 - **零漂移锚点**：`GarbageCollector+0`（:61）、`GraphBuilder+0`（:82）、`node+0`（:63）、`concurrentUIDToNode+0`（:239）、`ReferenceCache+0`（:24）及全部 node 方法、garbagecollector.go/graph_builder.go/operations.go 各函数定义行均与旧文一致。
 - **未确认项**：无。
 

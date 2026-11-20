@@ -215,7 +215,7 @@ f.ClientForMapping(mapping)  → RESTClient（已定 API 路径 + 组版本）
 
 kubectl 发请求前必须先知道「连哪个集群、用什么凭据」。这来自 kubeconfig 文件（默认 `~/.kube/config`）。本节走一遍 kubeconfig 的加载与 RESTConfig 构造——这是 client-go 客户端链路的起点（先于篇 04 的 Factory→RESTClient 链）。
 
-**kubeconfig 加载（`ClientConfigLoadingRules.Load`，loader.go:197）：**
+**kubeconfig 加载（`ClientConfigLoadingRules.Load+0`，loader.go）：**
 ```text
 Load()
 ├── 1. Migrate()（迁移旧格式）
@@ -226,7 +226,7 @@ Load()
 └── 4. 合并所有 kubeconfigs（按 Precedence 顺序，后者覆盖前者）
 ```
 
-**RESTConfig 构造（`DirectClientConfig.ClientConfig`，client_config.go:172）：**
+**RESTConfig 构造（`DirectClientConfig.ClientConfig+0`，client_config.go）：**
 ```text
 ClientConfig()
 ├── 1. getAuthInfo → AuthInfo（用户凭据：token/cert/client-key/exec/oidc）

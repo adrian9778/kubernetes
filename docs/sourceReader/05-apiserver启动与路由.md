@@ -343,7 +343,7 @@ apiExtensionsServer（第三层）
 3. `apiGroupVersion.InstallREST(s.Handler.GoRestfulContainer)`（+18）——核心路由落地
 4. 聚合 discovery：`apiPrefix == APIGroupPrefix`（/apis）走 `AggregatedDiscoveryGroupManager.AddGroupVersion`（+26 ～ +33），否则（legacy /api）走 `AggregatedLegacyDiscoveryGroupManager`（+35 ～ +43）
 5. `RegisterDestroyFunc`（+49）；StorageVersionAPI 开启时注册 ResourceInfos（+51 ～ +57）
-**被调用函数：** `APIGroupVersion.InstallREST`；`InstallAPIGroups`（:913）走同一 `installAPIResources`。
+**被调用函数：** `APIGroupVersion.InstallREST`；`InstallAPIGroups`（`s.InstallAPIGroups+0`）走同一 `installAPIResources`。
 
 ### 函数：(*APIGroupVersion).InstallREST
 
@@ -369,9 +369,9 @@ apiExtensionsServer（第三层）
 **关键机制：**
 - 函数开头对 storage 做能力接口断言（+50 起，:338 `creater, isCreater := storage.(rest.Creater)`；同时断言 namedCreater/getter/lister/updater/patcher/gracefulDeleter/collectionDeleter/watcher/connecter 等，:338-351）。
 - `isNamedCreater` 时把 `isCreater` 置 true（+68 ～ +70）。
-- **POST 分支（:923，case request.MethodPost）：** named creater 用 `restfulCreateNamedResource(namedCreater, reqScope, admit)`（:926），否则 `restfulCreateResource(creater, reqScope, admit)`（:928，**包级函数调用**）。
-- handler 先被 `metrics.InstrumentRouteFunc` 包指标（:930），再 `AddWarningsHandler`（:931）。
-- `ws.POST(action.Path).To(handler)...`（:937 ～ :948）注册路由、文档、出入参类型。
+- **POST 分支（`a.registerResourceHandlers+635`，case request.MethodPost）：** named creater 用 `restfulCreateNamedResource(namedCreater, reqScope, admit)`（调用点 `a.registerResourceHandlers+638`），否则 `restfulCreateResource(creater, reqScope, admit)`（`a.registerResourceHandlers+640`，**包级函数调用**）。
+- handler 先被 `metrics.InstrumentRouteFunc` 包指标（`a.registerResourceHandlers+642`），再 `AddWarningsHandler`（`a.registerResourceHandlers+643`）。
+- `ws.POST(action.Path).To(handler)...`（`a.registerResourceHandlers+649~+660`）注册路由、文档、出入参类型。
 **数据流：** rest.Storage 能力 → handler 闭包 → go-restful Route。
 
 ### 函数：restfulCreateResource

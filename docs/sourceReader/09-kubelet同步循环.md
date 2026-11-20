@@ -47,7 +47,7 @@ kubelet 是运行在**每个节点**上的节点级 agent。从外部看，它�
 **源码：** `pkg/kubelet/kubelet.go#NewMainKubelet+0`（定义行 :481）
 **职责：** 构造 Kubelet 及其全部子组件。
 **关键动作：**
-1. 构造 `config.NewPodConfig(...)`（config.go:61），随后向 `cfg.Channel(ctx, source)` 注册三源：
+1. 构造 `config.NewPodConfig(...)`（`NewPodConfig+0`，pkg/kubelet/config/config.go），随后向 `cfg.Channel(ctx, source)` 注册三源：
    - apiserver：`pkg/kubelet/config/apiserver.go#NewSourceApiserver`（:36，ListWatch `spec.nodeName=<本节点>` + Reflector）
    - file：静态 Pod 文件（fsnotify）
    - http：HTTP manifest 周期拉取
@@ -63,7 +63,7 @@ kubelet 是运行在**每个节点**上的节点级 agent。从外部看，它�
 
 kubelet 的期望 Pod 来自三个互相独立的源：**apiserver**（`spec.nodeName=<本节点>` 的 Pod）、**静态 Pod 文件**（fsnotify 监听目录）、**HTTP manifest**（周期拉取）。`PodConfig` 是三源的多路复用器：各源往自己的 channel 写，`podStorage.Merge` 按 source 归并成一份期望集合，再产出统一的 `PodUpdate` 流给 syncLoop。
 
-**三源接入（`NewPodConfig` + `Channel`，config.go:61/:75）：**
+**三源接入（`NewPodConfig+0` + `c.Channel+0`，pkg/kubelet/config/config.go）：**
 - `NewPodConfig` 建 `podStorage`（持 `pods map[source]map[UID]*Pod`、`updates` 输出通道、`sourcesSeen`）。
 - `Channel(ctx, source)`（+0，:75）：按 source 名（`apiserver`/`file`/`http`）建输入通道，`c.sources.Insert(source)` 登记，返回 `chan<- sourceUpdate`。每个源一个独立 goroutine 往自己的 channel 推。
 - `Updates()`（:102）：返回合并后的 `<-chan PodUpdate`——syncLoop 唯一消费的通道。
@@ -131,7 +131,7 @@ kubelet 的期望 Pod 来自三个互相独立的源：**apiserver**（`spec.nod
 | liveness/readiness/startup | 失败/就绪 → 探针同步与 readiness/status 写入（`syncLoopIteration+63` ～ `syncLoopIteration+85`） |
 | containerManager | 设备分配变化 → HandlePodSyncs（`syncLoopIteration+85` ～ 末尾） |
 **返回值：** configCh 关闭时 false（主循环退出，`syncLoopIteration+119`）。
-**关键约束（注释 `syncLoopIteration-16` ～ `syncLoopIteration-13`，kubelet.go:2873-2876）：** select 分支随机序，事件处理无固定优先级。
+**关键约束（注释 `syncLoopIteration-16` ～ `syncLoopIteration-13`，即 `kl.syncLoop+59~+62`）：** select 分支随机序，事件处理无固定优先级。
 
 ### 函数：(*Kubelet).HandlePodAdditions
 **源码：** `pkg/kubelet/kubelet.go#(*Kubelet).HandlePodAdditions+0`（定义行 :3047）
@@ -175,7 +175,7 @@ podWorkerLoop (+0)
 ```
 **串行化语义：** 同一 Pod 的下一次更新必须等本次 Sync 返回；UPDATE 会覆盖 pending 更新（每 Pod 只保留最新期望）。
 **错误处理：** podCache 错误写 FailedSync 事件并返回，由重试机制再次唤醒。
-**relistSuspender 协作：** 默认（SyncPod）分支进入前 `SuspendRelist(podUID)`（pod_workers.go :1342，`podWorkerLoop+76`），Sync 返回后 `ResumeRelist(podUID)`（:1356，`podWorkerLoop+90`）；若 relist 被挂起且有后续未观察变更，则 `RequestPodRelist(logger, podUID)`（:1362）触发一次针对该 Pod 的低延迟 relist——同步自身引起的运行时变化只被观察一次，而非每个中间运行时事件一次。接口定义在 `podRelistSuspender`（pod_workers.go:271-275）。
+**relistSuspender 协作：** 默认（SyncPod）分支进入前 `SuspendRelist(podUID)`（pod_workers.go :1342，`podWorkerLoop+76`），Sync 返回后 `ResumeRelist(podUID)`（:1356，`podWorkerLoop+90`）；若 relist 被挂起且有后续未观察变更，则 `RequestPodRelist(logger, podUID)`（:1362）触发一次针对该 Pod 的低延迟 relist——同步自身引起的运行时变化只被观察一次，而非每个中间运行时事件一次。接口定义在 `podRelistSuspender`（`podRelistSuspender+0~+4`）。
 
 ### 函数：(*GenericPLEG).Start / Relist
 **源码：** `pkg/kubelet/pleg/generic.go#(*GenericPLEG).Start+0`（定义行 :165）/ `#(*GenericPLEG).Relist+0`（定义行 :296）
@@ -268,8 +268,8 @@ EventedPLEG goroutine（可选，监听 CRI 事件 → 触发单 Pod relist）
 **验证要点（代码基准 master@`8893923`，工作区干净）：**
 - 函数声明行号全部按证据索引核对：NewMainKubelet :481、Run :1988、syncLoop :2814、syncLoopIteration :2889、HandlePodAdditions :3047、UpdatePod :784、podWorkerLoop :1266、GenericPLEG.Start :165/Relist :296、manager.Start :285/syncPod :1352、PatchPodStatus :34、PodConfig.Channel :75/Updates :102。
 - 相对偏移按证据核对（见各函数执行流程中的 `+N` 值）；与旧版唯一显著偏差为 `manager.syncPod` 漂移 +108（旧 :1244），由 Start 与 syncPod 间新增约 96 行批量上报路径所致。
-- 新增观察：`podWorkers.relistSuspender`（`SuspendRelist`/`ResumeRelist`/`RequestPodRelist`，接口 pod_workers.go:271-275；挂起 :1342、恢复 :1356）；PLEG 单 Pod relist 队列；`manager.syncPod` 经 `statusutil` 别名调 `PatchPodStatus`。
-- 确认项：kubelet 无 `dispatchWork`（全仓库 grep 0 命中）；`EventedPLEG` 存在（evented.go:43、`NewEventedPLEG` :52、`Start` :63）。
+- 新增观察：`podWorkers.relistSuspender`（`SuspendRelist`/`ResumeRelist`/`RequestPodRelist`，接口 `podRelistSuspender+0~+4`；挂起 :1342、恢复 :1356）；PLEG 单 Pod relist 队列；`manager.syncPod` 经 `statusutil` 别名调 `PatchPodStatus`。
+- 确认项：kubelet 无 `dispatchWork`（全仓库 grep 0 命中）；`EventedPLEG` 存在（`EventedPLEG+0`、`NewEventedPLEG` :52、`Start` :63）。
 
 下一篇展开 SyncPod 内部到 CRI 的执行细节。
 

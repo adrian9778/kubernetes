@@ -219,7 +219,7 @@ POST /api/v1/namespaces/default/pods/nginx  # 命名创建（name 来自 URL 路
 **副作用：** 就地修改 Pod；无 IO。
 
 ### 函数：podStrategy.Validate
-**源码：`pkg/registry/core/pod/strategy.go podStrategy.Validate+0`（:128）`
+**源码：** `pkg/registry/core/pod/strategy.go podStrategy.Validate+0`（:128）
 **职责：** 组装校验选项后调用 `corevalidation.ValidatePodCreate`（容器规范、资源、安全上下文、卷、亲和等的声明式校验全集）。
 **返回值：** `field.ErrorList`；非空即导致 422。
 
