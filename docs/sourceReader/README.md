@@ -63,6 +63,7 @@ flowchart TD
 | [workqueue 机制](topics/workqueue机制.md) | client-go workqueue | 基础队列（Add/Get/Done 去重+脏标记）+ delaying（AddAfter 延迟）+ rate-limiting（指数退避重试）三层包装 |
 | [scheduler 过滤打分框架](topics/scheduler过滤打分框架.md) | kube-scheduler 调度周期 | SchedulePod 两阶段：PreFilter→Filter（并行逐节点）→PostFilter、PreScore→Score（分×权重选节点）；10 个扩展点接口 |
 | [Deployment 滚动更新](topics/deployment滚动更新.md) | Deployment 滚动更新 | syncDeployment 策略分派→rolloutRolling 先扩后缩（maxSurge/maxUnavailable）、比例伸缩 GetReplicaSetProportion、回滚=模板回退 |
+| [kubelet 同步循环与 PLEG](topics/kubelet同步循环与PLEG.md) | kubelet 主循环与状态探测 | 三源 PodConfig→syncLoop 事件分派→podWorkers per-Pod 串行（podWorkerLoop）→SyncPod；GenericPLEG 周期 Relist 生成容器事件驱动自愈 |
 
 新增专题：在 `topics/` 下建 `中文名.md`，按单篇专题骨架（先总结、再生产、再开发、末验证）写，并在本表追加一行。
 
