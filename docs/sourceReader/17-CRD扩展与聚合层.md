@@ -260,14 +260,14 @@ ServeHTTP (+0)
 4. **升级与非升级双路径**：WebSocket/SPDY 升级必须绕过 RoundTripper 直连，故身份头需提前写入请求；这是聚合层最易出错的分支。
 
 #### 函数：(*proxyHandler).updateAPIService
-**源码：** `r.updateAPIService+0`
-**职责：** `BuildTransportConfig+0`（TLS ServerName `<svc>.<ns>.svc`，CA/Cert/Key，InsecureSkipTLSVerify）→ `transport.New(transportConfig)`（:237）构造 RoundTripper，更新 handlingInfo（:241）。
+**源码：** `pkg/apiserver/handler_proxy.go r.updateAPIService+0`（:215）
+**职责：** `remote.BuildTransportConfig`（`staging/src/k8s.io/kube-aggregator/pkg/controllers/status/remote/remote_available_controller.go BuildTransportConfig+0`，:163，TLS ServerName `<svc>.<ns>.svc`，CA/Cert/Key，InsecureSkipTLSVerify）→ `transport.New(transportConfig)`（:237）构造 RoundTripper，更新 handlingInfo（:241）。
 
 ### 12. APIService registry
 | 函数/文件 | 行 | 职责 |
 |---|---|---|
-| `NewREST/NewStatusREST` | `NewREST+0`/`NewStatusREST+0` | APIService 对象存储 |
-| `NewRESTStorage` | `NewRESTStorage+0` | APIGroupInfo 装配 |
+| `NewREST/NewStatusREST` | `staging/src/k8s.io/kube-aggregator/pkg/registry/apiservice/etcd/etcd.go NewREST+0`（:42）/ `NewStatusREST+0`（:130） | APIService 对象存储 |
+| `NewRESTStorage` | `staging/src/k8s.io/kube-aggregator/pkg/registry/apiservice/rest/storage_apiservice.go NewRESTStorage+0`（:33） | APIGroupInfo 装配 |
 
 ## 第四部分：两种扩展机制对比
 
