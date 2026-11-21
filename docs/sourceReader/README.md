@@ -80,6 +80,11 @@ flowchart TD
 | [kubelet image pull 与背压](topics/kubelet-image-pull背压.md) | kubelet 镜像拉取与背压 | EnsureImageExists 拉取决策→pull backoff（podUID_image 指数退避）+QPS 节流（throttleImagePulling）+parallel/serial puller 并发控制；image GC 按磁盘水位清理 |
 | [apiserver discovery 与 OpenAPI](topics/apiserver-discovery与OpenAPI.md) | discovery 与 OpenAPI 生成 | discovery 三层 handler（root `/apis`→group→version 资源列表）+aggregated discovery 聚合一次返回；OpenAPI v2/v3（DefaultOpenAPIConfig/DefaultOpenAPIV3Config）；CRD/聚合 API 动态并入 |
 
+| [v1.37 PodGroup 与组合调度](topics/v1.37-PodGroup与组合调度.md) | 组调度（GenericWorkload） | PodGroup 入队→组调度周期→minCount→placement 生成/评分→CompositePodGroup 父子层级→失败 condition 与回队；符号+偏移锚点 |
+| [DRA 动态资源分配](topics/DRA动态资源分配.md) | Dynamic Resource Allocation | ResourceSlice/Claim/DeviceClass 四类对象→调度器 dynamicresources 插件各扩展点→resourceclaim controller→kubelet 准备/取消准备→devicetainteviction 设备级驱逐 |
+| [测试与质量体系](topics/测试与质量体系.md) | 四维质量保障 | 单元（fake clientset + reactor）/集成（真实 testserver）/e2e（Ginkgo）/verify-update 静态门禁四层，选层原则与替身 |
+| [构建发布与代码生成](topics/构建发布与代码生成.md) | 构建/生成/发布 | `make update`（`*-gen` 再生代码）/`make verify`（只读门禁）/`make test`/`build/release*.sh`；`+k8s:` 标注驱动的生成机制 |
+
 新增专题：在 `topics/` 下建 `中文名.md`，按单篇专题骨架（先总结、再生产、再开发、末验证）写，并在本表追加一行。
 
 ## 阅读建议
