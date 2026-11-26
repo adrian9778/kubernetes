@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 kube-proxy 的 **conntrack 清理**（陈旧连接跟踪项删除）与 **ServiceCIDR 处理**（service 网段变化响应）讲透。
 >
-> **代码基准**：`adrian@6bf0bfd`（2026-11-26，工作区干净，仅 `.codegraph/` 未跟踪，非文档范围），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净，仅 `.codegraph/` 未跟踪，非文档范围），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `CleanStaleEntries+0`。
 >
@@ -135,7 +135,7 @@ Service 缩容（删 endpoint）
 
 ### 6.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `6bf0bfd` 上复核：
+本专题所有「符号+偏移」均在 HEAD `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4` 上复核：
 - conntrack：`CleanStaleEntries+0`（cleanup.go:47）、`conntracker+0`（conntrack.go:44）、`New+0`（:50）、`ct.ListEntries+0`（:59）、`ct.DeleteEntries+0`（:69）
 - filter：`newFlowFilter+0`（filter.go:36）、`flowKey+0`（:47）、`f.MatchConntrackFlow+0`（:61）
 - ServiceCIDR：`NewServiceCIDRConfig+0`（config.go:370）、`c.RegisterEventHandler+0`（:397）、`c.Run+0`（:402）、`c.handleServiceCIDREvent+0`（:413）
