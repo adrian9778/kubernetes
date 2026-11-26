@@ -3,7 +3,7 @@
 # cloud-controller-manager
 > **层级**：第四层——函数级源码解析。
 > **范围**：CCM 进程结构、四类云控制器、cloud-provider 接口、与 KCM 的职责切分。
-> **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区干净），Go 1.27.4。
+> **代码基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4，工作区干净）。
 > **锚点记法**：`文件 符号+偏移`，函数定义行=+0；下文所有行位均按此换算，不出现裸行号。
 
 ## 1. 生产视角（CCM 对外行为、可见结果）
@@ -167,8 +167,10 @@ main → NewCloudControllerManagerCommand
 **设计意图：** CCM 把「云相关」的控制器循环从 KCM 中抽离，形成独立进程。理由：①in-tree 云 provider 禁用后，云厂商各自提供 CCM 二进制，避免上游耦合；②云 API 调用节奏、重试、限流与 KCM 本地循环隔离，互不影响；③`InstancesV2` 接口把「按 Node 对象查询元数据」统一化，显著减少注册/同步时的云 API 调用，并取代已废弃的 `Zones`。
 
 **验证：**
-- 符号与偏移全部按 `master@8893923938107170c86eb4b8cc2b7225b4e44e9b`（工作区干净）逐一核证，无符号消失。
-- 关键修正点均已随证据更新：①HasClusterID 校验位置（`cloudInitializer+11`，非 `InitCloudProvider`）；②`DefaultInitFuncConstructors` 为 `var` 而非 `func`；③KCM 注册表路径为 `cmd/kube-controller-manager/app/controller_descriptor.go`；④node_controller.go 各函数行漂移（syncNode/updateNodeAddress 各 +66）。
+- 符号与偏移全部按 `adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净）逐一核证，无符号消失。
+- 关键修正点均已随证据更新：①HasClusterID 校验位置（`cmd/cloud-controller-manager/main.go` `cloudInitializer+11`，非 `InitCloudProvider`）；②`DefaultInitFuncConstructors` 为 `var` 而非 `func`；③KCM 注册表路径为 `cmd/kube-controller-manager/app/controller_descriptor.go`；④node_controller.go 各函数行漂移（syncNode/updateNodeAddress 各 +66）。
+- 本次基准前移（`889392393810..6bf0bfd51d7`）复核：`git diff` 显示 `cmd/cloud-controller-manager/` 与 `[staging] k8s.io/cloud-provider/` 全区间零改动，本篇所有锚点偏移不变，故正文未作锚点改写。
+- `cloudInitializer` 归属澄清：codegraph 确认其为 `cmd/cloud-controller-manager/main.go` 的**顶层函数**（定义行 82，`HasClusterID` 调用在其体内 +11=93），非局部闭包/变量；同名函数另存于 `[staging] cloud-provider/sample/basic_main.go`，故裸写 `cloudInitializer+11` 会被校验器误归属到 KCM，本篇相关处已改用带路径的全限定写法。
 - 待确认：`[源码未确认]` —— 无。全部锚点均有证据支撑。
 
 [上一篇](17-CRD扩展与聚合层.md) · [总目录](README.md) · [下一篇](19-kubeadm集群引导.md)
