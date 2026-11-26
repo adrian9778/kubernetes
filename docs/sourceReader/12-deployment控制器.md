@@ -4,7 +4,7 @@
 
 > **层级**：第四层——函数级源码解析。
 > **范围**：Deployment 如何管理 ReplicaSet 集合、滚动更新的先扩后缩、回滚、状态计算。
-> **基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区干净），Go 1.27.4。
+> **基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4；工作区 HEAD 在其后者为纯文档提交，`.go` 零差异）。
 > **记法**：源码锚点用「符号+偏移」，函数定义行 = `+0`；类型/非函数锚点用「文件:行号」。
 
 ## 0. 生产视角（Deployment 对外行为、可见结果）
@@ -335,9 +335,10 @@ ReadyReplicas       = Σ 所有 RS 的 ReadyReplicaCount
 
 ## 10. 验证与基准
 
-- **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`，工作区 `.go` 文件干净（仅 docs 有未提交文档修改）。Go 1.27.4。
+- **代码基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4）。工作区 HEAD 在其后者为纯文档提交，`.go` 零差异，故本文锚点即基线代码事实。
 - **证据索引**：`docs/sourceReader/.progress/evidence/12.md`，生成于 2026-11-18 21:10+08:00，与本文档锚点逐项一致。
 - **本次修正**：① 弃用裸行号，全部改「符号+偏移」（函数定义行 = +0）；② 补写 `reconcileRollingReplicaSets`（`reconcileRollingReplicaSets+0`）与 `syncRolloutStatusAfter`（`syncRolloutStatusAfter+0`）两处重构；③ `syncDeployment` 补 `SelectingAll` 检查（+26 ～ +34）与 workload 检查（+48 ～ +52）；④ `reconcileOldReplicaSets` 的 `maxScaledDown` 公式改为相对偏移 +41 ～ +43；⑤ `RealRSControl` 位置改为 `RealRSControl+0`，接口方法更新为 `PatchReplicaSet`（旧文误记为 Create/Update）。
 - **未确认项**：无。所有锚点均已按当前源码逐一核对。
+- **基准漂移复核（88939239381 → 6bf0bfd51d7，2026-11-26）**：Deployment 控制器包（`deployment_controller.go`、`sync.go`、`rolling.go`、`recreate.go`、`rollback.go`、`progress.go`、`util/deployment_util.go`）在该区间**零语义变化**，本文锚点无需改写，仅更新基准与文末核对说明。codegraph 抽查锚点，def 行以 codegraph 为准，与本文所记符号及偏移一致：`DeploymentController+0`(deployment_controller.go)、`syncDeployment+0`(deployment_controller.go)、`sync+0`(sync.go)、`rolloutRolling+0`(rolling.go)、`reconcileRollingReplicaSets+0`(rolling.go)、`reconcileNewReplicaSet+0`(rolling.go)、`reconcileOldReplicaSets+0`(rolling.go)、`cleanupUnhealthyReplicas+0`(rolling.go)、`scaleDownOldReplicaSetsForRollingUpdate+0`(rolling.go)、`rolloutRecreate+0`(recreate.go)、`oldPodsRunning+0`(recreate.go)、`scaleUpNewReplicaSetForRecreate+0`(recreate.go)、`syncRolloutStatusAfter+0`(progress.go)、`syncRolloutStatus+0`(progress.go)、`requeueStuckDeployment+0`(progress.go)、`syncDeploymentStatus+0`(sync.go)、`FindOldReplicaSets+0`(util)、`MaxSurge+0`(util)、`getRollbackTo+0`(rollback.go)。
 
 [上一篇](11-informer与workqueue机制.md) · [总目录](README.md) · [下一篇](13-job与cronjob控制器.md)
