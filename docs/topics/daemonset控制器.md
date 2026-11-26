@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 DaemonSet 控制器讲透：**节点-Pod 一一对应**、节点准入判定、节点亲和性注入、surge 滚动更新。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4）。所有「符号+偏移」均在该基准上复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `dsc.syncDaemonSet+0`。
 >
@@ -174,7 +174,7 @@ rollingUpdate(ctx, ds, nodeList, hash)              dsc.rollingUpdate+0
 
 ### 7.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
+本专题所有「符号+偏移」均在基准 `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4` 上复核（上一基准 `782c049`，2026-11-19）：
 - `NewDaemonSetsController+0`（daemon_controller.go:158）、`dsc.Run+0`（:359）、`dsc.processNextWorkItem+0`（:401）
 - `dsc.getNodesToDaemonPods+0`（:796）、`dsc.podsShouldBeOnNode+0`（:849）、`nodeShouldRunDaemonPod+0`（:1413）、`dsc.updateDaemonSet+0`（:973）、`dsc.manage+0`（:1003）、`dsc.syncNodes+0`（:1040）、`dsc.syncDaemonSet+0`（:1281）
 - `ReplaceDaemonSetPodNodeNameNodeAffinity+0`（daemonset_util.go:176）
@@ -198,6 +198,20 @@ rollingUpdate(ctx, ds, nodeList, hash)              dsc.rollingUpdate+0
 - 改准入判定 → `nodeShouldRunDaemonPod`/`podsShouldBeOnNode`，同步本文 §4。
 - 改亲和注入 → `ReplaceDaemonSetPodNodeNameNodeAffinity`，同步 §4.3。
 - 改 surge → `rollingUpdate`/`updatedDesiredNodeCounts`，同步 §5。
+
+### 7.5 基准同步核对（782c049 → 6bf0bfd5）
+
+`782c049..6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4` 抽查结论：**本专题锚点零漂移**，仅更新头部基准，未改写任何符号锚点。
+
+| 核对项 | 结果 |
+|---|---|
+| `pkg/controller/daemon/**`（含 `daemon_controller.go`、`update.go`、`util/daemonset_util.go`） | 漂移区间内 **0 个 `.go` 变更**，全部符号定义行与上一基准一致 |
+| `DaemonSetsController` / `syncDaemonSet` / `manage` / `podsShouldBeOnNode` / `getNodesToDaemonPods` / `updateDaemonSet` / `syncNodes` / `nodeShouldRunDaemonPod` | codegraph 抽查定义行不变（如 `syncDaemonSet` 仍 1281、`manage` 仍 1003、`podsShouldBeOnNode` 仍 849） |
+| `rollingUpdate` / `updatedDesiredNodeCounts` / `constructHistory` / `snapshot` / `cleanupHistory`（update.go） | surge/maxUnavailable 语义与定义行均未变 |
+| `ReplaceDaemonSetPodNodeNameNodeAffinity`（daemonset_util.go） | 定义行不变（仍 176） |
+| `Const:StaleControllerConsistencyDaemonSet`（`pkg/features/kube_features.go`） | **上一基准已存在**（原 1116 行，现 1157 行，仅因其他 gate 新增而整体下移）。版本化规格未变：1.36 起 Beta + 默认 `true`，且依赖 `clientfeatures.AtomicFIFO`。区间内新增的 gate（`CgroupNamespacesSupport`、`ContainerScopedProbes`、`KubeServingCertificatesSigner` 等）均与 DaemonSet 无关 |
+
+> 说明：`syncDaemonSet` 体内的 `dsc.consistencyStore.EnsureReady(...)`（读己之写前置校验，失败经 `metrics.DaemonsetRequeueSkips` 计数后 requeue）即上述 gate 的落地路径，本次基准下该逻辑已在上一基准存在，非新增能力，故不另立小节。
 
 **关联文档：** [14-daemonset控制器](../sourceReader/14-daemonset控制器.md)（浓缩版）、[replicaset副本控制](replicaset副本控制.md)（控制器范式）、[deployment滚动更新](deployment滚动更新.md)（Deployment 滚动对照）、[workqueue机制](workqueue机制.md)（控制器队列）。
 
