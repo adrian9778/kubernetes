@@ -3,7 +3,7 @@
 # apiserver 请求处理与 etcd
 > **层级**：第四层——函数级源码解析。
 > **范围**：POST 创建 Pod 的 handler 内部全流程、Pod strategy 默认化与校验、泛型 Store.create、etcd3 写入与冲突处理。
-> **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区源码干净），Go 1.27.4。
+> **代码基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26），Go 1.27.4。
 
 ## 0. 生产视角：一次 POST 创建 Pod 的请求怎么进来、怎么结束
 
@@ -234,7 +234,7 @@ Create (+0)
 ├── 1. prepareKey 加命名空间前缀 (+0 ～ +3)
 ├── 2. tracing "Create etcd3" (+4 ～ +11)
 ├── 3. 拒绝创建时自带 ResourceVersion (+12 ～ +14)
-├── 4. PrepareObjectResourceVersion（versioner 清 RV）(+15 ～ +17)
+├── 4. PrepareObjectForStorage（versioner 清 RV）(+15 ～ +17)
 ├── 5. runtime.Encode 序列化 (+19 ～ +23)
 ├── 6. ttl≠0 时 leaseManager.GetLease（Pod ttl=0，跳过）(+28 ～ +31)
 ├── 7. transformer.TransformToStorage 加密/变换 (+34 ～ +38)
@@ -291,7 +291,7 @@ CreateResource → createHandler 闭包
 |---|---|---|
 | etcd watch 回调 | `wc.startWatching+0`（watcher.go :468） | 收 etcd `wres.Events`，逐个 `parseEvent`（调用点 `wc.startWatching+72`，:540） |
 | 解析 | `parseEvent+0`（event.go :66） | etcd `Event` → 内部 `event{key, value, rev, isDeleted, isCreated, prevValue}`；`expectPrevKV` 且 `PrevKv==nil`（已被 compact）则报错 |
-| 进度通知 | `progressNotifyEvent+0`（event.go :80） | etcd bookmark（仅 rev、无对象），维持客户端 revision 前进 |
+| 进度通知 | `progressNotifyEvent+0`（event.go :86） | etcd bookmark（仅 rev、无对象），维持客户端 revision 前进 |
 | 排队 | `wc.queueEvent+0`（watcher.go :843） | 推入 `incomingEventChan`，**channel 满则阻塞上游**（不丢事件） |
 | 并发转换 | `p.scheduleEventProcessing+0`（watcher.go :627）/ `p.collectEventProcessing+0`（:653） | 用 `processingQueue` 保序地把事件交给 worker 做 transform |
 | 转换 | `wc.transform` | 内部 event → `watch.Event`（Added/Modified/Deleted，带对象） |
@@ -319,14 +319,15 @@ CreateResource → createHandler 闭包
 **设计意图（源码可证）：**
 - **先解码后默认化再校验再持久化**：decode（`createHandler+74`）在 handler 层完成版本转换；`PrepareForCreate` 只做就地默认化（`podStrategy.PrepareForCreate+0`）；`ValidateCreate` 聚合并把错误转成 422 Invalid（`BeforeCreate+27~+29`）；持久化只在全部通过后进入 etcd3。职责分层清晰：handler 管协议/协商，strategy 管资源语义，generic store 管通用编排，etcd3 管持久化与冲突。
 - **写路径始终密文**：etcd3 `TransformToStorage`（`s.Create+35`）在 `OptimisticPut`（`s.Create+43`）之前，落盘 data 恒为变换后密文；读回 out 用加密前明文 data（`s.Create+56`），调用方不接触解密读路径。
-- **创建冲突用 expectedRev=0 表达**：`OptimisticPut` 以 expectedRev=0 构造「仅当 key 不存在才成功」的事务，失败返回 `KeyExists`（`s.Create+52`），由 Store.create 解释为 AlreadyExists（409）；这保证同一 key 不可能被两个并发创建同时写入。
+- **创建冲突用 expectedRev=0 表达**：`OptimisticPut` 以 expectedRev=0 构造「仅当 key 不存在才成功」的事务，失败返回 `KeyExists`（`s.Create+51`），由 Store.create 解释为 AlreadyExists（409）；这保证同一 key 不可能被两个并发创建同时写入。
 - **幂等与重试**：对象过大时清 managedFields 重试一次（`createHandler+159~+164`）；generateName 冲突由 `createWithGenerateNameRetry` 重试。
 
-**验证结论（基准 HEAD 8893923）：**
+**验证结论（基准 HEAD 6bf0bfd，2026-11-26）：**
 - 本目录全部符号在位，签名与旧文档一致，无消失项。
-- **行号漂移已修正**：`Store.Create` 564（旧 514，+50）、`Store.create` 595（旧 545，+50）、etcd3 `store.Create` 293（旧 288，+5）、`podStrategy.Validate` 128（旧 125，+3，新发现）。
-- `create.go`、`rest/create.go`、`podStrategy` 类型/Strategy/PrepareForCreate 均无漂移。
+- **本轮（8893923 → 6bf0bfd）核对**：请求处理与 etcd 写入主链路**无语义变化**。`createHandler`（def 53）、`CreateResource`（def 245）、`Store.Create`（def 564）、`Store.create`（def 595）、etcd3 `store.Create`（def 293）、`podStrategy` 全套（61/68/88/128）、`BeforeCreate`（103）、`AdmissionToValidateObjectFunc`（218）def 行均与上轮一致。
+- **etcd3 Update/Delete 已改 TxnDelegator 代理模式**（`storeTxnDelegator` 实现 `storage.TxnDelegator` 的 `GetCurrentState`/`UpdateOnce`/`DeleteOnce`，cacher 侧 `txnDelegator` 代理 watch cache），但**仅作用于 Update/Delete 路径**；本篇讲的 Create 仍由 `store.Create` 直连 `OptimisticPut(expectedRev=0)`，不经代理。故本篇不受影响，Update 路径另见 etcd3写入路径篇。
+- **本轮修正两处陈述性漂移**：`progressNotifyEvent` def 行 80→86；etcd3 Create 第 4 步 versioner 方法名 `PrepareObjectResourceVersion`→`PrepareObjectForStorage`（当前源码 `s.versioner.PrepareObjectForStorage`）。
 - 关键差异确认：Store.create 后置加工仅 `AfterCreate`，**无对象后置 Decorator**；etcd3 包内无独立 `Write`，create 直接走 `OptimisticPut`。
-- 未确认项：无；本目录所有锚点均经证据复核。
+- 未确认项：无；本目录所有锚点均经证据复核（codegraph_explore + sr_tools offset）。
 
 [上一篇](05-apiserver启动与路由.md) · [总目录](README.md) · [下一篇](07-scheduler调度与绑定.md)
