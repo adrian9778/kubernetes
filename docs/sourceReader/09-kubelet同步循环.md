@@ -3,7 +3,7 @@
 # kubelet 同步循环
 > **层级**：第四层——函数级源码解析。
 > **范围**：Kubelet 启动序列、PodConfig 多源合并、syncLoop 主循环与事件分派、podWorkers 串行化、PLEG、statusManager 上报。
-> **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区干净），Go 1.27.4。
+> **代码基准**：adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4）。
 > **锚点记法**：`符号+偏移`，函数声明行（含 `func` 的行）= +0，逐行递增；跨文件引用写作 `文件#符号+偏移`。
 
 ## 0. 生产视角（kubelet 对外行为与可见结果）
@@ -175,7 +175,8 @@ podWorkerLoop (+0)
 ```
 **串行化语义：** 同一 Pod 的下一次更新必须等本次 Sync 返回；UPDATE 会覆盖 pending 更新（每 Pod 只保留最新期望）。
 **错误处理：** podCache 错误写 FailedSync 事件并返回，由重试机制再次唤醒。
-**relistSuspender 协作：** 默认（SyncPod）分支进入前 `SuspendRelist(podUID)`（pod_workers.go :1342，`podWorkerLoop+76`），Sync 返回后 `ResumeRelist(podUID)`（:1356，`podWorkerLoop+90`）；若 relist 被挂起且有后续未观察变更，则 `RequestPodRelist(logger, podUID)`（:1362）触发一次针对该 Pod 的低延迟 relist——同步自身引起的运行时变化只被观察一次，而非每个中间运行时事件一次。接口定义在 `podRelistSuspender`（`podRelistSuspender+0~+4`）。
+**relistSuspender 协作：** 默认（SyncPod）分支进入前 `SuspendRelist(podUID)`（`pkg/kubelet/pod_workers.go` · `podWorkerLoop` `+76`），Sync 返回后 `ResumeRelist(podUID)`（`podWorkerLoop` `+90`）；若 relist 被挂起且有后续未观察变更，则 `RequestPodRelist(logger, podUID)`（`podWorkerLoop` `+96`）触发一次针对该 Pod 的低延迟 relist——同步自身引起的运行时变化只被观察一次，而非每个中间运行时事件一次。接口定义在 `podRelistSuspender`（`podRelistSuspender+0~+4`）。
+> 注：本节 `podWorkerLoop` 偏移经 MCP `codegraph_explore` 回核（定义行 1269，函数体 1269–1421，`+76`/`+90`/`+96` 均落在体内）。`sr_tools verify` 报的越界是假阳性——其 `body_end` 花括号扫描把签名里的空复合类型 `<-chan struct{}` 当成一对 `{}`，在签名行就提前归零；锚点以 codegraph 为准。
 
 ### 函数：(*GenericPLEG).Start / Relist
 **源码：** `pkg/kubelet/pleg/generic.go#(*GenericPLEG).Start+0`（定义行 :165）/ `#(*GenericPLEG).Relist+0`（定义行 :296）
@@ -230,7 +231,7 @@ PLEG 的核心是「两次快照对比 → 生成事件 → 更新缓存 → 投
 ### 函数：(*manager).Start / syncPod
 **源码：** `pkg/kubelet/status/status_manager.go#(*manager).Start+0`（定义行 :285）/ `#(*manager).syncPod+0`（定义行 :1352）
 **职责：** Start 起后台循环批量消费待上报状态；syncPod 调 `statusutil.PatchPodStatus` 发 PATCH。
-**调用链：** `syncPod` 经 `statusutil` 别名（import `statusutil "k8s.io/kubernetes/pkg/util/pod"`，status_manager.go:48）调用 `pkg/util/pod/pod.go#PatchPodStatus`（:34，调用点 :1384）。
+**调用链：** `syncPod` 经 `statusutil` 别名（import `statusutil "k8s.io/kubernetes/pkg/util/pod"`，见 `pkg/kubelet/status/status_manager.go` import 块）调用 `pkg/util/pod/pod.go` · `PatchPodStatus` `+0`（调用点：`pkg/kubelet/status/status_manager.go` · `syncPod` `+32`）。
 **Start 与 syncPod 之间的新增：** 两者定义行间漂移差 96 行（Start +12 vs syncPod +108），为 `updateStatus`/`updateStatusInternal` 等批量上报路径扩展所致。
 **冲突处理：** PATCH 返回冲突时重读 Pod 后重试；网络/服务端错误保留状态下轮再报。
 
