@@ -3,7 +3,7 @@
 # controller 副本控制
 > **层级**：第四层——函数级源码解析。
 > **范围**：以 ReplicaSet 控制器为样本，完整解析 informer 事件入队、worker 调谐、期望计数（expectations）、慢启动批量创建、并发删除与状态更新；末尾给出 Deployment→ReplicaSet 层级定位。
-> **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区干净），Go 1.27.4。
+> **代码基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4），控制器源码与旧基准逐字节一致（`88939239381..6bf0bfd5` 区间内 `pkg/controller/replicaset`、`pkg/controller/replication`、`pkg/controller/controller_utils.go` 零改动）。
 > **锚点记法**：`文件 符号+偏移`，函数定义行（含 `func` 的那一行）= +0，逐行递增；裸行号不再使用。
 
 ---
@@ -286,8 +286,13 @@ expectations 解决的问题是「控制器刚下发一批 create/delete，但 i
 - **scheduling 集成防御**：避免混合 schedulingGroup（防止 gang 调度 PodGroup 永远达不到 minCount）；podTemplate 深拷贝（不污染存储模板）。
 
 **验证（如何确认实现与本文一致）：**
-- **锚点核对**：本文所有「符号+偏移」均可按代码基准 HEAD 复现——结构体 :101、NewReplicaSetController :168、syncHandler :296、Run :302、enqueueRS :396、enqueueRSAfter :406、worker :651、processNextWorkItem :656、manageReplicas :678、syncReplicaSet :808、calculateStatus（`replica_set_utils.go`，`calculateStatus+0`）、updateReplicaSetStatus（`replica_set_utils.go`，`updateReplicaSetStatus+0`）、RealPodControl（`controller_utils.go`，`RealPodControl+0`）、expectations 三类型 `controller_utils.go` :169/:271/:350、常量 :72/:87。
+- **锚点核对**：本文所有「符号+偏移」均可按代码基准 HEAD 复现——结构体 :101、NewReplicaSetController :168、syncHandler :296、Run :302、enqueueRS :396、enqueueRSAfter :406、worker :651、processNextWorkItem :656、manageReplicas :678、syncReplicaSet :808、calculateStatus（`replica_set_utils.go`，`calculateStatus+0`）、updateReplicaSetStatus（`replica_set_utils.go`，`updateReplicaSetStatus+0`）、RealPodControl（`pkg/controller/controller_utils.go`，`RealPodControl+0`）、expectations 三类型 `controller_utils.go` :169/:271/:350、常量 :72/:87。
 - **行为验证**：`go test ./pkg/controller/replicaset/...`（含 expectations、slowStartBatch、getPodsToDelete 单测）可作为实现级回归；`hack/verify-gofmt.sh` 与 `make verify` 验证代码基准。
 - **未确认项**：无。scheduling 相关（PodGroup）行为以 feature gate `WorkloadWithDeployment` 与 `EnableWorkloadScheduling` 门控（`replica_set.go :154~:163`），默认开启；本文对新增参数与两处新增逻辑的偏移均按当前源码逐行核对。
+
+**基准同步核对（`88939239381` → `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`，2026-11-26）：**
+- **代码零漂移**：`git diff --stat` 在漂移区间内对 `pkg/controller/replicaset`、`pkg/controller/replication`、`pkg/controller/controller_utils.go`、`pkg/controller/controller_ref_manager.go` 均为空输出——副本控制语义与全部锚点偏移不变，本文仅更新头部基准与下方 `RealPodControl` 文件归属。
+- **codegraph 抽查一致**：`manageReplicas+0`(:678，4 参签名不变)、`syncReplicaSet+0`(:808，体内 :815/:820/:831/:842/:844/:875/:884/:896/:906 偏移逐一吻合)、`slowStartBatch+0`(:944，倍增+早期失败即停不变)、`RealPodControl+0`(controller_utils.go:492，`OnWrite` :495)。
+- **`podControlAdapter` 判定**：位于 `pkg/controller/replication/conversion.go:345`，实现 `PodControlInterface` 并包裹 `RealPodControl`（`replication_controller.go:61`）——属 sr_tools 已知假阳性（适配器内方法），本文不引用该符号，无需补写；RC 侧漂移不影响 RS 篇内容。
 
 [上一篇](07-scheduler调度与绑定.md) · [总目录](README.md) · [下一篇](09-kubelet同步循环.md)
