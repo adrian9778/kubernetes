@@ -3,7 +3,7 @@
 # CRD 扩展与聚合层
 > **层级**：第四层——函数级源码解析。
 > **范围**：CRD（apiextensions-apiserver）的动态注册与懒分发；kube-aggregator 的 APIService 注册与后端代理。
-> **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区干净），Go 1.27.4。
+> **代码基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26），Go 1.27.4。
 > **记法**：源码锚点一律「符号+偏移」，函数定义行 = +0；行号随基准变化时只改偏移。
 
 ## 第一部分：生产视角（对外行为与可见结果）
@@ -35,13 +35,13 @@
 ### 4. 类型级
 | 类型 | 文件 | 职责 |
 |---|---|---|
-| `CustomResourceDefinitions` | `pkg/apiserver/apiserver.go CustomResourceDefinitions+0`（:108） | 内嵌 GenericAPIServer 与 Informers；CRD server 主体 |
-| `Config/CompletedConfig` | :93/:103 | 装配配置 |
+| `CustomResourceDefinitions` | `[staging] k8s.io/apiextensions-apiserver/pkg/apiserver/apiserver.go CustomResourceDefinitions+0` | 内嵌 GenericAPIServer 与 Informers；CRD server 主体 |
+| `Config/CompletedConfig` | 同上 `Config+0` / `CompletedConfig+0` | 装配配置 |
 | `crdHandler` | `pkg/apiserver/customresource_handler.go crdHandler+0`（:92） | 持有 `customStorage atomic.Value`（crdStorageMap）、crdLister、restOptionsGetter、admission、converterFactory |
-| `crdInfo` | :137 | 单个 CRD 的运行态：spec、acceptedNames、`storages map[string]CustomResourceStorage`、requestScopes、storageVersion、deprecated、warnings、waitGroup |
-| `crdStorageMap` | :168 | `map[types.UID]*crdInfo` |
-| `CustomResourceStorage` | `pkg/registry/customresource/etcd.go CustomResourceStorage+0`（:39） | 一个版本的 CR 存储集合：CustomResource/Status/Scale 三个 REST |
-| `REST`（customresource） | `etcd.go REST+0`（:105） | 内嵌 genericregistry.Store，CR 实例的实际存储 |
+| `crdInfo` | `pkg/apiserver/customresource_handler.go crdInfo+0` | 单个 CRD 的运行态：spec、acceptedNames、`storages map[string]customresource.CustomResourceStorage`、requestScopes/scaleRequestScopes/statusRequestScopes、storageVersion、deprecated、warnings、waitGroup |
+| `crdStorageMap` | `pkg/apiserver/customresource_handler.go crdStorageMap+0` | `map[types.UID]*crdInfo` |
+| `CustomResourceStorage` | `pkg/registry/customresource/etcd.go CustomResourceStorage+0` | 一个版本的 CR 存储集合：CustomResource/Status/Scale 三个 REST |
+| `REST`（customresource） | `pkg/registry/customresource/etcd.go REST+0` | 内嵌 genericregistry.Store，CR 实例的实际存储 |
 
 ### 5. 装配函数级
 
@@ -161,7 +161,7 @@ serveResource（:369）
 | `NewStorage` | `staging/src/k8s.io/apiextensions-apiserver/pkg/registry/customresource/etcd.go NewStorage+0`（:45） | 构造一个版本的 CustomResourceStorage（本分支无 `NewResourceHandler`，全仓 grep 无） |
 | `customResourceStrategy` | `strategy.go customResourceStrategy+0`（:54） | CR 的默认化与声明式校验（含 structural schema、CEL 校验） |
 | `REST` | etcd.go `REST+0`（:105） | 复用 generic Store，CR 的增删改查行为与内置资源一致 |
-| `StatusREST/ScaleREST` | :119/:150 | 子资源 |
+| `StatusREST/ScaleREST` | `pkg/registry/customresource/etcd.go StatusREST+0` / `ScaleREST+0` | 子资源 |
 
 ## 第三部分：开发视角——聚合层
 
@@ -194,7 +194,7 @@ serveResource（:369）
 
 #### 函数：NewAPIServiceRegistrationController
 **源码：** `pkg/apiserver/apiservice_controller.go NewAPIServiceRegistrationController+0`（:60）
-**sync（:82）：** NotFound → RemoveAPIService；存在 → AddAPIService；标准 workqueue worker 模式（Run :96，单 worker :131）。
+**sync（`c.sync+0`）：** NotFound → RemoveAPIService；存在 → AddAPIService；标准 workqueue worker 模式（Run `c.Run+0`，单 worker 见 Run 体内 `go wait.Until(c.runWorker, …)`）。
 
 ### 11. 注册与代理函数级
 
@@ -302,6 +302,6 @@ APIService informer → RegistrationController.sync
 - **懒安装的动机**：CRD 是运行时注册的资源，不能在启动时静态构造全部版本存储；只有第一次 CR 请求才按需建存储，避免 CRD 数量多时启动开销过大。`atomic.Value` 承载 `crdStorageMap` 保证读路径无锁，写路径在 `customStorageLock` 下双检，与 CRD 更新事件去重。
 - **CR 与内置资源同构**：CR 复用 `genericregistry.Store` + `customResourceStrategy`，因此 get/list/watch/create/update/patch/delete 的行为、分页、watch 语义与内置资源一致，仅 schema/校验来源不同（CRD 的 structural schema + CEL）。
 - **聚合层的设计**：`proxyHandler` 把「APIService 对象 → 后端 Service」的映射做成单 handler，`proxyHandlingInfo` 以 atomic 保存运行态（local/服务可用性/roundTripper），更新时原子替换，请求路径无锁。
-- **验证**：本基准锚点已由 `docs/sourceReader/.progress/evidence/17.md` 逐项核对；customresource_handler.go 全文件 +1（头部新增一行），其余聚合层与 registry 零漂移。未确认项：无。
+- **验证**：基准已更新到 `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26）。以 MCP `codegraph_explore` 抽查懒分发与聚合代理四个焦点：`customresource_handler.go`（`crdHandler`/`NewCustomResourceDefinitionHandler`/`r.ServeHTTP`/`r.serveResource`/`r.serveStatus`/`r.serveScale`/`r.getOrCreateServingInfoFor`/`crdInfo`/`crdStorageMap` 定义行与本文偏移一致）、`handler_proxy.go`（`proxyHandler`+51、`proxyHandlingInfo`+71、`r.ServeHTTP` def 107 body→188、`r.updateAPIService` def 215 body→242，五个早退守卫顺序与升级分支不变）、`resolvers.go`（`ServiceResolver` 接口 + `aggregatorEndpointRouting`/`aggregatorClusterRouting`/`loopbackResolver` 三个 receiver 的 `r.ResolveEndpoint`，多 receiver 索引按变量名）、`establish/establishing_controller.go`（`EstablishingController`+42、`NewEstablishingController`+54，仅作 crdHandler 字段与装配入参）。聚合层与两处 registry 亦零结构漂移。本基准引用校验失效项（✗）为 0；`?` 均为 `apiserver.go`/`etcd.go`/`strategy.go` 同名文件或多文件同名符号的 AMBIGUOUS 假阳性（取证脚本已知，锚点以 codegraph 为准）。未确认项：无。
 
 [上一篇](16-kube-proxy网络代理.md) · [总目录](README.md)
