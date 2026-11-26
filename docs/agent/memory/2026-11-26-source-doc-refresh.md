@@ -40,11 +40,12 @@ grep -ohE '[A-Za-z0-9_./-]+\.go:[0-9]+' <doc.md> | wc -l   # 应为 0
 ```
 
 ## 终态数据
-- 全库 ✗：**111 → 9**。? 裸名歧义 595（工具按 base-name 报，非失效）。✓ 1530。
-- 提交：28 个 docs commit（`27ccd1ec`…`f60dd8a3`）。
-- 已同步篇目（引用清零 + 基准更新到 6bf0bfd51d7）：
-  重写 13 篇 = kubelet探针机制、调度器抢占、APF、etcd3写入路径、主链路03、leader-election、workqueue、DRA、kube-proxy规则生成、api-server全景、admission-webhook、19-kubeadm、04-kubectl、apiserver-discovery；
-  定点修复 = aggregator、CRD建立与懒分发、09/14/16/20/21 篇、07-scheduler、设备插件、evidence 两篇记法；
+- 全库 ✗：**111 → 5**（-95%）。? 裸名歧义 598（工具按 base-name 报，非失效）。✓ 1587。
+- 基线覆盖：58 篇中 **54 篇基准更新到 `6bf0bfd51d7`**；余 4 篇为 README/00 导航类与 evidence 两篇（已是符号+偏移），无需改基准。
+- 提交：本轮共 40+ 个 docs commit。
+- 已同步篇目：
+  骨架重写 14 篇 = kubelet探针机制、调度器抢占、APF、etcd3写入路径、主链路03、leader-election、workqueue、DRA、kube-proxy规则生成、api-server全景、admission-webhook、apiserver-discovery、10-kubelet-CRI、scheduler过滤打分框架；
+  批判元基准更新 27 篇 = 01/05/06/08/11/12/13/15/17/18/20 篇 + image-pull背压、PodGroup、PLEG、daemonset、conntrack、replicaset、GC依赖图、设备插件注册、etcd-watch、rollout、CRD-conversion、informer-resync、构建发布、测试与质量体系、job/cronjob周期调度；
   新增 = podcertssigner服务签名（独立篇）。
 
 ## 本次独有发现
@@ -68,7 +69,7 @@ grep -ohE '[A-Za-z0-9_./-]+\.go:[0-9]+' <doc.md> | wc -l   # 0
 ```
 
 ## 遗留与后续
-- 剩余 9 处 ✗ 全为 `sr_tools` 局限（符号均 grep 确认存在）：Go 泛型 `[T]`（3）、receiver 变量名索引（2）、函数内局部闭包（2）、多 receiver 同名（1）、适配器内方法（1）。文档锚点正确，已 codegraph 回核。若要清零需再改工具（泛型感知 + 闭包变量索引），收益低、风险高，未做。
-- `?` 595 处裸名歧义为工具按 base-name 报告，非失效（同名符号跨文件），锚点已带路径或 receiver 消歧。
+- 剩余 5 处 ✗ 全为 `sr_tools` 局限（符号均 grep 确认存在）：Go 泛型 `[T]`（3：delayingType/waitFor/rateLimitingType）、多 receiver 同名方法（1：ResolveEndpoint×3）、函数内局部闭包（1：buildController）。文档锚点正确，已 codegraph 回核。若要清零需再改工具（泛型感知 + 闭包变量索引 + receiver 归属），收益低、风险高，未做。
+- `?` 598 处裸名歧义为工具按 base-name 报告，非失效（同名符号跨文件），锚点已带路径或 receiver 消歧。
 - 生产运行期行为（DRA 抢占、APF 过载、leader 切换、退避节奏等）均标 `[待运行验证]`，未在真实集群实测。
 - `sr_tools.py` 在 `.progress/`（gitignore），其修复未进版本库——台账即记录。
