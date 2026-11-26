@@ -41,13 +41,13 @@
 
 | 类型 | 文件 | 职责 |
 |---|---|---|
-| `Scheduler` | `pkg/scheduler/scheduler.go:67` | 顶层调度器：持有 Cache、NextEntity、FailureHandler、SchedulePod、SchedulingQueue、APIDispatcher、Profiles、algorithm |
-| `SchedulingAlgorithm` | `pkg/scheduler/algorithm.go:54` | 同步算法：SchedulePod（PreFilter/Filter/Score 的编排）、assume/unreserve |
-| `SchedulingQueue`（interface） | `pkg/scheduler/backend/queue/scheduling_queue.go:99` | 待调度实体队列；实现 `PriorityQueue`（`:204`） |
-| `Framework`（interface） | `pkg/scheduler/framework/interface.go:381` | 插件运行时接口：RunPreFilter/RunFilter/RunPostFilter/RunScore/RunPermit/RunPreBind/RunBind |
-| `QueuedPodInfo` | `pkg/scheduler/framework/types.go:740` | 队列中的 Pod 包装（Pod、Attempts、InitialAttemptTimestamp） |
-| `ScheduleResult` | `pkg/scheduler/scheduler.go:183` | SuggestedHost、EvaluatedNodes、FeasibleNodes、nominatingInfo |
-| `CycleState` | `pkg/scheduler/framework/cycle_state.go:29` | 单个调度周期内插件共享的状态 KV |
+| `Scheduler` | `pkg/scheduler/scheduler.go` · `Scheduler` `+0` | 顶层调度器：持有 Cache、NextEntity、FailureHandler、SchedulePod、SchedulingQueue、APIDispatcher、Profiles、algorithm |
+| `SchedulingAlgorithm` | `pkg/scheduler/algorithm.go` · `SchedulingAlgorithm` `+0` | 同步算法：SchedulePod（PreFilter/Filter/Score 的编排）、assume/unreserve |
+| `SchedulingQueue`（interface） | `pkg/scheduler/backend/queue/scheduling_queue.go` · `SchedulingQueue` `+0` | 待调度实体队列；实现 `PriorityQueue`（同文件） |
+| `Framework`（interface） | `pkg/scheduler/framework/interface.go` · `Framework` `+0` | 插件运行时接口：RunPreFilter/RunFilter/RunPostFilter/RunScore/RunPermit/RunPreBind/RunBind |
+| `QueuedPodInfo` | `pkg/scheduler/framework/types.go` · `QueuedPodInfo` `+0` | 队列中的 Pod 包装（Pod、Attempts、InitialAttemptTimestamp） |
+| `ScheduleResult` | `pkg/scheduler/scheduler.go` · `ScheduleResult` `+0` | SuggestedHost、EvaluatedNodes、FeasibleNodes、nominatingInfo |
+| `CycleState` | `pkg/scheduler/framework/cycle_state.go` · `CycleState` `+0` | 单个调度周期内插件共享的状态 KV |
 
 ### 2.3 函数级
 
