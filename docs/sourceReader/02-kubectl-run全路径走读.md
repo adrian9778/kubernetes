@@ -143,7 +143,7 @@ nginx   1/1     Running   0          <n>
 | 客户端 POST | apiserver 返回 201 + Pod 对象 | 同名 Pod 已存在（409 冲突）、认证/鉴权失败（401/403） | `kubectl run` 终端打印 `pod/nginx created`；无即未成功 |
 | apiserver 写 etcd | Pod 落 etcd，`spec.nodeName` 为空 | 准入拒绝、声明式校验失败（422 Invalid）、etcd 冲突 | `kubectl get pod` 能看到 `STATUS=Pending`（已持久化、未调度） |
 | scheduler 选节点 + bind | `spec.nodeName` 被填入 | 无可行节点（资源/亲和/污点）、抢占也失败 | 事件 `Scheduled`（Normal，reason=Binding，sched.finishBinding+9）；失败为 `FailedScheduling`（Warning，:976） |
-| kubelet 创建 sandbox + 容器 | sandbox 与全部容器 Running | 镜像拉取失败、PreCreate/PreStart 钩子失败、资源不足被 kubelet 拒绝 | 事件 `Pulling`/`Pulled`/`Failed`（拉镜像，`pkg/kubelet/events/event.go:47-49`）；`Started`/`Failed`（建/启容器，:22-23） |
+| kubelet 创建 sandbox + 容器 | sandbox 与全部容器 Running | 镜像拉取失败、PreCreate/PreStart 钩子失败、资源不足被 kubelet 拒绝 | 事件 `PullingImage`/`PulledImage`/`FailedToPullImage`（拉镜像，`pkg/kubelet/events/event.go` · `Const:PullingImage` `+0`）；`StartedContainer`/`FailedToCreateContainer`（建/启容器，同文件 const 块） |
 | 状态回报 | Pod status 回写 apiserver/etcd | PATCH 冲突（重读重试）、Pod 被删（丢弃更新） | Pod condition `PodScheduled`、`ContainersReady`、`Ready` 依次为 True（m.updateStatusInternal+36、:659-660）；`STATUS=Running` |
 
 **用这张表排障的顺序：**
