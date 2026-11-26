@@ -1,0 +1,95 @@
+# Kubernetes 源码走读文档
+
+> 面向新手的 Kubernetes 源码阅读文档库：从系统骨架到函数级源码，主线为 Pod 从 `kubectl run` 到容器运行的完整生命周期。
+> 源码基准：commit `8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，master，工作区干净），Go 1.27.4（`.go-version`）。范围与约定见 [00-文档说明与约定](00-文档说明与约定.md)。
+
+## 学习路径
+```mermaid
+flowchart TD
+    A["01 系统骨架"] --> B["02 kubectl run 全路径"]
+    B --> C["03 主链路逐步拆解"]
+    C --> D["04 kubectl 客户端"]
+    D --> E["05-06 apiserver 路由/请求/etcd"]
+    E --> F["07 scheduler 调度与绑定"]
+    F --> G["08 controller 副本控制"]
+    G --> H["09-10 kubelet 同步循环与 CRI"]
+    H --> I["11 informer 与 workqueue"]
+    I --> J["12-15 其余控制器"]
+    J --> K["16 kube-proxy"]
+    K --> L["17 CRD 与聚合层"]
+    L --> M["18 CCM / 19 kubeadm"]
+    M --> N["20 CSI / 21 设备插件与网络边界"]
+```
+
+## 文档索引
+| # | 层级 | 文档 | 说明 |
+|---|---|---|---|
+| 00 | — | [文档说明与约定](00-文档说明与约定.md) | 覆盖范围、主线场景、源码定位规则、分支差异、术语 |
+| 01 | 第一层 | [系统骨架](01-系统骨架.md) | 进程与组件职责、模块依赖、输入输出与主数据流 |
+| 02 | 第二层 | [kubectl run 全路径走读](02-kubectl-run全路径走读.md) | 裸 Pod 成功场景：客户端→apiserver→etcd→scheduler→kubelet→CRI→状态回报 |
+| 03 | 第三层 | [主链路逐步拆解](03-主链路逐步拆解.md) | 五段逐跳拆解：参数转换、内部动作、状态变化与错误传播，含 Mermaid 时序图 |
+| 04 | 第四层 | [kubectl 客户端](04-kubectl客户端.md) | 进程启动、命令树、RunOptions、Factory 与 POST 发出的函数级解析 |
+| 05 | 第四层 | [apiserver 启动与路由](05-apiserver启动与路由.md) | CreateServerChain 委托构造、DefaultBuildHandlerChain 中间件链、director 分流与路由生成 |
+| 06 | 第四层 | [apiserver 请求处理与 etcd](06-apiserver请求处理与etcd.md) | createHandler 全流程、podStrategy 默认化校验、Store.create 与 etcd3 OptimisticPut |
+| 07 | 第四层 | [scheduler 调度与绑定](07-scheduler调度与绑定.md) | ScheduleOne 编排、SchedulePod 过滤打分、assume 与 bindingCycle 各插件点的函数级解析 |
+| 08 | 第四层 | [controller 副本控制](08-controller副本控制.md) | ReplicaSet 控制器函数级解析：入队、syncReplicaSet、manageReplicas 慢启动创建与并发删除 |
+| 09 | 第四层 | [kubelet 同步循环](09-kubelet同步循环.md) | NewMainKubelet、PodConfig 三源、Run/syncLoop、podWorkers、PLEG 与 statusManager 的函数级解析 |
+| 10 | 第四层 | [kubelet CRI 运行时](10-kubelet-CRI运行时.md) | SyncPod 差集、createPodSandbox/startContainer 与 cri-client grpc 的函数级解析 |
+| 11 | 第四层 | [informer 与 workqueue](11-informer与workqueue机制.md) | sharedIndexInformer 管线、DeltaFIFO、Reflector、Typed workqueue 去重与退避 |
+
+| 12 | 第四层 | [Deployment 控制器](12-deployment控制器.md) | RS 集合管理、滚动先扩后缩、回滚与状态计算 |
+| 13 | 第四层 | [Job 与 CronJob 控制器](13-job与cronjob控制器.md) | Job Pod 调谐与 tracking finalizer；CronJob 周期调度与并发策略 |
+| 14 | 第四层 | [DaemonSet 控制器](14-daemonset控制器.md) | 节点-Pod 一一对应、节点准入与亲和性注入、surge 更新 |
+| 15 | 第四层 | [Garbage Collector](15-garbage-collector垃圾回收.md) | owner/dependent 依赖图与 Foreground/Background/Orphan 级联删除 |
+| 16 | 第四层 | [kube-proxy](16-kube-proxy网络代理.md) | Service/EndpointSlice 事件到 iptables 三级链与 ipvs 规则 |
+| 17 | 第四层 | [CRD 扩展与聚合层](17-CRD扩展与聚合层.md) | CRD 懒分发与 APIService 后端代理 |
+| 18 | 第四层 | [cloud-controller-manager](18-cloud-controller-manager.md) | 四类云控制器与 cloud-provider 接口、与 KCM 职责切分 |
+| 19 | 第四层 | [kubeadm 集群引导](19-kubeadm集群引导.md) | init 阶段工作流、静态 Pod 控制面落盘、join 与 bootstrap token |
+| 20 | 第四层 | [CSI 存储插件](20-CSI存储插件.md) | plugin manager 注册、volume manager 调谐与 NodePublishVolume |
+| 21 | 第四层 | [设备插件与网络边界](21-设备插件与网络边界.md) | 设备注册/Allocate 进入 CRI config；kubelet 与 CNI 的职责边界 |
+
+## 专题（topics/）
+跨篇的机制纵深专题，按「代码基准 + 结论速览 → 生产视角 → 开发视角 → 验证」组织，符号+偏移锚点。适合在读完主线篇后针对某个子系统深挖。
+
+| 专题 | 主题 | 一句话定位 |
+|---|---|---|
+| [调度器抢占 preemption](../topics/调度器抢占-preemption.md) | kube-scheduler 抢占 | PostFilter→Preempt→DryRun→SelectCandidate→Actuate 全链：选受害者、PDB tie-break、nominated node、异步驱逐 |
+| [etcd3 写入路径](../topics/etcd3写入路径.md) | apiserver storage 层 | Create/Update→OptimisticPut 乐观事务：key 准备、编码、加密变换、lease、冲突重试循环 |
+| [优先级与公平性流控](../topics/优先级与公平性流控.md) | apiserver APF 流控 | WithPriorityAndFairness→Handle→startRequest：FlowSchema 分类、PriorityLevel 排队、并发席位、429 拒绝 |
+| [informer resync 机制](../topics/informer-resync机制.md) | client-go informer | resyncPeriod 确定→shouldResync 判定→distribute(sync=true) 仅投需 resync 的 handler→OnUpdate(old==new) 自愈 |
+| [leader election 机制](../topics/leader-election机制.md) | client-go leader election | Run→acquire→renew→tryAcquireOrRenew：Lease 竞争、快慢路径、写门、Recovery 恢复 |
+| [kubelet 探针机制](../topics/kubelet探针机制.md) | kubelet 探针 | prober_manager→worker→doProbe→prober：HTTP/TCP/exec/gRPC 探测、阈值判定、容器重启与 readiness |
+| [API Server 全景](../topics/api-server.md) | kube-apiserver 全链路 | 三层委托链（aggregator→kubeAPIServer→apiextensions）装配、路由注册、40+ 层中间件链、CRUD handlers、etcd3 storage/加密、watch cache、聚合代理、discovery |
+| [apiserver 操作使用](../topics/apiserver操作使用.md) | 操作 apiserver 的实操视角 | 操作方式（kubectl/curl/informer）、凭证生成与查看（客户端证书/SA token/CSR）、URL 拼接规则、建 Pod/Service、监听集群变化（-w/watch=true/informer）、高频报错对照、官方参考链接 |
+| [Docker Desktop 内置 Kubernetes 使用](../topics/docker中集群的使用.md) | Docker Desktop 自带单节点集群（kubeadm/kind 两形态） | 两形态判别（节点名/端口）、启用与跑通、常用操作速查、YAML 写法（Deployment/Pod/Service）、curl 访问 apiserver 四种方式（proxy/解证书/-k/token，地址动态读）、网络配置（NodePort/LoadBalancer 绑 localhost、节点 INTERNAL-IP 不可直连）、本环境特有坑（写死 6443 连不上/资源不足/版本锁定/重置） |
+| [workqueue 机制](../topics/workqueue机制.md) | client-go workqueue | 基础队列（Add/Get/Done 去重+脏标记）+ delaying（AddAfter 延迟）+ rate-limiting（指数退避重试）三层包装 |
+| [scheduler 过滤打分框架](../topics/scheduler过滤打分框架.md) | kube-scheduler 调度周期 | SchedulePod 两阶段：PreFilter→Filter（并行逐节点）→PostFilter、PreScore→Score（分×权重选节点）；10 个扩展点接口 |
+| [Deployment 滚动更新](../topics/deployment滚动更新.md) | Deployment 滚动更新 | syncDeployment 策略分派→rolloutRolling 先扩后缩（maxSurge/maxUnavailable）、比例伸缩 GetReplicaSetProportion、回滚=模板回退 |
+| [kubelet 同步循环与 PLEG](../topics/kubelet同步循环与PLEG.md) | kubelet 主循环与状态探测 | 三源 PodConfig→syncLoop 事件分派→podWorkers per-Pod 串行（podWorkerLoop）→SyncPod；GenericPLEG 周期 Relist 生成容器事件驱动自愈 |
+| [garbage-collector 依赖图与级联删除](../topics/garbage-collector依赖图与级联删除.md) | GC 依赖图与级联删除 | GraphBuilder 依赖图装配→classifyReferences/isDangling 判定→attemptToDeleteItem 按 finalizer 选策略；Foreground/Background/Orphan 三路径 |
+| [kube-proxy 规则生成](../topics/kube-proxy规则生成.md) | kube-proxy 规则生成 | 事件回调→changes 缓存→BoundedFrequencyRunner 限频 Sync→syncProxyRules 全量重建 iptables 三级链（KUBE-SERVICES/SVC/SEP）概率负载均衡，iptables-restore 原子下发；ipvs/nftables 同构定位 |
+| [ReplicaSet 副本控制](../topics/replicaset副本控制.md) | ReplicaSet 副本控制（基础控制器范式） | informer→queue→worker→syncReplicaSet→manageReplicas：expectations 抑制、slowStartBatch 指数批量创建、getPodsToDelete 删除优先级、calculateStatus 回写 |
+| [Job 与 CronJob 周期调度](../topics/job与cronjob周期调度.md) | Job/CronJob 周期调度 | Job：syncJob+tracking finalizer 精确计数+manageJob+backoff；CronJob：syncCronJob 周期调度（mostRecentScheduleTime）+并发策略 Allow/Forbid/Replace |
+| [CRD 建立与懒分发](../topics/CRD建立与懒分发.md) | CRD 动态注册与懒分发 | crdHandler 注册 NonGoRestfulMux /apis→ServeHTTP 分发→getOrCreateServingInfoFor 懒安装（atomic.Value 缓存）；establish 控制器置 Established；CRD 清理 finalizer |
+| [DaemonSet 控制器](../topics/daemonset控制器.md) | DaemonSet 节点-Pod 一一对应 | syncDaemonSet→manage→podsShouldBeOnNode/nodeShouldRunDaemonPod 三层准入；ReplaceDaemonSetPodNodeNameNodeAffinity 注入 hostname 亲和由默认调度器绑定；rollingUpdate surge/maxUnavailable |
+| [设备插件注册与 Allocate](../topics/设备插件注册与Allocate.md) | 设备管理器与设备插件 gRPC | 三条 gRPC 通道（Register 插件→kubelet / ListAndWatch 流式 / Allocate 按需）→GetDeviceRunContainerOptions→makeDevices 进 CRI config；kubelet 不直接调 CNI |
+| [etcd watch 链路](../topics/etcd-watch链路.md) | 服务端 watch 实时推送 | etcd3 watcher.Watch→watchChan（sync 先全量后 startWatching 增量、processEvents 背压不丢事件）→Cacher 共享内存 buffer→apiserver watch handler 流式推客户端 |
+| [admission webhook](../topics/admission-webhook.md) | admission webhook 扩展点 | mutating（Admit→Dispatch→callAttrMutatingHook 应用 JSON Patch）+ validating（Validate→Dispatch allow/deny）；两种触发（内联 Admit / storage 写内 AdmissionToValidateObjectFunc）；fail-open/closed |
+| [aggregator 代理转发](../topics/aggregator代理转发.md) | kube-aggregator 代理转发 | proxyHandler.ServeHTTP 五个早退守卫（local/不可用/transport 错/缺用户）→ResolveEndpoint 后端解析→NewAuthProxyRoundTripper 身份透传→NewUpgradeAwareHandler 转发；transport 复用 |
+| [CRD conversion webhook](../topics/CRD-conversion-webhook.md) | CRD 多版本转换 | 转换器工厂按策略分派（nopConverter/webhookConverter）→webhookConverter.Convert（getObjectsToConvert batch 打包→webhook /convert→validateConvertedObject 校验）→safeConverterWrapper 防御性拷贝 |
+| [conntrack 与 ServiceCIDR](../topics/conntrack与ServiceCIDR.md) | conntrack 清理与 ServiceCIDR | CleanStaleEntries（ListEntries→MatchConntrackFlow 筛陈旧→DeleteEntries 删死路径）+ flowFilter 去重；ServiceCIDRConfig 独立 informer（iptables OnServiceCIDRsChanged 为 no-op） |
+| [kubelet volume manager](../topics/kubelet-volume-manager.md) | kubelet 卷挂载调谐 | 双状态模型（desired/actual state）→reconciler 调谐循环（unmountVolumes→mountOrAttachVolumes→expandVolume→unmountDetachDevices）→operationexecutor 两阶段挂载（attach→mount）；populator 异步填充 desired |
+| [kubelet image pull 与背压](../topics/kubelet-image-pull背压.md) | kubelet 镜像拉取与背压 | EnsureImageExists 拉取决策→pull backoff（podUID_image 指数退避）+QPS 节流（throttleImagePulling）+parallel/serial puller 并发控制；image GC 按磁盘水位清理 |
+| [apiserver discovery 与 OpenAPI](../topics/apiserver-discovery与OpenAPI.md) | discovery 与 OpenAPI 生成 | discovery 三层 handler（root `/apis`→group→version 资源列表）+aggregated discovery 聚合一次返回；OpenAPI v2/v3（DefaultOpenAPIConfig/DefaultOpenAPIV3Config）；CRD/聚合 API 动态并入 |
+
+| [v1.37 PodGroup 与组合调度](../topics/v1.37-PodGroup与组合调度.md) | 组调度（GenericWorkload） | PodGroup 入队→组调度周期→minCount→placement 生成/评分→CompositePodGroup 父子层级→失败 condition 与回队；符号+偏移锚点 |
+| [DRA 动态资源分配](../topics/DRA动态资源分配.md) | Dynamic Resource Allocation | ResourceSlice/Claim/DeviceClass 四类对象→调度器 dynamicresources 插件各扩展点→resourceclaim controller→kubelet 准备/取消准备→devicetainteviction 设备级驱逐 |
+| [测试与质量体系](../topics/测试与质量体系.md) | 四维质量保障 | 单元（fake clientset + reactor）/集成（真实 testserver）/e2e（Ginkgo）/verify-update 静态门禁四层，选层原则与替身 |
+| [构建发布与代码生成](../topics/构建发布与代码生成.md) | 构建/生成/发布 | `make update`（`*-gen` 再生代码）/`make verify`（只读门禁）/`make test`/`build/release*.sh`；`+k8s:` 标注驱动的生成机制 |
+
+新增专题：在 `../topics/` 下建 `中文名.md`（`docs/topics/`，与 `sourceReader/` 同级），按单篇专题骨架（先总结、再生产、再开发、末验证）写，并在本表追加一行。
+
+## 阅读建议
+- 顺序阅读：严格按编号从 01 到 21，四层逐级深入。
+- 带着问题读：第一层回答"系统由什么组成、数据怎么流转"；第二、三层回答"一个 Pod 请求具体怎么走"；第四层回答"每个函数内部做了什么"。
+- 配合源码：文档给出文件路径与符号名，阅读时在编辑器中跳转验证。

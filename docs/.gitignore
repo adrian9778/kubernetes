@@ -3,3 +3,6 @@ admin/
 man/
 user-guide/
 yaml/
+sourceReader/.progress/
+__pycache__/
+.DS_Store
