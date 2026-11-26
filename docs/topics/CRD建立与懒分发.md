@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 **CRD（apiextensions-apiserver）** 的动态注册与**懒分发**讲透：crdHandler 懒安装、请求时构造 serving info、establish 控制器、CRD 清理 finalizer。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `r.getOrCreateServingInfoFor+0`。
 >
@@ -57,17 +57,17 @@ CRD 让用户**不写代码**就能给集群加自定义资源（Custom Resource
 
 ### 2.1 注册（apiextensions-apiserver apiserver.go）
 
-`CustomResourceDefinitions`（apiserver.go `CustomResourceDefinitions+0`，:108）是 CRD server 主体。`New` 内把 `crdHandler` 注册到 `NonGoRestfulMux`：
+`CustomResourceDefinitions`（`staging/src/k8s.io/apiextensions-apiserver/pkg/apiserver/apiserver.go` · `CustomResourceDefinitions` `+0`）是 CRD server 主体。`New` 内把 `crdHandler` 注册到 `NonGoRestfulMux`：
 ```text
-s.GenericAPIServer.Handler.NonGoRestfulMux.Handle("/apis", crdHandler)   c.New+80 (:208)
+s.GenericAPIServer.Handler.NonGoRestfulMux.Handle("/apis", crdHandler)   staging/src/k8s.io/apiextensions-apiserver/pkg/apiserver/apiserver.go · c.New +80
 ```
 **关键：** CR 走 `NonGoRestfulMux`（不是 go-restful），因为 CRD 是运行时动态的，无法在编译期注册 go-restful 路由。
 
-### 2.2 `crdHandler`（customresource_handler.go `crdHandler+0`，:92）
+### 2.2 `crdHandler`（customresource_handler.go `crdHandler+0`）
 
-持有 `customStorage atomic.Value`（`crdStorageMap`，UID→`crdInfo` 缓存）、`crdLister`、`restOptionsGetter`、`admission`、`converterFactory`、`delegate`（:105，落到内置 handler/404）。
+持有 `customStorage atomic.Value`（`crdStorageMap`，UID→`crdInfo` 缓存）、`crdLister`、`restOptionsGetter`、`admission`、`converterFactory`、`delegate`（`+13`，落到内置 handler/404）。
 
-### 2.3 `ServeHTTP`——请求分发（customresource_handler.go `r.ServeHTTP+0`，:229）
+### 2.3 `ServeHTTP`——请求分发（customresource_handler.go `r.ServeHTTP+0`）
 
 ```text
 ServeHTTP(w, req)                                    r.ServeHTTP+0
@@ -75,16 +75,16 @@ ServeHTTP(w, req)                                    r.ServeHTTP+0
 ├── crdLister.Get(name) 找 CRD
 │     └── 未命中 → delegate.ServeHTTP（404）
 ├── 版本未 served / scope 不符 → delegate
-└── getOrCreateServingInfoFor(uid, name)            r.getOrCreateServingInfoFor+0 (:617)
-     └── serveResource(...)                          r.serveResource+0 (:369)
+└── getOrCreateServingInfoFor(uid, name)            r.getOrCreateServingInfoFor+0
+     └── serveResource(...)                          r.serveResource+0
           └── 按 HTTP verb 分发到 CR storage 的 REST 方法
 ```
 
-### 2.4 `getOrCreateServingInfoFor`——懒安装 + 缓存（`r.getOrCreateServingInfoFor+0`，:617）
+### 2.4 `getOrCreateServingInfoFor`——懒安装 + 缓存（`r.getOrCreateServingInfoFor+0`）
 
 ```text
 getOrCreateServingInfoFor(uid, name)                 r.getOrCreateServingInfoFor+0
-├── storageMap = customStorage.Load().(crdStorageMap)   (+13，:630)  atomic.Value 读缓存
+├── storageMap = customStorage.Load().(crdStorageMap)   (+13)  atomic.Value 读缓存
 ├── 缓存命中 → 返回 crdInfo
 └── 未命中（首次/失效）→ 构造：
      ├── 为每个 served version 建 storage（customresource.NewStorage）
@@ -93,7 +93,7 @@ getOrCreateServingInfoFor(uid, name)                 r.getOrCreateServingInfoFor
 ```
 **懒安装语义：** CRD 创建后**不立即**构造 storage；第一次 CR 请求到来时才构造并缓存。CRD 变更时旧缓存失效，下次请求重建。
 
-### 2.5 `serveResource`——分发到 CR storage（`r.serveResource+0`，:369）
+### 2.5 `serveResource`——分发到 CR storage（`r.serveResource+0`）
 
 按请求 verb（GET/POST/PUT/DELETE/LIST/WATCH）分发到对应版本的 `CustomResourceStorage`（`CustomResource`/`Status`/`Scale` 三个 REST）。
 
@@ -101,10 +101,10 @@ getOrCreateServingInfoFor(uid, name)                 r.getOrCreateServingInfoFor
 
 ## 3. 开发视角：CR 存储（customresource.REST）
 
-### 3.1 `NewStorage`（customresource/etcd.go `NewStorage+0`，:45）
+### 3.1 `NewStorage`（`staging/src/k8s.io/apiextensions-apiserver/pkg/registry/customresource/etcd.go` · `NewStorage` `+0`）
 
 构造一个版本的 CR 存储集合 `CustomResourceStorage`：
-- `CustomResource`（`REST`，etcd.go `REST+0`，:105）：内嵌 `genericregistry.Store`，CR 实例的实际 etcd 存储。
+- `CustomResource`（`REST`，同文件 · `REST` `+0`）：内嵌 `genericregistry.Store`，CR 实例的实际 etcd 存储。
 - `Status`/`Scale`：status/scale 子资源的 REST。
 
 ### 3.2 CR 实例存储
@@ -117,7 +117,7 @@ getOrCreateServingInfoFor(uid, name)                 r.getOrCreateServingInfoFor
 
 ### 4.1 `EstablishingController`（establishing_controller.go）
 
-`NewEstablishingController+0`（:54）→ `RunWithContext+0`（:77）→ `sync+0`（:127）。
+`NewEstablishingController`（`establishing_controller.go` · `NewEstablishingController` `+0`）→ `ec.RunWithContext`（`ec.RunWithContext` `+0`）→ `ec.sync`（`ec.sync` `+0`）。
 
 ### 4.2 `sync`——置 Established 条件（`ec.sync+0`，:127）
 
@@ -134,13 +134,13 @@ sync(ctx, key)                                       ec.sync+0
 
 ## 5. 开发视角：CRD 清理 finalizer
 
-### 5.1 CRD 删除与 finalizer（customresourcedefinition/etcd.go）
+### 5.1 CRD 删除与 finalizer（`staging/src/k8s.io/apiextensions-apiserver/pkg/registry/customresourcedefinition/etcd.go`）
 
 CRD 删除时加 `CustomResourceCleanupFinalizer`，确保其 CR 实例先被清理：
 ```text
 Delete(...)                                           r.Delete
-├── 首次删除请求 → 加 CustomResourceCleanupFinalizer   r.Delete+34 (:119)
-├── CRDHasFinalizer(existingCRD, CustomResourceCleanupFinalizer)?   r.Delete+62 (:147)
+├── 首次删除请求 → 加 CustomResourceCleanupFinalizer   r.Delete +34
+├── CRDHasFinalizer(existingCRD, CustomResourceCleanupFinalizer)?   r.Delete +62
 │     └── 没有则追加 finalizer
 └── 等 CR 实例清理完 → 摘 finalizer → CRD 真正删除
 ```
@@ -154,14 +154,14 @@ Delete(...)                                           r.Delete
 ```text
 用户创建 CRD
 ├── CRD 存 etcd（customresourcedefinition registry）
-├── establish 控制器 sync (establishing_controller.go:127) → 置 Established=True
+├── establish 控制器 sync (establishing_controller.go · ec.sync +0) → 置 Established=True
 └── 第一次 CR 请求 GET /apis/<group>/<version>/<plural>
-     └── NonGoRestfulMux /apis → crdHandler.ServeHTTP (customresource_handler.go:229)
+     └── NonGoRestfulMux /apis → crdHandler.ServeHTTP (customresource_handler.go · r.ServeHTTP +0)
           ├── crdLister.Get → 找到 CRD
-          └── getOrCreateServingInfoFor (:617)
-               ├── 缓存未命中 → customresource.NewStorage (etcd.go:45) 建 storage
+          └── getOrCreateServingInfoFor (r.getOrCreateServingInfoFor +0)
+               ├── 缓存未命中 → customresource.NewStorage (customresource/etcd.go · NewStorage +0) 建 storage
                ├── 缓存 Store（atomic.Value）
-               └── serveResource (:369) → 分发到 CR storage REST → etcd
+               └── serveResource (r.serveResource +0) → 分发到 CR storage REST → etcd
 ```
 
 ---
@@ -170,12 +170,12 @@ Delete(...)                                           r.Delete
 
 ### 7.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
-- `CustomResourceDefinitions+0`（apiserver.go:108）、`c.New+80`（:208，crdHandler 注册 `/apis`）
-- `crdHandler+0`（customresource_handler.go:92）、`crdInfo+0`（:137）、`r.ServeHTTP+0`（:229）、`r.serveResource+0`（:369）、`r.getOrCreateServingInfoFor+0`（:617，缓存 Load +13/:630、+30/:647）
-- `NewStorage+0`（customresource/etcd.go:45）、`REST+0`（:105）
-- `NewEstablishingController+0`（establishing_controller.go:54）、`ec.RunWithContext+0`（:77）、`ec.sync+0`（:127）
-- CRD 清理 finalizer：`r.Delete+34`（customresourcedefinition/etcd.go:119）、`r.Delete+62`（:147，`CustomResourceCleanupFinalizer`）
+本专题所有「符号+偏移」均在 HEAD `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4` 上复核：
+- `CustomResourceDefinitions`（`staging/src/k8s.io/apiextensions-apiserver/pkg/apiserver/apiserver.go` · `CustomResourceDefinitions` `+0`）、`c.New`（同文件 · `c.New` `+80`，crdHandler 注册 `/apis`）
+- `crdHandler`（`customresource_handler.go` · `crdHandler` `+0`）、`crdInfo`（同文件 `crdInfo` `+0`）、`r.ServeHTTP`（`r.ServeHTTP` `+0`）、`r.serveResource`（`r.serveResource` `+0`）、`r.getOrCreateServingInfoFor`（`r.getOrCreateServingInfoFor` `+0`，缓存 Load `+13`、Store `+30`）
+- `NewStorage`（`staging/src/k8s.io/apiextensions-apiserver/pkg/registry/customresource/etcd.go` · `NewStorage` `+0`）、`REST`（同文件 · `REST` `+0`）
+- `NewEstablishingController`（`establishing_controller.go` · `NewEstablishingController` `+0`）、`ec.RunWithContext`（`ec.RunWithContext` `+0`）、`ec.sync`（`ec.sync` `+0`）
+- CRD 清理 finalizer：`r.Delete`（`staging/src/k8s.io/apiextensions-apiserver/pkg/registry/customresourcedefinition/etcd.go` · `r.Delete` `+34`、`+62`，`CustomResourceCleanupFinalizer`）
 
 ### 7.2 生产实测
 
