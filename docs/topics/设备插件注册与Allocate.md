@@ -154,7 +154,7 @@ GPU Pod 调度到节点
 本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
 - `NewManagerImpl+0`（manager.go:147）、`newManagerImpl+0`（:155）、`m.PluginListAndWatchReceiver+0`（:322）、`m.Start+0`（:399）、`m.Allocate+0`（:425）、`m.GetCapacity+0`（:511）、`m.UpdateAllocatedDevices+0`（:627）、`m.GetDeviceRunContainerOptions+0`（:1085）、`m.AllocatePod+0`（:1257）
 - `newEndpointImpl+0`（endpoint.go:53）、`e.allocate+0`（:109）、`e.preStartContainer+0`（:121）
-- 插件 server：`NewServer+0`（plugin/v1beta1/server.go:67）、`s.Start+0`（:86）、`s.Register+0`（:159）
+- 插件 server：`pkg/kubelet/cm/devicemanager/plugin/v1beta1/server.go` · `NewServer+0`、`s.Start+0`（:86）、`s.Register+0`（:159）
 - CRI：`makeDevices+0`（kuberuntime_container.go:498）、`makeCDIDevices+0`（:514）
 
 ### 7.2 生产实测

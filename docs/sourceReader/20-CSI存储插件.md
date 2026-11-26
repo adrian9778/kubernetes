@@ -39,7 +39,7 @@ CSI 在 kubelet 侧是一组"插件 + 卷插件 + attacher/mounter"：
 | `csiAttacher` | `csi_attacher.go Struct：csiAttacher` | Attach/MountDevice（NodeStage）执行体 |
 | `DriversStore` | `csi_drivers_store.go Struct：DriversStore 偏移：+36` | driver name → endpoint/元数据 |
 | `PluginManager`（interface） | `pluginmanager/plugin_manager.go Struct：PluginManager 偏移：+36` | socket 发现与 handler 分发 |
-| `VolumeManager` | `volumemanager/volume_manager.go 函数：NewVolumeManager 偏移：+195` | desired/actual & reconciler 总装配 |
+| `VolumeManager` | `volumemanager/volume_manager.go 函数：NewVolumeManager 偏移：+60` | desired/actual & reconciler 总装配 |
 
 ## 4. driver 注册链
 `RegistrationHandler`（csi_plugin.go）：
