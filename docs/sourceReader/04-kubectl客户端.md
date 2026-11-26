@@ -3,8 +3,8 @@
 # kubectl 客户端
 > **层级**：第四层——函数级源码解析。
 > **范围**：进程启动、命令树装配、run 命令执行、REST 请求的最终发出。
-> **代码基准**：`master@8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，`cmd/`、`staging/`、`pkg/` 工作区干净，仅 `docs/` 有改动）；Go 1.27.4（本机实测 `go version` 报 `go1.27.1`，基准声明与实测存在小版本差）。
-> **锚点记法**：`<符号>+<偏移>`，函数定义行 = `+0`；仅认证插件导入一处按证据要求保留绝对锚点。
+> **代码基准**：adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4；工作区 HEAD 为其后继文档提交，`cmd/`、`staging/`、`pkg/` 代码态一致。本机实测 `go version` 报 `go1.27.1`，与 `.go-version` 声明存在小版本差）。
+> **锚点记法**：`文件路径` · `<符号名>` `+0`（符号名不带 `func`/`type` 前缀、不带 receiver；`+0` = 符号定义行，`+N` = 符号体内第 N 行）。文件级声明（如空导入）不挂函数偏移，只给文件路径。
 
 ## 0. 生产视角
 
@@ -63,7 +63,7 @@ kubectl run NAME --image=IMAGE [--env=KEY=VALUE] [--port=PORT]
 **副作用：** 进程退出码；认证插件经空导入注册（见下）。
 
 **认证插件导入（关键修正 1）：**
-`cmd/kubectl/kubectl.go` **文件行 28**：`_ "k8s.io/client-go/plugin/pkg/client/auth"`。这是**绝对锚点**，不在 `main` 函数体内（相对 `main` 为 `-3`，在函数之前），旧文以 `+25~+26` 记法无法一致复现，已弃用。其作用是空导入注册所有 client-go 认证插件（gcp/oidc/azure 等），使 `run` 等命令能按 kubeconfig 选择认证方式。
+`cmd/kubectl/kubectl.go` 的 import 块内有一条空导入 `_ "k8s.io/client-go/plugin/pkg/client/auth"`。它是**文件级声明**，不属于任何函数体（位于 `main` 定义行之前），故不挂 `main+N` 偏移，只以文件路径定位。其作用是空导入注册所有 client-go 认证插件（gcp/oidc/azure 等），使 `run` 等命令能按 kubeconfig 选择认证方式。
 
 ### 3.2 函数：NewDefaultKubectlCommand / NewKubectlCommand
 **源码：** `staging/src/k8s.io/kubectl/pkg/cmd/cmd.go`
@@ -87,10 +87,10 @@ kubectl run NAME --image=IMAGE [--env=KEY=VALUE] [--port=PORT]
 1. `NewRunOptions(streams)` 建默认选项（`NewCmdRun+1`）。
 2. 定义 cobra.Command，Run 回调依次执行 `Complete` → `Validate` → `Run`（`+9`，体 `+10~+12`），每步用 `cmdutil.CheckErr` 包装。
 3. 添加通用 flags（Delete/Print/Record，`+16~+18`）。
-4. `addRunFlags` 注册业务 flags（`+23`）：
-   - `--image`：`StringVar` `+33`、`MarkFlagRequired` `+34`（旧 `+30`，已漂移 `+3~+4`）。
-   - `--restart`：默认 `Always`，`+44`。
-   - `--field-manager`：默认 `kubectl-run`，`AddFieldManagerFlagVar` `+50`（旧 `+52`，已漂移 `-2`）。
+4. 调用 `addRunFlags`（`NewCmdRun+23`）注册业务 flags；下列偏移以 `staging/src/k8s.io/kubectl/pkg/cmd/run/run.go` · `addRunFlags` `+0`（定义行）为基准：
+   - `--image`：`staging/src/k8s.io/kubectl/pkg/cmd/run/run.go` · `addRunFlags` `+3`（`StringVar` 绑定 `opt.Image`）、`+4`（`MarkFlagRequired` 标必填，缺了直接报错）。
+   - `--restart`：`staging/src/k8s.io/kubectl/pkg/cmd/run/run.go` · `addRunFlags` `+14`，默认 `Always`。
+   - `--field-manager`：`staging/src/k8s.io/kubectl/pkg/cmd/util/helpers.go` · `AddFieldManagerFlagVar` `+1`（默认 `kubectl-run`），由 `staging/src/k8s.io/kubectl/pkg/cmd/run/run.go` · `addRunFlags` `+20` 调用。
    - `--attach`/`-i`/`-t`/`--expose`/`--port`/`--rm`/`--overrides` 等。
 **调用方：** 命令树装配逻辑（`NewKubectlCommand` 注册子命令处）。
 
@@ -142,7 +142,7 @@ Run (+0)
 3. overrider 非空则 `overrider.Apply(obj)` 合并 `--overrides` JSON（`+16`）。
 4. recorder 记录命令 `o.Recorder.Record(obj)`（`+22`，失败仅降级日志）。
 5. 非 client-dry-run：写注解 `util.CreateOrUpdateAnnotation(...)`（`+28`）→ `f.ClientForMapping(mapping)`（`+31`）→ `resource.NewHelper(client, mapping)`（`+36`）`.DryRun(...)`（`+37`）`.WithFieldManager(o.fieldManager)`（`+38`）`.Create(o.Namespace, false, obj)`（`+39`）。
-6. client-dry-run：仅设 namespace 不发请求（`meta.Accessor` `+44`、`SetNamespace` `+45`）。
+6. client-dry-run：仅设 namespace 不发请求——`staging/src/k8s.io/kubectl/pkg/cmd/run/run.go` · `createGeneratedObject` `+44` 取 `metav1.Object`（`meta.Accessor`），`+45` 调 `SetNamespace`（且需 `o.EnforceNamespace`）。
 **被调用函数：** RESTMapper、ObjectKinds、ClientForMapping、`Helper.Create`。
 **数据流：** Pod →（按 mapping 版本序列化）→ HTTP body → 响应对象。
 **错误处理：** 每步错误原样返回；HTTP 层错误（apiserver 返回的状态错误）在此首次具体化为 `*apierrors.StatusError`。
@@ -180,20 +180,20 @@ Run (+0)
 `createGeneratedObject` 从 `f.ToRESTMapper()` 到 `Helper.Create` 之间，靠 Factory 把「一个 GVK/资源映射」翻译成「可发 HTTP 的 RESTClient」。这一步是 kubectl 客户端链路最关键的适配层。
 
 **Factory 的三个客户端入口（`kubectl/pkg/cmd/util/factory_client_access.go`）：**
-| 方法 | 偏移 | 职责 |
+| 方法 | 锚点 | 职责 |
 |---|---|---|
-| `ToRESTConfig` | `factoryImpl.ToRESTConfig+0`（:68） | 从 `clientGetter` 取 `restclient.Config`（集群地址、凭据、TLS） |
-| `ToRESTMapper` | `factoryImpl.ToRESTMapper+0`（:72） | 取 GVK→resource 的 REST 映射器（同样委托 `clientGetter`） |
-| `ClientForMapping` | `factoryImpl.ClientForMapping+0`（:114） | **按 mapping 的 GVK 决定 API 路径并建 RESTClient** |
-| `UnstructuredClientForMapping` | `factoryImpl.UnstructuredClientForMapping+0`（:137） | 同上但走 unstructured（无 Go 类型）内容配置 |
+| `ToRESTConfig` | `kubectl/pkg/cmd/util/factory_client_access.go` · `factoryImpl.ToRESTConfig` `+1` | 从 `clientGetter` 取 `restclient.Config`（集群地址、凭据、TLS） |
+| `ToRESTMapper` | `kubectl/pkg/cmd/util/factory_client_access.go` · `factoryImpl.ToRESTMapper` `+1` | 取 GVK→resource 的 REST 映射器（同样委托 `clientGetter`） |
+| `ClientForMapping` | `kubectl/pkg/cmd/util/factory_client_access.go` · `factoryImpl.ClientForMapping` `+0` | **按 mapping 的 GVK 决定 API 路径并建 RESTClient** |
+| `UnstructuredClientForMapping` | `kubectl/pkg/cmd/util/factory_client_access.go` · `factoryImpl.UnstructuredClientForMapping` `+0` | 同上但走 unstructured（无 Go 类型）内容配置 |
 
-**ClientForMapping 的关键分支（`ClientForMapping+0`，:114）：**
+**ClientForMapping 的关键分支（`kubectl/pkg/cmd/util/factory_client_access.go` · `factoryImpl.ClientForMapping` `+0`）：**
 1. `clientGetter.ToRESTConfig()` 取基础配置（+2 ～ +4）。
 2. `setKubernetesDefaults(cfg)` 补默认（+6 ～ +8）。
 3. **核心 API 路径分流**（+10 ～ +16）：`mapping.GroupVersionKind.Group` 为 `corev1.GroupName`（即核心组 `""`）时 `cfg.APIPath = "/api"`；否则 `cfg.APIPath = "/apis"`。这就是 `kubectl run` 的 Pod（核心组）最终打到 `/api/v1/namespaces/default/pods` 而非 `/apis/...` 的根因。
 4. `cfg.GroupVersion = &gv` 写入组版本（+18）→ `restclient.RESTClientFor(cfg)` 产出 RESTClient（+20）。
 
-**UnstructuredClientForMapping 的差异（+137）：** 先 `restclient.SetKubernetesDefaults`（非 `setKubernetesDefaults`），且固定 `ContentConfig = resource.UnstructuredPlusDefaultContentConfig()`——用于没有 Go 类型定义的资源（如 CRD），其余 API 路径分流逻辑相同（核心组 `/api`、其余 `/apis`）。
+**UnstructuredClientForMapping 的差异（`kubectl/pkg/cmd/util/factory_client_access.go` · `factoryImpl.UnstructuredClientForMapping` `+0`，体 `+0~+15`）：** 先 `restclient.SetKubernetesDefaults`（非 `setKubernetesDefaults`），且固定 `ContentConfig = resource.UnstructuredPlusDefaultContentConfig()`——用于没有 Go 类型定义的资源（如 CRD），其余 API 路径分流逻辑相同（核心组 `/api`、其余 `/apis`）。
 
 **Helper 的装配链（createGeneratedObject 内，偏移见 §3.7）：**
 ```text
@@ -246,7 +246,7 @@ ClientConfig()
 
 **上下文切换（`kubectl config use-context`）：** 改 `current-context`，使后续请求用不同的 cluster/user。
 
-**认证插件的注册（篇 04 §3.1 提到的空导入）：** `cmd/kubectl/kubectl.go:28` 空导入 `k8s.io/client-go/plugin/pkg/client/auth`，注册所有认证插件（gcp/oidc/azure 等），使 kubeconfig 的 `exec`/`auth-provider` 凭据能被解析。
+**认证插件的注册（篇 04 §3.1 提到的空导入）：** `cmd/kubectl/kubectl.go` import 块内的空导入 `k8s.io/client-go/plugin/pkg/client/auth`，注册所有认证插件（gcp/oidc/azure 等），使 kubeconfig 的 `exec`/`auth-provider` 凭据能被解析。
 
 **RESTConfig 的关键字段（`DirectClientConfig.ClientConfig`）：**
 | 字段 | 来源 | 作用 |
@@ -289,14 +289,15 @@ NewCmdRun 的 Run 回调
 - **`modify` 标志**区分「创建全新对象」与「基于现有对象改写再创建」两种语义：新建对象无 ResourceVersion，`modify=false` 直接 POST；改写对象需先清空 ResourceVersion 避免 server 版本冲突。
 
 ## 6. 验证
-- 锚点全部以 `grep -n` 绝对行号复核（HEAD `8893923`，工作区 `cmd/`、`staging/`、`pkg/` 干净），偏移 = 绝对行号 − 函数定义行。
-- **与证据/旧版的差异**（源码为准）：
-  - 认证插件导入改为绝对锚点 `cmd/kubectl/kubectl.go:28`（旧 `+25~+26` 不可复现，弃用）。
-  - `Helper.CreateWithOptions` 的 `if modify {` 为 `+13`，版本清空 `+14~+22`（旧 `+22~+33` 超出函数长度，弃用）。
-  - `kubectl.go` 漂移：`NewDefaultKubectlCommand +8`（旧 `+9`）、`RunNoErrOutput +9`（旧 `+10`）、`CheckErr +11`（旧 `+10~+12` 范围内）；`cmd.go` `NewFactory` 绝对行 `238`（旧 `240`，漂移 `-2`）。
-  - `NewCmdRun`：`--image +33/+34`（旧 `+30`）、`--field-manager +50`（旧 `+52`）；`Complete` 定义 `+0`（绝对 `215`，旧 `214`，漂移 `+1`）。
-  - `Run` 内部：`createPod` 调用 `+14`、`createGeneratedObject` 调用 `+15`（证据记 `+12/+13`，经源码复核为 `+14/+15`，已按源码修正；证据把空行/中间行误当调用行）。
-  - `createGeneratedObject` 内部以源码为准：`ObjectKinds +6`、`RESTMapping +10`、`CreateOrUpdateAnnotation +28`、`ClientForMapping +31`、`NewHelper +36`、`Create +39`（证据分别记 `+5/+9/+26/+29/+31/+35`，偏小 1~4 行，已按源码修正）。
-- **未确认项：** `[源码未确认]`——Go 基准版本（声明 `1.27.4` vs 本机实测 `go1.27.1`）待主代理确认；其余锚点均已源码确认，无未确认项。
+- 代码基准 `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4）；所有「符号+偏移」在该基准上用 MCP `codegraph_explore` 回核，并用 `sr_tools` 的 `verify` 子命令校验引用档位，偏移 = 目标行 − 符号定义行。
+- **本次（基准由 `8893923938` 前移到 `6bf0bfd51d7`）修正的失效锚点**（源码为准）：
+  - `--image`/`--restart`/`--field-manager` 三个 flag 的注册点归属 `addRunFlags`（不在 `NewCmdRun` 体内）：`--image` 为 `addRunFlags+3`（`StringVar`）与 `+4`（`MarkFlagRequired`）；`--restart` 为 `addRunFlags+14`；`--field-manager` 经 `addRunFlags+20` 调 `helpers.go` · `AddFieldManagerFlagVar+1`。旧记 `NewCmdRun+33/+34/+44/+50` 误把 `addRunFlags` 体当 `NewCmdRun` 体，已弃用。
+  - client-dry-run 分支：调用点为 `createGeneratedObject+44`（`meta.Accessor`）、`+45`（`SetNamespace`）。旧记 `meta.Accessor+44`/`+45` 偏移越界，已弃用。
+  - 认证插件空导入改为文件级定位（只给 `cmd/kubectl/kubectl.go` 路径，不挂函数偏移）；`factory_client_access.go` 四个入口改为 `路径` · `factoryImpl.方法` `+N` 全路径记法，去掉绝对行号。
+- **保留的复核结论**（调用点一律锚到调用方函数体，偏移 = 调用行 − 调用方定义行）：
+  - `cmd/kubectl/kubectl.go`：`main+7`（GlogSetter）、`main+8`（NewDefaultKubectlCommand）、`main+9`（RunNoErrOutput）、`main+11`（CheckErr）。
+  - `staging/src/k8s.io/kubectl/pkg/cmd/run/run.go`：`Complete+0` 定义；`Run+14`（createPod）、`Run+15`（createGeneratedObject）；`createGeneratedObject+6`（ObjectKinds）、`+10`（RESTMapping）、`+28`（CreateOrUpdateAnnotation）、`+31`（ClientForMapping）、`+36`（NewHelper）、`+39`（Create）。
+  - `staging/src/k8s.io/cli-runtime/pkg/resource/helper.go`：`CreateWithOptions+13`（`if modify {`）、版本清空 `+14~+22`。
+- **未确认项：** 无 `[源码未确认]`。Go 基准版本声明 `1.27.4`（`.go-version`）与本机实测 `go1.27.1` 存在小版本差，属环境事实记录，不影响任何锚点。
 
 [上一篇](03-主链路逐步拆解.md) · [总目录](README.md) · [下一篇](05-apiserver启动与路由.md)
