@@ -4,7 +4,7 @@
 
 > **层级**：第四层——函数级源码解析。
 > **范围**：client-go SharedInformer 的 List/Watch → DeltaFIFO → indexer/事件分发链路，以及泛型 workqueue 的去重与处理语义。该机制是调度器、控制器、kubelet 配置源的共同基础。
-> **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区源码干净），Go 1.27.4。
+> **代码基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26），Go 1.27.4。
 > **记法**：`符号+偏移`（函数定义行 = +0）；类型与顶层函数给 `文件:行`。
 
 ## 0. 生产视角（对外行为）
@@ -158,7 +158,7 @@ DeltaFIFO 与普通 FIFO 的本质区别：**队列元素不是对象，而是�
 | 2 | parseEvent | `etcd3/event.go parseEvent+0`（:66） | 转成内部 `event{key, value, rev, isCreated=true}` |
 | 3 | DeltaFIFO.Add | `delta_fifo.go f.Add+0`（:387） → `queueActionLocked(Added, obj)` | 追加 `Delta{Added, obj}` 到 `items[key]`，key 入 `queue` |
 | 4 | DeltaFIFO.Pop | `delta_fifo.go f.Pop+0`（:563） | 弹出 `Deltas`（含一个 Added Delta） |
-| 5 | handleDeltas | `shared_informer.go s.handleDeltas+0`（:1124） | 调 `processDeltas+0`（controller.go :827） |
+| 5 | handleDeltas | `shared_informer.go s.handleDeltas+0`（:1124） | 调 `controller.go processDeltas+0`（:827，包级函数） |
 | 6 | processDeltas | `controller.go processDeltas+0`（:827） | `Sync/Replaced/Added/Updated` 分支：`clientState.Get` 查旧对象 → 不存在 → `clientState.Add` + `handler.OnAdd(obj, isInInitialList)` |
 | 7 | OnAdd | `shared_informer.go s.OnAdd+0`（:1141） | mutation detector 记录 → `distribute(addNotification, false)` |
 | 8 | distribute | `shared_informer.go`（distribute） | 投递给**所有** listener（非 sync 事件） |
@@ -259,7 +259,7 @@ flowchart LR
 - workqueue 的 dirty/processing 双集合把「去重」与「不丢变更」合二为一：dirty 记录待处理，processing 记录在途；处理中再次 Add 只置 dirty，Done 时发现 dirty 再 Push——这是控制器幂等调谐语义的基石。
 - rate limiter 与延迟队列把失败重试与周期性兜底统一到「时间驱动」路径，`Forget` 在成功后重置退避，使失败重试不无限积累。
 
-**验证（本稿锚点与源码逐条核对，2026-11-18）：**
+**验证（本稿锚点与源码逐条核对，基准 6bf0bfd5 / 2026-11-26）：**
 - 类型级：`sharedIndexInformer+0`（:753）、`controller+0`（:117）、`Reflector+0`（:106）、`DeltaFIFO+0`（:108）、`sharedProcessor+0`（:1221）、`Typed[T]+0`（queue.go :208）、`TypedRateLimitingInterface[T]+0`（rate_limiting_queue.go :30）—— 全部与定义行一致。
 - 函数级：Run :893、RunWithContext :897、handleDeltas :1124、OnAdd :1141、OnUpdate :1149、OnDelete :1171、NewSharedIndexInformer :427；controller.RunWithContext :172、processLoop :238、processDeltas :827、processDeltasInBatch :903；DeltaFIFO.Pop :563；NewTyped :127、NewTypedWithConfig :143、Add :246、Get :284、Done :309；AddAfter :280、AddRateLimited :157、Forget :165。
 - 关键偏移：RunWithContext 内 DeltaFIFO 构造 +13（:910）、processorStopCtx +40（:937）、cacheMutationDetector/processor.run +46～+47（:943-944）、synced +52～+54（:949-951）、controller.RunWithContext +63（:960）；controller.RunWithContext 内 Queue.Close +4（:176）、Reflector +7～+18（:179-190）、wg.StartWithContext :207、wait.UntilWithContext :209、wg.Wait :210；processLoop 内 batch +1～+5（:239-243）；Typed.Add 内 shuttingDown +3（:249）、Touch +10（:256）、dirty.Insert +17（:263）、processing +18（:264）、Push+Signal +22～+23（:268-269）；Typed.Get 内 cond.Wait +4（:288）、Pop+processing +12～+16（:296-301）；Typed.Done 内 dirty +6～+7（:315-316）、Signal +9～+11（:318-320）。
