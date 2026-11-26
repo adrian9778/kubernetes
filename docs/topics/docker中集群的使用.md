@@ -7,6 +7,8 @@
 > **定位澄清**：这是 **Docker Desktop 内置的 Kubernetes 集群**（一键启用），跟"把 Docker 当容器运行时"（K8s 1.24 起已移除 dockershim，见 [19-kubeadm集群引导](../sourceReader/19-kubeadm集群引导.md)）不是一回事，别混。但它有**两种引擎形态**（老版 kubeadm / 新版 kind），见 §0.1——**apiserver 地址、节点名都不同**，别拿错地址去 curl。
 >
 > **事实红线**：环境相关行为（端口、context 名、版本）以本机实际为准。**本文凡涉及 apiserver 地址，一律从 kubeconfig 动态读，不写死端口**（新版端口是随机的）。未实测项标 `[待运行验证]`。
+>
+> **代码基准**：adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4）。本篇为**实操专题**，正文不含源码锚点（无 `.go` 文件/符号/行号引用），内容锚定 Docker Desktop 的产品行为与 kubectl 用法，不随 K8s 代码漂移。
 
 ---
 
@@ -417,6 +419,8 @@ Docker Desktop 的网络代理/端口映射
 - **新版（kind 引擎）**：节点 `desktop-control-plane`、地址 `https://127.0.0.1:<随机高位端口>`、context 仍为 `docker-desktop`。**已实测**（v1.36.1，节点名 `desktop-control-plane`、端口 `58087`、curl `/version` 返回 200）：新版是 kind，端口随机且重建会变，`kubernetes.docker.internal` 域名不再使用。
 
 两种形态通用的部分（context `docker-desktop`、NodePort/LoadBalancer 绑 localhost、凭证全自动、apiserver 只监听 127.0.0.1）一致。**本机实际版本/端口/网段一律以 `kubectl config view --raw -o jsonpath='{.clusters[0].cluster.server}'`、`kubectl get nodes`、`kubectl version` 实际输出为准**。
+
+**本次基准核对（adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`）**：本篇正文为实操内容，**零源码引用**（引用校验工具报 0 条引用，无 ✗），故无源码锚点需迁移；引用的 apiserver 侧行为（`--bind-address`、`/version`、RBAC/ServiceAccount token、NodePort）均为稳定通用语义，本次未发现随代码漂移的事实，除头部基准外不作改动。文中节点版本 `v1.36.1`、端口 `58087` 为**当时实测值**，仅作形态判别示例，不代表当前 Docker Desktop 默认版本。
 
 ### 4.2 官方参考链接
 

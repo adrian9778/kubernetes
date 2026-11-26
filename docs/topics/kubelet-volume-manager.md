@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 kubelet **volume manager** 的卷挂载调谐讲透：desired/actual state 双状态模型、reconciler 调谐循环（unmount→mountOrAttach→expand→unmountDetach）、operationexecutor 执行卷操作。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区仅 `.codegraph/` 未跟踪），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `rc.reconcile+0`。
 >

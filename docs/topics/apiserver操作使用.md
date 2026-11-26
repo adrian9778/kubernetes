@@ -4,7 +4,7 @@
 
 > **层级**：跨篇操作纵深专题——把"怎么操作 kube-apiserver"从**凭证从哪来**、**URL 怎么拼**、**怎么建 Pod/Service**、**怎么监听集群变化**四条主线讲透。与 [API Server 全景](api-server.md)（讲内部机制：启动/路由/中间件/etcd）互补：那篇回答"请求进来后发生了什么"，本篇回答"我该怎么把请求发进去"。
 >
-> **代码基准**：`master@8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，master，工作区干净），Go 1.27.4。锚点用「符号+偏移」，函数声明行为 `+0`。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，adrian，Go 1.27.4）。锚点用「符号+偏移」，函数声明行为 `+0`。
 >
 > **事实红线**：生产实测与代码推断分开标注；未实测项标 `[待运行验证]`。
 
@@ -302,10 +302,12 @@ POST 返回 `201` 只代表**期望状态落进了 etcd**，不代表对象已�
 
 ### 4.1 代码回核
 
-本专题关键锚点在 HEAD `88939239` 复核：
+本专题关键锚点在 HEAD `6bf0bfd5` 复核：
 - `InClusterConfig+0`（`staging/src/k8s.io/client-go/rest/config.go`，token/CA 路径常量、`KUBERNETES_SERVICE_HOST/PORT`）。
-- `CommonNameUserConversion+0`（`staging/src/k8s.io/apiserver/pkg/authentication/request/x509/x509.go:289`），由 `delegating.go:89` 的 `x509.NewDynamic(..., CommonNameUserConversion)` 装配。
+- `CommonNameUserConversion+0`（`staging/src/k8s.io/apiserver/pkg/authentication/request/x509/x509.go` · `CommonNameUserConversion` `+0`），由 `staging/src/k8s.io/apiserver/pkg/authentication/authenticatorfactory/delegating.go` · `DelegatingAuthenticatorConfig.New` `+20` 的 `x509.NewDynamic(..., CommonNameUserConversion)` 装配。
 - authenticator 链装配：`pkg/kubeapiserver/authenticator/config.go Config.New+0`（x509/tokenunion/union/anonymous 顺序）。
+
+> **基准重钉（2026-11-26）**：代码基准从 `88939239`（2026-11-18 master）重钉到 `6bf0bfd5`（2026-11-26 adrian）。本篇为实操向专题（操作方式 kubectl/curl/informer、凭证生成与查看、URL 拼接规则、建 Pod/Service、监听集群变化、高频报错对照），这类内容不随代码漂移。抽查涉及的 apiserver 侧符号定义行均未变化：`CommonNameUserConversion`（x509.go 定义行 289，CN→用户名、O→组逻辑不变）、`InClusterConfig`（client-go rest/config.go 定义行 563，token/CA 路径常量与 `// TODO: switch to using cluster DNS.` 注释均在）、authenticator 装配入口 `Config.New`、x509 分支装配点 `DelegatingAuthenticatorConfig.New`（x509.NewDynamic 传 `CommonNameUserConversion`）。故除重钉基准与消除 `delegating.go` 裸行号的二义外，正文实操内容未改。
 
 ### 4.2 生产实测
 
