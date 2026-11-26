@@ -3,7 +3,7 @@
 # DaemonSet 控制器
 
 > **层级**：第四层——函数级源码解析。
-> **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区干净），Go 1.27.4。
+> **代码基准**：adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净），Go 1.27.4。
 > **范围**：DaemonSet 如何把 Pod 与节点一一对应、节点准入判定、节点亲和性注入、surge 滚动更新。
 > **锚点记法**：`符号+偏移`，函数定义行 = +0，偏移 = 目标行 − 函数声明行（函数行含 `func` 关键字）。
 
@@ -310,14 +310,14 @@ surge 分支：允许节点上短暂出现 2 个 Pod（一个旧、一个新）
 
 ## 8. consistencyStore 写一致性机制（新增观察）
 
-`DaemonSetsController` 持有 `consistencyStore`（`consistencyutil "k8s.io/client-go/util/consistency"`，daemon_controller.go:50/:154）。这是「写后读一致性」闸门，由 feature gate `StaleControllerConsistencyDaemonSet` 控制：
+`DaemonSetsController` 持有 `consistencyStore`（`consistencyutil "k8s.io/client-go/util/consistency"`，`pkg/controller/daemon/daemon_controller.go`、字段见 `DaemonSetsController` `+51`）。这是「写后读一致性」闸门，由 feature gate `StaleControllerConsistencyDaemonSet` 控制：
 
 | 项 | 值 |
 |---|---|
-| FeatureGate 常量 | `StaleControllerConsistencyDaemonSet+0` |
-| 默认值 | Beta，默认 `true`（v1.36，`kube_features.go:2082`） |
-| syncDaemonSet 首步 | `consistencyStore.EnsureReady(dsNamespacedName)`（:1302）——若前次写还未被 informer 观察到则返回一致性错误，跳过本次调谐 |
-| 写回侧 | `updateDaemonSetStatus` 末尾调 `consistencyStore.WroteAt`（:1266-:1271，传入 NamespacedName、UID、GroupResource、ResourceVersion） |
+| FeatureGate 常量 | `pkg/features/kube_features.go` · `StaleControllerConsistencyDaemonSet` `+0`（定义于第 41 行起的 `const (` 块内；`sr_tools.py` 不解析 const 块成员，以 codegraph 为准） |
+| 默认值 | Beta，默认 `true`（v1.36，`pkg/features/kube_features.go` · `defaultVersionedKubernetesFeatureGates` `+810`） |
+| syncDaemonSet 首步 | `dsc.syncDaemonSet` `+22` 调 `consistencyStore.EnsureReady(dsNamespacedName)`——若前次写还未被 informer 观察到则返回一致性错误，跳过本次调谐 |
+| 写回侧 | `dsc.updateDaemonSetStatus` `+56` 调 `consistencyStore.WroteAt`（`+56~+61`，传入 NamespacedName、UID、GroupResource、ResourceVersion） |
 | 跳过指标 | 一致性错误时递增 `metrics.DaemonsetRequeueSkips`（group/resource 维度） |
 
 **设计意图：** 控制器读的是 informer 缓存，写的是 API server；写完立即读可能读到旧值（写未传播），导致「这次调谐基于过期状态重复决策」。EnsureReady 在写未观察到时主动返回错误（requeue），待 informer 追上再继续，避免对同一 DS 的重复/过期写。
@@ -357,16 +357,16 @@ syncDaemonSet
 
 ## 11. 验证与未确认项
 
-**验证方式：** 所有锚点以 `grep -nE '^func '` / `sed` 对当前基准（HEAD 8893923938107170c86eb4b8cc2b7225b4e44e9b，daemon 包工作区干净）逐项核对，函数定义行与偏移均与证据索引一致。
+**验证方式：** 所有锚点以 codegraph 对当前基准（adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`，daemon 包工作区干净）逐项核对，符号定义与偏移均与证据索引一致。
 
 **关键差异（vs 旧文）：**
 
 | 项 | 旧文 | 当前基准 | 结论 |
 |---|---|---|---|
-| `predicates` | daemon_controller.go:1439 | 跨包迁至 component-helpers/apps/daemonset/helpers.go 的 `predicates+0`（包私有） | 更正，daemon 包零引用 |
-| `NewPod` | :1450（未使用） | :1419，零调用点 | 死代码，行号 -31 |
-| `getUnscheduledPodsWithoutNode` | :1488 | :1457 | 漂移 -31 |
-| consistencyStore | 未覆盖 | daemon_controller.go:50/:154，EnsureReady :1302，WroteAt :1266-1271 | 新增观察 |
+| `predicates` | 旧文误标 daemon 包（daemon_controller.go） | 跨包迁至 `staging/src/k8s.io/component-helpers/apps/daemonset/helpers.go` · `predicates` `+0`（包私有） | 更正，daemon 包经 `NodeShouldRunDaemonPodWithPrecomputed` 间接触达，daemon 包内零直接引用 |
+| `NewPod` | :1450（未使用） | daemon_controller.go · `NewPod` `+0`，零调用点 | 死代码，行号 -31 |
+| `getUnscheduledPodsWithoutNode` | :1488 | daemon_controller.go · `getUnscheduledPodsWithoutNode` `+0` | 漂移 -31 |
+| consistencyStore | 未覆盖 | daemon_controller.go、字段见 `DaemonSetsController` `+51`，EnsureReady 调用点 `dsc.syncDaemonSet` `+22`，WroteAt 调用点 `dsc.updateDaemonSetStatus` `+56~+61` | 新增观察 |
 | Go 版本 | — | 1.27.4（基准声明） | 工作区实际 go1.27.1，以基准声明为准 |
 
 **仍未确认项：** 无。所有锚点均经源码核对。
