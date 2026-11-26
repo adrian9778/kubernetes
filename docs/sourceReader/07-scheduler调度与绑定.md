@@ -4,7 +4,7 @@
 
 > **层级**：第四层——函数级源码解析。
 > **范围**：调度器构造与运行、调度周期（PreFilter/Filter/PostFilter/Score）、assume、绑定周期（Permit/PreBind/Bind）、队列交互。
-> **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18），Go 1.27.4。
+> **代码基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26），Go 1.27.4。
 > **记法**：源码锚点用「符号+偏移」；函数定义行 = +0，函数内动作偏移 = 相对定义行。类型用「类型名 文件:行号」。
 
 ## 1. 生产视角
@@ -239,7 +239,7 @@ PostFilter (pl.PostFilter+0)
 
 **选节点 6 条 tie-break（`pickOneNodeForPreemption` 注释 +383）：** scoreFuncs 为空时按——① PDB 违规最少 → ② 最高优先级受害者最小 → ③ 所有受害者优先级之和最小 → ④ 受害者数量最少 → ⑤ 最高优先级受害者启动时间最晚 → ⑥ 仍平则取首个节点。`OrderedScoreFuncs`（`pl.OrderedScoreFuncs+0`）可注入自定义打分。
 
-**受害者与 PDB：** `defaultPreemptionManager.GenerateVictims`（`m.GenerateVictims+0`）、`CompareVictimSets`（`:90`）按 PDB 违规数比较（`countPDBViolations` :151）；`victims.go` 提供 `getWorkloadPreemptionVictims`（:74，Workload API 聚合）与 `getCrossNodesVictims`（:87，跨节点收集）。
+**受害者与 PDB：** `defaultPreemptionManager.GenerateVictims`（`pkg/scheduler/framework/preemption/manager.go` · `m.GenerateVictims` `+0`）、`CompareVictimSets`（`pkg/scheduler/framework/preemption/manager.go` · `m.CompareVictimSets` `+0`）按 PDB 违规数比较（`countPDBViolations` `pkg/scheduler/framework/preemption/manager.go` · `countPDBViolations` `+0`）；`victims.go` 提供 `getWorkloadPreemptionVictims`（`pkg/scheduler/framework/preemption/victims.go` · `getWorkloadPreemptionVictims` `+0`，Workload API 聚合）与 `getCrossNodesVictims`（`pkg/scheduler/framework/preemption/victims.go` · `getCrossNodesVictims` `+0`，跨节点收集）。
 
 **被抢占方状态：** `prepareCandidate` 驱逐受害者后，preemptor 的 `Status.NominatedNodeName` 被写为目标节点，Pod 回队列；下一轮调度 `PodEligibleToPreemptOthers` 凭该字段避免对同一节点重复抢占；若驱逐未完成，`bindingCycle` 的「PreBind 期间被抢占」分支以 `context.Cause` 中止绑定。
 
@@ -335,7 +335,7 @@ Bind(ctx, state, pod, nodeName)
 
 ## 4. 与旧版差异
 
-- **文件归属修正**：`CycleState` 现于 `framework/cycle_state.go:29`（旧误归 interface.go）；`ScheduleResult` 现于 `ScheduleResult+0`（旧误归 schedule_one.go）。
+- **文件归属修正**：`CycleState` 现于 `pkg/scheduler/framework/cycle_state.go`（旧误归 interface.go）；`ScheduleResult` 现于 `pkg/scheduler/scheduler.go`（旧误归 schedule_one.go）。
 - **函数行号漂移**：全部函数定义行按当前基准重定（如 `Run` :456 → :538、`bind` :681 → :780、`prioritizeNodes` :565 → :644）。
 - **函数内偏移漂移**：`scheduleOnePod` 内 `go runBindingCycle` +73 → +48；`schedulingAlgorithm` 内 `ErrNoNodesAvailable` +5 ～ +8 → +20、`FitError/PostFilter` +31/+49 → +40/+46；`SchedulePod` 内 `prioritizeNodes` +36 → +42、`Pop` +42 ～ +43 → +47 ～ +48、单节点跳过打分 +24 ～ +34 → +24 ～ +40；`prepareForBindingCycle` 内 `AssumeAndReserveInCache` +12 → +8、`RunPermitPlugins` +22 → +15；`bindingCycle` 内 `RunPreBindPreFlights` +12 ～ +31 → +15、`WaitOnPermit` +33 ～ +48 → +35 ～ +49、`Done` +56 → +60、`AddPodInPreBind` +63 ～ +69 → +69、`RunPreBindPlugins` +72 ～ +74、被抢占校验 +77 ～ +81、`bind` +84；`bind` 内 `extendersBinding` +6、`RunBindPlugins` +9 → +10。
 - **PodGroup 调度整体拆出**：`scheduleOnePodGroup`（`sched.scheduleOnePodGroup+0`）、`podGroupCycle`（`:340`），本场景裸 Pod 不走该路径；旧文「schedulingAlgorithm 内 PodGroup 跳过 PostFilter」已不存在，从正文删除。
