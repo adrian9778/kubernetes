@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 **Job** 的 Pod 调谐与 tracking finalizer、完成/失败计数、退避；**CronJob** 的周期调度与并发策略讲透。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `jm.syncJob+0`。
 >
@@ -173,7 +173,7 @@ CronJob 入队 → sync (:214) → syncCronJob (:449)
 
 ### 5.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
+本专题所有「符号+偏移」均在 HEAD `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4` 上复核：
 - Job：`NewController+0`（job_controller.go:210）、`jm.Run+0`（:338）、`jm.worker+0`（:748）、`jm.processNextWorkItem+0`（:753）、`jm.syncJob+0`（:929）、`jm.trackJobStatusAndRemoveFinalizers+0`（:1328）、`jm.manageJob+0`（:1771）
 - `syncJobCtx`（:152）、`finalizerExpectations`（:110）、`podBackoffStore`（:142）
 - `hasJobTrackingFinalizer+0`（tracking_utils.go:127）、`uidTrackingExpectations`（:51）
@@ -203,3 +203,24 @@ CronJob 入队 → sync (:214) → syncCronJob (:449)
 **关联文档：** [13-job与cronjob控制器](../sourceReader/13-job与cronjob控制器.md)（浓缩版）、[replicaset副本控制](replicaset副本控制.md)（控制器范式）、[workqueue机制](workqueue机制.md)（退避队列）、[garbage-collector依赖图与级联删除](garbage-collector依赖图与级联删除.md)（Job→Pod owner）。
 
 [总目录](../sourceReader/README.md)
+
+---
+
+## 6. 基准核对说明（2026-11-26）
+
+代码基准由 `master@782c049`（2026-11-19）推进到 `adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，经 rebase 落地，工作区干净）。用 MCP `codegraph_explore` 抽查了 Job 与 CronJob 周期调度的关键锚点，定义行与旧基准**逐个一致**，判定**零漂移**，故本文正文锚点不改、仅更新头部基准与本节说明。
+
+抽查锚点（`def` = 函数声明行，即偏移 +0）：
+
+| 文件 | 符号 | def |
+|---|---|---|
+| pkg/controller/job/job_controller.go | `jm.syncJob+0` | 929 |
+| pkg/controller/job/job_controller.go | `jm.manageJob+0` | 1771 |
+| pkg/controller/job/job_controller.go | `getNewFinishedPods` | 1751 |
+| pkg/controller/job/job_controller.go | `canRemoveFinalizer` | 1478 |
+| pkg/controller/cronjob/cronjob_controllerv2.go | `jm.syncCronJob+0` | 449 |
+| pkg/controller/cronjob/utils.go | `mostRecentScheduleTime+0` | 100 |
+
+其余正文锚点（`NewController`/`Run`/`worker`/`processNextWorkItem`/`sync`/`trackJobStatusAndRemoveFinalizers`/`cleanupFinishedJobs`/`getJobFromTemplate2`/`nextScheduleTime(Duration)`、`syncJobCtx`/`finalizerExpectations`/`podBackoffStore`、`hasJobTrackingFinalizer`/`uidTrackingExpectations`）经引用校验工具全数 `✓`，无失效项。
+
+引用校验：改前 ✗ 0，改后 ✗ 0，未引入新失效。`utils.go` 类裸文件名引用报 AMBIGUOUS（同名文件 42 个），为校验工具的归属歧义提示而非失效；符号级引用（`mostRecentScheduleTime+0` 等）均已消歧、全部 `✓`。
