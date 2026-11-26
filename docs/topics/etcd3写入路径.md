@@ -144,11 +144,11 @@ key = /registry/pods/default/nginx
 
 | 角色 | 文件 | 符号（`+0` = 定义行） |
 |---|---|---|
-| storage 实现 | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` | `Get` `+0`、`Create` `+0`、`Delete` `+0`、`DeleteOnce` `+0`、`deleteOnce` `+0`、`GuaranteedUpdate` `+0`、`UpdateOnce` `+0`、`updateOnce` `+0`、`getCurrentState` `+0`、`stateFromEtcdResponse` `+0`、`prepareKey` `+0`、`txnError` `+0` |
-| 事务代理 | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` | `storeTxnDelegator` `+0`、`newStoreTxnDelegator` `+0`、`storeTxnDelegator.GetCurrentState` `+0`、`storeTxnDelegator.UpdateOnce` `+0`、`storeTxnDelegator.DeleteOnce` `+0` |
+| storage 实现 | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` | `Get` `+0`、`Create` `+0`、`Delete` `+0`、`s.DeleteOnce` `+0`（`func (s *store) DeleteOnce`，实现 `storage.Interface`）、`deleteOnce` `+0`、`GuaranteedUpdate` `+0`、`s.UpdateOnce` `+0`（`func (s *store) UpdateOnce`，实现 `storage.Interface`）、`updateOnce` `+0`、`getCurrentState` `+0`、`stateFromEtcdResponse` `+0`、`prepareKey` `+0`、`txnError` `+0` |
+| 事务代理 | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` | `storeTxnDelegator` `+0`、`newStoreTxnDelegator` `+0`、`d.GetCurrentState` `+0`、`d.UpdateOnce` `+0`、`d.DeleteOnce` `+0`（三者 receiver 均为 `func (d *storeTxnDelegator)`，实现 `storage.TxnDelegator`） |
 | 通用重试循环 | `staging/src/k8s.io/apiserver/pkg/storage/txn.go` | `TxnDelegator` `+0`、`ObjState` `+0`、`GuaranteedUpdate` `+0`、`refreshOnError` `+0`、`updateState` `+0`、`ConditionalDelete` `+0` |
 | key 校验 | `staging/src/k8s.io/apiserver/pkg/storage/interfaces.go` | `PrepareKey` `+0` |
-| etcd 客户端（魔改） | `vendor/go.etcd.io/etcd/client/v3/kubernetes/client.go` | `Client.OptimisticPut` `+0`、`Client.OptimisticDelete` `+0`；`interface.go`：`PutOptions` `+0`、`PutResponse` `+0` |
+| etcd 客户端（魔改） | `vendor/go.etcd.io/etcd/client/v3/kubernetes/client.go` | `Client.OptimisticPut` `+0`、`Client.OptimisticDelete` `+0`；其请求/响应类型 `PutOptions`/`PutResponse` 声明在 `interface.go`（etcd client vendored，非本仓库符号，不给偏移锚点） |
 | registry 调用方 | `staging/src/k8s.io/apiserver/pkg/registry/generic/registry/store.go` | `Store.Create` `+0`、`Store.create` `+0`、`Store.Update` `+0` |
 | lease 管理 | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/lease_manager.go` | `leaseManager.GetLease` `+0`、`getReuseDurationSecondsLocked` `+0` |
 
@@ -194,7 +194,7 @@ registry `Store.GuaranteedUpdate` · `staging/.../registry/generic/registry/stor
             └── `for` 循环：
                  ├── `preconditions.Check` 失败 → `refreshOnError` `+0` 重读
                  ├── `updateState(origState, tryUpdate)` → ret, ttl
-                 └── `d.UpdateOnce`（`TxnDelegator.UpdateOnce`）→ etcd3 `UpdateOnce` `+0` → `updateOnce` `+0`（getOnFailure=true）
+                 └── `d.UpdateOnce`（`TxnDelegator.UpdateOnce`）→ etcd3 `s.UpdateOnce` `+0`（`func (s *store) UpdateOnce`）→ `updateOnce` `+0`（getOnFailure=true）
                       ├── `versioner.PrepareObjectForStorage`
                       ├── `runtime.Encode` → data
                       ├── `!Stale && bytes.Equal(data, origState.Data)` → 短路成功（见下）
@@ -316,7 +316,7 @@ GetLease(ttl)
 - 改重试循环 → `staging/.../storage/txn.go` · `GuaranteedUpdate` 的 `for` 循环与 `refreshOnError`（注意 `TxnDelegator` 现在是中间接口，etcd3 `storeTxnDelegator` 与 cacher `txnDelegator` 都实现它）。
 - 改短路写 → `staging/.../etcd3/store.go` · `updateOnce` 的 `!Stale && bytes.Equal(data, origState.Data)` 分支与其 `FromStorage` 判定。
 
-**源码索引（符号 → 文件；行号由读者用 `sr_tools.py offset` 实时获取，本文不写绝对行号）：**
+**源码索引（符号 → 文件；行号由读者用 sr_tools offset 实时获取，本文不写绝对行号）：**
 
 | 符号 | 文件（完整路径，`+0` = 定义行） |
 |---|---|
