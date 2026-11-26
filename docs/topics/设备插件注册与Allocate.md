@@ -4,7 +4,8 @@
 
 > **层级**：跨篇机制纵深专题——把 kubelet **设备管理器（devicemanager）** 与**设备插件 gRPC 协议**讲透：三条 gRPC 通道（Register/ListAndWatch/Allocate）、设备分配进入 CRI config 的链路、与 CNI 的职责边界。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **基准漂移核对**：`782c049`→本基准区间内 `pkg/kubelet/cm/deviceplugin`、`pkg/kubelet/devicemanager` **零改动**（`git diff --stat` 空输出），本文锚点与语义原样有效。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `m.Allocate+0`。
 >
