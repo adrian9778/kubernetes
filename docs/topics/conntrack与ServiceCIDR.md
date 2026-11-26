@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 kube-proxy 的 **conntrack 清理**（陈旧连接跟踪项删除）与 **ServiceCIDR 处理**（service 网段变化响应）讲透。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd`（2026-11-26，工作区干净，仅 `.codegraph/` 未跟踪，非文档范围），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `CleanStaleEntries+0`。
 >
@@ -135,12 +135,14 @@ Service 缩容（删 endpoint）
 
 ### 6.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
+本专题所有「符号+偏移」均在 HEAD `6bf0bfd` 上复核：
 - conntrack：`CleanStaleEntries+0`（cleanup.go:47）、`conntracker+0`（conntrack.go:44）、`New+0`（:50）、`ct.ListEntries+0`（:59）、`ct.DeleteEntries+0`（:69）
 - filter：`newFlowFilter+0`（filter.go:36）、`flowKey+0`（:47）、`f.MatchConntrackFlow+0`（:61）
 - ServiceCIDR：`NewServiceCIDRConfig+0`（config.go:370）、`c.RegisterEventHandler+0`（:397）、`c.Run+0`（:402）、`c.handleServiceCIDREvent+0`（:413）
 - 控制面：`NewController+0`（servicecidrs_controller.go:71）、`Run+0`（:137）、`sync+0`（:294）
 - proxier：`OnServiceCIDRsChanged+0`（proxier.go:525-527）
+
+**基准漂移核对（88939239381 → 6bf0bfd，168 提交区间）**：`pkg/proxy/conntrack/`（cleanup.go / conntrack.go / filter.go）、`pkg/proxy/config/config.go`（ServiceCIDRConfig）、`pkg/controller/servicecidrs/`、`pkg/proxy/iptables/proxier.go`、`pkg/proxy/nftables/proxier.go` 经 `git diff --stat` 与 codegraph 抽查，上述全部符号定义行与实现语义**均无变化**，本文锚点原样有效。nftables 大改（proxier.go +26/−80）落在 `syncProxyRules`（:1131）规则生成与元素存储侧，其 `OnServiceCIDRsChanged`（:872，按 ipFamily 过滤 CIDR 写入 `serviceCIDRs` 字段）实现未变——本篇 §3.2「iptables 模式 no-op / nftables、ipvs 模式才用 ServiceCIDR」的结论仍成立。
 
 ### 6.2 生产实测
 

@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——以 ReplicaSet 控制器为样本，把**基础控制器范式**讲透：informer 事件入队、worker 调谐、期望计数（expectations）、慢启动批量创建、并发删除、状态更新。这是理解所有 Kubernetes 控制器的样板。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26），Go 1.27.4。所有「符号+偏移」均在该基准上复核（文末 §7.5 核对说明）。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `rsc.manageReplicas+0`。
 >
@@ -185,7 +185,7 @@ spec.replicas=3
 
 ### 7.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
+本专题所有「符号+偏移」均在基准 `adrian@6bf0bfd5` 上复核（详见 §7.5）：
 - `ReplicaSetController+0`（replica_set.go:101）、`NewReplicaSetController+0`（:168）、`NewBaseController+70`（:296，syncHandler 赋值）
 - `rsc.worker+0`（:651）、`rsc.processNextWorkItem+0`（:656）、`rsc.manageReplicas+0`（:678）、`rsc.syncReplicaSet+0`（:808）
 - `slowStartBatch+0`（:944）、`getPodsToDelete+0`（:998）
@@ -210,6 +210,28 @@ spec.replicas=3
 - 改创建节奏 → `slowStartBatch`，同步本文 §4.2。
 - 改删除选择 → `getPodsToDelete`，同步 §4.3。
 - 改抑制逻辑 → `SatisfiedExpectations`，同步 §3.2。
+
+### 7.5 基准核对说明（2026-11-26）
+
+旧基准 `master@782c049`（2026-11-19）→ 新基准 `adrian@6bf0bfd5`（2026-11-26）。经 MCP `codegraph_explore` 抽查，replicaset/replication 副本控制链路在漂移区间**零改动**，全部锚点 def 行与本文记法一致，故只更新基准、不改锚点语义（不为改而改）。
+
+抽查锚点及 def 行（`codegraph_explore` 返回的 def 行号，与 verify 工具的 `offset` 子命令一致）：
+
+| 锚点 | 文件 | def 行 |
+|---|---|---|
+| `ReplicaSetController+0` | `pkg/controller/replicaset/replica_set.go` | 101 |
+| `NewReplicaSetController+0` | 同上 | 168 |
+| `NewBaseController+0`（`syncHandler=rsc.syncReplicaSet` 在 `+70`，即 :296） | 同上 | 226 |
+| `rsc.worker+0` / `rsc.processNextWorkItem+0` | 同上 | 651 / 656 |
+| `rsc.manageReplicas+0` | 同上 | 678 |
+| `rsc.syncReplicaSet+0` | 同上 | 808 |
+| `slowStartBatch+0` | 同上 | 944 |
+| `getPodsToDelete+0` | 同上 | 998 |
+| `updateReplicaSetStatus+0` / `calculateStatus+0` / `NewReplicaSetCondition+0` | `pkg/controller/replicaset/replica_set_utils.go` | 41 / 96 / 147 |
+| `ControlleeExpectations+0` / `SatisfiedExpectations+0` | `pkg/controller/controller_utils.go` | 271 / 196 |
+| `RealPodControl+0` / `CreatePods+0` / `DeletePod+0` | 同上 | 492 / 550 / 629 |
+
+说明：`RealPodControl`/`podControlAdapter` 为 `sr_tools.py` 已知假阳性来源；本文锚点以 `codegraph_explore` 为准。基准更新后 `verify` 结果 ✗=0（无新增失效），遗留的 `?` 为同名符号/同名文件歧义（如 `replica_set.go` 在 `pkg/controller/replicaset/` 与 `test/e2e/apps/` 各一份、`slowStartBatch`/`calculateStatus` 跨包同名），非失效，语义归属已在正文用文件名限定。
 
 **关联文档：** [08-controller副本控制](../sourceReader/08-controller副本控制.md)（浓缩版）、[12-deployment控制器](../sourceReader/12-deployment控制器.md)（Deployment 侧）、[deployment滚动更新](deployment滚动更新.md)（滚动）、[workqueue机制](workqueue机制.md)（控制器队列）。
 
