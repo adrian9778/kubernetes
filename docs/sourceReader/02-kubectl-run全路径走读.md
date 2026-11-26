@@ -3,7 +3,7 @@
 # kubectl run 全路径走读
 > **层级**：第二层——一个真实、最小、可运行的成功场景，从入口追踪到最终结果，只看主成功路径。
 > **场景**：`kubectl run nginx --image=nginx --restart=Never`
-> **基准**：`k8s.io/kubernetes` commit `8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，master，工作区干净），Go 1.27.4。
+> **基准**：adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4）。
 
 ## 1. 场景说明
 `--restart=Never` 让 kubectl 直接创建一个裸 Pod（不带 Deployment/ReplicaSet），主路径最短。命令结束后集群中存在一个 Pod：`spec.nodeName` 由调度器填入，容器进入 Running，状态经 kubelet 回报。
@@ -160,7 +160,7 @@ nginx   1/1     Running   0          <n>
 
 #### 请求行与 URL 构造
 
-**源码：** `staging/src/k8s.io/client-go/rest/request.go 函数：URL 偏移：+0`（:556）、`函数：createResource 偏移：+0`（cli-runtime/pkg/resource/helper.go:240）
+**源码：** `staging/src/k8s.io/client-go/rest/request.go` · `Request.URL` `+0`、`staging/src/k8s.io/cli-runtime/pkg/resource/helper.go` · `Helper.createResource` `+0`
 
 ```text
 POST /api/v1/namespaces/default/pods HTTP/1.1
