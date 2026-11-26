@@ -3,7 +3,7 @@
 # kube-proxy 网络代理
 > **层级**：第四层——函数级源码解析。
 > **范围**：Service/EndpointSlice 事件接入、iptables 规则生成（KUBE-SERVICES/SVC/SEP 三级链）、ipvs 模式定位、nftables 模式定位。
-> **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区干净），Go 1.27.4。
+> **代码基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26），Go 1.27.4。
 > **锚点记法**：`符号+偏移`，函数定义行 = `+0`；括号内为当前绝对行号，仅作核对辅助，不作引用依据。
 
 ## 0. 生产视角（对外行为与可见结果）
@@ -57,7 +57,7 @@ flowchart TD
 ## 3. 启动与事件接入函数级
 
 ### 函数：NewProxyCommand / Options / ProxyServer.Run
-**源码：** `cmd/kube-proxy/app/server.go NewProxyCommand+0`（:102）、`options.go Options+0`（:52） / `NewOptions+0`（:195）、`server.go ProxyServer.Run+0`（:532）。
+**源码：** `cmd/kube-proxy/app/server.go NewProxyCommand+0`（:102）、`options.go Options+0`（:52）/ `options.go NewOptions+0`（:195，`server.go NewProxyCommand` 调用点 `+1`）、`server.go ProxyServer.Run+0`（:532）。
 
 **Run 装配段（`Run+63 ~ +114`，当前 :595~:646）：**
 1. `NewServiceConfig` → `serviceConfig.RegisterEventHandler(s.Proxier)` → `go serviceConfig.Run(ctx.Done())`（serviceConfig 创建 `Run+82` :614，Run 调用 `Run+84` :616）
@@ -205,7 +205,7 @@ ipvs 模式把负载均衡下发给内核 IPVS（哈希表查找），kube-proxy
 | `Sync` / `SyncLoop` | `nftables/proxier.go Sync+0`（:783）/ `SyncLoop+0`（:792） | 与 iptables 同构 |
 | `syncProxyRules` | `nftables/proxier.go syncProxyRules+0`（:1163） | 全量生成 nftables 规则集 |
 
-装配：`cmd/kube-proxy/app/server_linux.go nftables.NewProxier+0`（:248）为独立分支，与 iptables/ipvs 并列，按 `--proxy-mode` 选择。
+装配：`pkg/proxy/nftables/proxier.go` `NewProxier+0`（:221），调用点在 `cmd/kube-proxy/app/server_linux.go` `createProxier+117`（:248），为独立分支，与 iptables/ipvs 并列，按 `--proxy-mode` 选择。
 
 ### 6.1 ipvs 规则同步深度拆解（syncService / syncEndpoint）
 
