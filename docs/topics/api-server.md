@@ -4,9 +4,9 @@
 
 > **层级**：跨篇机制纵深专题——把 API Server（kube-apiserver + generic apiserver + kube-aggregator + apiextensions-apiserver）从**进程启动**到**一次请求落 etcd** 的全链路讲透，覆盖启动装配、路由注册、请求处理中间件链、CRUD handlers、storage 层、watch、聚合层、discovery。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上用 `grep -n`/`sed -n`/`awk` 复核。
+> **代码基准**：adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4）。所有「符号+偏移」均在该基准上用 MCP `codegraph_explore` 回核。
 >
-> **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `DefaultBuildHandlerChain+0`。一律用符号+偏移定位，不使用绝对行号。
+> **锚点记法**：`<完整文件路径>` · `<符号名>` `+<偏移>`。`+0` = 声明行；符号名不带 `func`/`type` 前缀、不带 receiver（如 `(s *store) Create` 写作 `store.Create`）。一律用符号+偏移定位，不使用绝对行号。
 >
 > **事实红线**：生产实测与代码推断分开标注；未实测项标 `[待运行验证]`。
 
@@ -80,11 +80,11 @@ apiserver 起来后监听 HTTPS（默认 `--secure-port 6443`），客户端要�
 
 | 方式 | 用在哪 | 地址 | 凭据（证明我是谁） | CA（校验服务器） | 源码锚点 |
 |---|---|---|---|---|---|
-| **客户端证书** | 管理员从集群外操作 | `https://<LB-VIP>:6443` | kubeconfig 的 `client-certificate` + `client-key`（x509，CN=用户名、O=组） | `certificate-authority-data` | `pkg/kubeapiserver/authenticator/config.go Config.New+0`，x509 分支 `:128`（`ClientCAContentProvider` → `x509.NewDynamic(..., CommonNameUserConversion)`） |
-| **ServiceAccount token** | 集群内 Pod 访问 | `https://kubernetes.default.svc`（ClusterIP） | Pod 挂载的 JWT：`/var/run/secrets/kubernetes.io/serviceaccount/token` | 同目录 `ca.crt` | 同上，SA 分支 `:141`（legacy）/`:148`（projected，`ServiceAccountIssuers`）；token 文件路径见 `staging/src/k8s.io/client-go/rest/config.go InClusterConfig+0` `:565-566` |
-| **Bearer token（外部）** | 脚本 / CDN 用长期 token | `https://<LB-VIP>:6443` | 请求头 `Authorization: Bearer <token>` | `--certificate-authority` 或 `insecure-skip-tls-verify` | token 类 authenticator 经 `tokenunion.New`（`:206`）汇入 `union.New`（`:238`） |
+| **客户端证书** | 管理员从集群外操作 | `https://<LB-VIP>:6443` | kubeconfig 的 `client-certificate` + `client-key`（x509，CN=用户名、O=组） | `certificate-authority-data` | `pkg/kubeapiserver/authenticator/config.go` · `Config.New` `+21`（x509 分支，`ClientCAContentProvider` → `x509.NewDynamic(..., CommonNameUserConversion)`） |
+| **ServiceAccount token** | 集群内 Pod 访问 | `https://kubernetes.default.svc`（ClusterIP） | Pod 挂载的 JWT：`/var/run/secrets/kubernetes.io/serviceaccount/token` | 同目录 `ca.crt` | 同上，SA 分支 `pkg/kubeapiserver/authenticator/config.go` · `Config.New` `+34`（legacy）/`+41`（projected，`ServiceAccountIssuers`）；token 文件路径见 `staging/src/k8s.io/client-go/rest/config.go` · `InClusterConfig` `+2`~`+3` |
+| **Bearer token（外部）** | 脚本 / CDN 用长期 token | `https://<LB-VIP>:6443` | 请求头 `Authorization: Bearer <token>` | `--certificate-authority` 或 `insecure-skip-tls-verify` | token 类 authenticator 经 `token/union` · `New`（`tokenunion` 别名，`staging/src/k8s.io/apiserver/pkg/authentication/token/union/union.go`）汇入 `request/union` · `New`（`union` 别名） |
 
-认证链如何组织：`Config.New` 把 requestheader / x509 / token 类（legacy-SA、projected-SA、bootstrap、OIDC、webhook）逐个 append，token 类先经 `tokenunion.New(tokenAuthenticators...)`（`:206`）合成一个，最后所有 authenticator 用 `union.New(authenticators...)`（`:238`）串成一条链；`Anonymous.Enabled` 时再追一个匿名 authenticator（`:242-245`）。任何一条命中即解析出 `user.Info`，全不命中 → 401。
+认证链如何组织：`Config.New` 把 requestheader / x509 / token 类（legacy-SA、projected-SA、bootstrap、OIDC、webhook）逐个 append，token 类先经 `tokenunion.New(tokenAuthenticators...)`（`Config.New+99`）合成一个，最后所有 authenticator 用 `union.New(authenticators...)`（`Config.New+131`）串成一条链；`Anonymous.Enabled` 时再追一个匿名 authenticator（`Config.New+135`~`+138`）。任何一条命中即解析出 `user.Info`，全不命中 → 401。
 
 #### 例 A：从集群外用客户端证书创建一个 Pod + Service
 
@@ -135,7 +135,7 @@ curl -s --cacert ca.crt --cert admin.crt --key admin.key \
 JSON
 ```
 
-这三个 POST 命中的路由正是 §2.2 讲的接口驱动注册：`pods`、`services` 都是 namespaced 资源，在 `pkg/registry/core/rest/storage_core.go` 注册（`pods` `:237`、`services` `:296`），路径 `/api/v1/namespaces/<ns>/<resource>`。请求进来后走 §3 的中间件链：`WithAuthentication`（此处 x509 分支解析出 `admin`）→ `WithAuthorization`（admin 的证书 O=组 `kubeadm:cluster-admins`，该组被绑到 `cluster-admin` ClusterRole，放行）→ `CreateResource → createHandler → Store.Create → etcd3 s.Create`（§7 的全链路时序）。
+这三个 POST 命中的路由正是 §2.2 讲的接口驱动注册：`pods`、`services` 都是 namespaced 资源，在 `pkg/registry/core/rest/storage_core.go` 注册（`pods` 条件块 `+130`、`services` 条件块 `+189`），路径 `/api/v1/namespaces/<ns>/<resource>`。请求进来后走 §3 的中间件链：`endpoints/filters/authentication.go` · `WithAuthentication`（此处 x509 分支解析出 `admin`）→ `endpoints/filters/authorization.go` · `WithAuthorization`（admin 的证书 O=组 `kubeadm:cluster-admins`，该组被绑到 `cluster-admin` ClusterRole，放行）→ `CreateResource → createHandler → Store.Create → store.Create`（§7 的全链路时序）。
 
 > **为什么 Pod 建出来还没 IP、Service 也还没 ClusterIP**：POST 返回的 201 只是 apiserver 把期望状态落进了 etcd。Pod 的 `status.podIP` 要等 scheduler 绑节点、kubelet 起容器后才回写；Service 的 `spec.clusterIP` 由 apiserver 内置的 service registry 在 create 时分配，`Endpoints`/EndpointSlice 则由 EndpointSlice 控制器根据 Pod 就绪状态生成。声明 ≠ 完成，收敛需要时间。
 
@@ -154,7 +154,7 @@ curl -s --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt \
   https://kubernetes.default.svc/api/v1/namespaces/$NS/pods
 ```
 
-这走的是认证链里 SA token 分支（`config.go:141`/`:148`）：apiserver 用 `ServiceAccountPublicKeysGetter` 校验 JWT 签名，解析出 `system:serviceaccount:<ns>:<sa-name>` 这个用户。**默认这个用户几乎没权限**——要读 Pod 还得先建 RBAC 授权：
+这走的是认证链里 SA token 分支（`Config.New+34`/`+41`）：apiserver 用 `ServiceAccountPublicKeysGetter` 校验 JWT 签名，解析出 `system:serviceaccount:<ns>:<sa-name>` 这个用户。**默认这个用户几乎没权限**——要读 Pod 还得先建 RBAC 授权：
 
 ```bash
 # 授权 demo namespace 里的 Pod 能 list/get pods（集群外执行，admin 身份）
@@ -223,7 +223,7 @@ return aggregatorServer
 | `NonGoRestfulMux` | `*mux.PathRecorderMux` | 非 gorestful 路由（/healthz、/metrics、/version、discovery） |
 | `GoRestfulContainer` | `*restful.Container` | gorestful 路由（所有资源 CRUD） |
 
-`NewAPIServerHandler`（handler.go `NewAPIServerHandler+0`）把两者包进 `APIServerHandler`，由 **`director`**（handler.go `director` type，:115）按请求路径分流：
+`NewAPIServerHandler`（`staging/src/k8s.io/apiserver/pkg/server/handler.go` · `NewAPIServerHandler` `+0`）把两者包进 `APIServerHandler`，由 **`director`**（同文件 · `director` `+0`）按请求路径分流：
 ```text
 APIServerHandler.ServeHTTP
 └── director.ServeHTTP
@@ -233,13 +233,13 @@ APIServerHandler.ServeHTTP
 
 ### 2.2 资源路由注册（`APIInstaller`）
 
-每个 API group/version 由 `APIInstaller.Install`（installer.go `APIInstaller.Install+0`，:196）装配：
+每个 API group/version 由 `APIInstaller.Install`（`staging/src/k8s.io/apiserver/pkg/endpoints/installer.go` · `APIInstaller.Install` `+0`）装配：
 
 ```text
 APIInstaller.Install()
 ├── newWebService()                            创建 restful.WebService
 ├── for each (path, storage) in group.Storage:
-│    └── registerResourceHandlers(path, storage, ws)   registerResourceHandlers+0 (:288)
+│    └── registerResourceHandlers(path, storage, ws)   `APIInstaller.registerResourceHandlers` `+0`
 │         ├── 探测 storage 实现哪些接口：
 │         │     Creater → POST、Updater → PUT/PATCH、Getter → GET single、
 │         │     Lister → GET collection、Watcher → GET ?watch=true、Deleter → DELETE、
@@ -264,7 +264,7 @@ APIInstaller.Install()
 
 ### 2.3 Discovery 与 OpenAPI
 
-- **`/api`、`/apis`**：`NewRootAPIsHandler`（discovery/root.go `NewRootAPIsHandler+0`，:69）返回所有 group/version 列表。
+- **`/api`、`/apis`**：`NewRootAPIsHandler`（`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/root.go` · `NewRootAPIsHandler` `+0`）返回所有 group/version 列表。
 - **`/apis/<group>/<version>`**：group/version handler 返回该版本的资源列表（名称、动词、kind）。
 - **`/version`**：版本信息。
 - **`/openapi/v2`、`/openapi/v3`**：OpenAPI 文档，由各 handler 注册时附带的响应 schema 聚合生成。
@@ -273,7 +273,7 @@ APIInstaller.Install()
 
 ## 3. 请求处理中间件链（`DefaultBuildHandlerChain`）
 
-这是 API Server 最核心的一段。`DefaultBuildHandlerChain`（config.go `DefaultBuildHandlerChain+0`，:1078）把业务 handler 用 **40+ 层 filter** 逐层包裹。**外层先执行、内层后执行**（近业务 handler），而源码里 `handler = WithX(handler)` 的**书写顺序与包裹后执行顺序相反**——最先写的 `WithAuthorization` 在最内（最后执行），最后写的 `WithRequestInfo` 在最外（最先执行）。
+这是 API Server 最核心的一段。`DefaultBuildHandlerChain`（`staging/src/k8s.io/apiserver/pkg/server/config.go` · `DefaultBuildHandlerChain` `+0`）把业务 handler 用 **40+ 层 filter** 逐层包裹。**外层先执行、内层后执行**（近业务 handler），而源码里 `handler = WithX(handler)` 的**书写顺序与包裹后执行顺序相反**——最先写的 `WithAuthorization` 在最内（最后执行），最后写的 `WithRequestInfo` 在最外（最先执行）。
 
 ### 3.1 中间件链完整顺序（外→内，即执行顺序）
 
@@ -307,26 +307,28 @@ APIInstaller.Install()
 ```
 
 **三个最关键的横切关注点：**
-- **认证（WithAuthentication，endpoints/filters/authentication.go `WithAuthentication+0`）**：用 authenticator 链（client cert / bearer token / service account / OIDC / requestheader）解析出 `user.Info`，注入 request context。**失败走 `failedHandler`**（=`Unauthorized` 包 `WithFailedAuthenticationAudit`，config.go :1124-25），返回 401。注意 `WithFailedAuthenticationAudit` **不在主链**，只在认证失败路径触发——认证失败也留审计。
-- **鉴权（WithAuthorization，endpoints/filters/authorization.go `WithAuthorization+0`）**：用 authorizer（RBAC / Node / Webhook / ABAC）判断 `user` 对 `RequestInfo` 标识的资源是否有权执行 `verb`。失败 403。
-- **流控（WithPriorityAndFairness）**：APF 按 FlowSchema 分类、PriorityLevel 排队，超载返回 429（详见 [优先级与公平性流控专题](优先级与公平性流控.md)）。
+- **认证（`endpoints/filters/authentication.go` · `WithAuthentication` `+0`）**：用 authenticator 链（client cert / bearer token / service account / OIDC / requestheader）解析出 `user.Info`，注入 request context。**失败走 `failedHandler`**（=`Unauthorized` 包 `WithFailedAuthenticationAudit`，见 `DefaultBuildHandlerChain+46`~`+47`），返回 401。注意 `WithFailedAuthenticationAudit` **不在主链**，只在认证失败路径触发——认证失败也留审计。
+- **鉴权（`endpoints/filters/authorization.go` · `WithAuthorization` `+0`）**：用 authorizer（RBAC / Node / Webhook / ABAC）判断 `user` 对 `RequestInfo` 标识的资源是否有权执行 `verb`。失败 403。
+- **流控（`WithPriorityAndFairness`）**：APF 按 FlowSchema 分类、PriorityLevel 排队，超载返回 429（详见 [优先级与公平性流控专题](优先级与公平性流控.md)）。
+
+> 说明：`WithAuthentication`/`WithAuthorization` 均定义在 **`endpoints/filters/`** 包（`genericapifilters` 别名），**不在** `admission/chain.go`——admission 包里只有 `NewChainHandler`（`staging/src/k8s.io/apiserver/pkg/admission/chain.go` · `NewChainHandler` `+0`）这条 admission 链。两者在 `DefaultBuildHandlerChain` 里的装配点分别是 `+54`（authn）与 `+13`（authz，feature gate 关闭时走 `WithAuthorization` 分支）。
 
 **认证/鉴权链的装配位置：** authenticator 链在 `pkg/kubeapiserver/authenticator/config.go`（`Config.New`）装配：requestheader → x509 → token-file/legacy-SA/JWT-SA/bootstrap/OIDC/webhook → union。authorizer 链在 `pkg/kubeapiserver/authorizer/config.go` + `reload.go`（Node/ABAC/RBAC/Webhook/AlwaysAllow 各 mode builder）。
 
 **审计与模拟（精确锚点）：**
-- `WithAudit`（endpoints/filters/audit.go `WithAudit+0`，:42）：记录审计事件（含 defer/panic/long-running stage）；策略评估在 `evaluatePolicyAndCreateAuditEvent+0`（:117）。
-- `WithImpersonation`（filters/impersonation/impersonation.go `WithImpersonation+0`，:42）：每请求做 `Authorize(verb=impersonate)` 检查 + `LogImpersonatedUser`。
-- `WithConstrainedImpersonation`（filters/impersonation/constrained_impersonation.go `WithConstrainedImpersonation+0`，:46，独立文件）。
+- `WithAudit`（`endpoints/filters/audit.go` · `WithAudit` `+0`）：记录审计事件（含 defer/panic/long-running stage）；策略评估在 `evaluatePolicyAndCreateAuditEvent+0`（同文件）。
+- `WithImpersonation`（`filters/impersonation/impersonation.go` · `WithImpersonation` `+0`）：每请求做 `Authorize(verb=impersonate)` 检查 + `LogImpersonatedUser`（`audit/request.go` · `LogImpersonatedUser` `+0` → `audit/context.go` · `AuditContext.LogImpersonatedUser` `+0`）。
+- `WithConstrainedImpersonation`（`filters/impersonation/constrained_impersonation.go` · `WithConstrainedImpersonation` `+0`，独立文件，feature gate `ConstrainedImpersonation` 开启时替换 `WithImpersonation`）。
 
 ### 3.2 admission 在哪一层
 
 **admission 不在中间件链里**，而在 **CRUD handler 内部**（`createHandler`/`updateHandler` 显式调用）。原因是 admission 需要解码后的对象 + 操作语义（CREATE/UPDATE/DELETE），与 HTTP 层解耦。顺序：**mutating admission → 对象默认化/validation → validating admission**。
 
-admission 链由 `NewChainHandler`（admission/chain.go `NewChainHandler+0`）构造，`admission.Interface`（interfaces.go :124）定义 `Admit`/`Validate`。
+admission 链由 `NewChainHandler`（`staging/src/k8s.io/apiserver/pkg/admission/chain.go` · `NewChainHandler` `+0`）构造，`admission.Interface`（`admission/interfaces.go` · `Interface` `+0`）定义 `Admit`/`Validate`。
 
 **两种 admission 的触发时机不同（精确）：**
-- **mutating admission 内联触发**：`createHandler` 直接调 `mutatingAdmission.Admit(ctx, admissionAttributes, scope)`（create.go :203）。
-- **validating admission 经 storage 写触发**：handler 把 `rest.AdmissionToValidateObjectFunc(admit, attrs, scope)`（create.go :188，函数在 registry/rest/create.go `AdmissionToValidateObjectFunc+0`，:218）作为 validate 回调传给 `Store.Create`，validating 在 storage 写路径内才执行（update 用 `AdmissionToValidateObjectUpdateFunc+0`，update.go :286）。这样保证 validating 看到的是最终写入对象。
+- **mutating admission 内联触发**：`createHandler` 直接调 `mutatingAdmission.Admit(ctx, admissionAttributes, scope)`（`endpoints/handlers/create.go` · `createHandler` `+150`）。
+- **validating admission 经 storage 写触发**：handler 把 `rest.AdmissionToValidateObjectFunc(admit, attrs, scope)`（调用点 `createHandler+135`，函数本体在 `registry/rest/create.go` · `AdmissionToValidateObjectFunc` `+0`）作为 validate 回调传给 `Store.Create`，validating 在 storage 写路径内才执行（update 用 `AdmissionToValidateObjectUpdateFunc` `+0`，见 `registry/rest/update.go`）。这样保证 validating 看到的是最终写入对象。
 
 ---
 
@@ -334,7 +336,7 @@ admission 链由 `NewChainHandler`（admission/chain.go `NewChainHandler+0`）�
 
 ### 4.1 Create 全流程（`createHandler`）
 
-`CreateResource`（create.go `CreateResource+0`，:245）是注册到路由的入口，它返回 `createHandler(...)`（create.go `createHandler+0`，:53）这个 http.HandlerFunc：
+`CreateResource`（`endpoints/handlers/create.go` · `CreateResource` `+0`）是注册到路由的入口，它返回 `createHandler(...)`（同文件 · `createHandler` `+0`）这个 http.HandlerFunc：
 
 ```text
 CreateResource(creater, scope, admission) → createHandler
@@ -360,35 +362,35 @@ create(creater, req, scope, admit, namespace, ...)
 
 ### 4.2 Update / Patch / Delete
 
-- **`UpdateResource`**（update.go `UpdateResource+0`，:51）：PUT 全量更新，走乐观并发（ResourceVersion 前置条件）。
-- **`PatchResource`**（patch.go `PatchResource+0`，:71）：支持 JSON Patch / Merge Patch / Strategic Merge Patch / Server-Side Apply。先取当前对象 → 应用 patch → 走 update 路径。
+- **`UpdateResource`**（`endpoints/handlers/update.go` · `UpdateResource` `+0`）：PUT 全量更新，走乐观并发（ResourceVersion 前置条件）。
+- **`PatchResource`**（`endpoints/handlers/patch.go` · `PatchResource` `+0`）：支持 JSON Patch / Merge Patch / Strategic Merge Patch / Server-Side Apply。先取当前对象 → 应用 patch → 走 update 路径。
 - **`DeleteResource`**：DELETE，支持 graceful deletion（`GracefulDeleter`）。
 
 ### 4.3 generic registry `Store`（连接 handler 与 etcd）
 
-`Store`（registry/generic/registry/store.go）实现 `rest.Storage` 全套接口：
+`Store`（`registry/generic/registry/store.go`）实现 `rest.Storage` 全套接口：
 
 | 方法 | 锚点 | 作用 |
 |---|---|---|
-| `e.Create` | `e.Create+0` (:564) | 校验 → `Storage.Create`（etcd） |
-| `e.Update` | `e.Update+0` (:758) | 乐观更新（RV 前置条件） |
-| `e.Get` | `e.Get+0` (:989) | 单对象读 |
-| `e.List` | `e.List+0` (:482) | 集合读（支持分页/label selector） |
-| `e.Delete` | `e.Delete+0` (:1275) | 删除（含 graceful） |
-| `e.Watch` | `e.Watch+0` (:1560) | 建立 watch |
+| `Store.Create` | `Store.Create` `+0` | 校验 → `Storage.Create`（etcd） |
+| `Store.Update` | `Store.Update` `+0` | 乐观更新（RV 前置条件） |
+| `Store.Get` | `Store.Get` `+0` | 单对象读 |
+| `Store.List` | `Store.List` `+0` | 集合读（支持分页/label selector） |
+| `Store.Delete` | `Store.Delete` `+0` | 删除（含 graceful） |
+| `Store.Watch` | `Store.Watch` `+0` | 建立 watch |
 
-**Store 不直接操作 etcd**，而是持有 `Storage storage.Interface`（由 storage factory 注入，可能是 etcd3 直连或 `Cacher` 包装）。它负责对象级语义：`CreateStrategy`/`UpdateStrategy`/`DeleteStrategy`（默认化、校验、canonicalize）、namespace 校验、generation 维护。
+**Store 不直接操作 etcd**，而是持有 `Storage storage.Interface`（`storage/interfaces.go` · `Interface` `+0`，由 storage factory 注入，可能是 etcd3 直连或 `Cacher` 包装）。它负责对象级语义：`CreateStrategy`/`UpdateStrategy`/`DeleteStrategy`（默认化、校验、canonicalize）、namespace 校验、generation 维护。
 
-#### Store.Create 内部链（`e.create`，registry store.go）
+#### Store.Create 内部链（`Store.create`，registry store.go）
 
-`e.Create`（:564）委托给私有 `e.create`（`e.create+0`，:595），其内部顺序：
+`Store.Create` 委托给私有 `Store.create`（`+0`），其内部顺序：
 
 ```text
-e.create(ctx, obj, createValidation, options)     e.create+0 (:595)
-├── rest.BeforeCreate(e.CreateStrategy, ctx, obj)  e.create+24 (:619)
-│     ↑ BeforeCreate 在 registry/rest/create.go BeforeCreate+0 (:103)
-├── createValidation(ctx, obj)                     e.create+29 (:624)  ← validating admission 回调
-└── e.Storage.Create(ctx, key, obj, out, ttl, dryRun)  e.create+49 (:644)
+Store.create(ctx, obj, createValidation, options)     Store.create+0
+├── rest.BeforeCreate(e.CreateStrategy, ctx, obj)      Store.create+24
+│     ↑ BeforeCreate 在 registry/rest/create.go BeforeCreate+0
+├── createValidation(ctx, obj)                         Store.create+29  ← validating admission 回调
+└── e.Storage.Create(ctx, key, obj, out, ttl, dryRun)  Store.create+49
       ↑ 真正落 etcd（经 dryrun 包装）
 ```
 
@@ -398,12 +400,12 @@ e.create(ctx, obj, createValidation, options)     e.create+0 (:595)
 
 | handler | 锚点 | 作用 |
 |---|---|---|
-| `GetResource` | `GetResource+0` (:87) | GET 单对象 |
-| `ListResource` | `ListResource+0` (:168) | GET 集合（含 `?watch=true` 分流） |
-| `handleWatch` | `handleWatch+0` (:258) | watch 长连接 |
-| `handleList` | `handleList+0` (:314) | list 主体 |
+| `GetResource` | `GetResource` `+0` | GET 单对象 |
+| `ListResource` | `ListResource` `+0` | GET 集合（含 `?watch=true` 分流） |
+| `handleWatch` | `handleWatch` `+0` | watch 长连接 |
+| `handleList` | `handleList` `+0` | list 主体 |
 
-DELETE 路由的注册辅助 `restfulDeleteResource` 在 installer.go `restfulDeleteResource+0`（:1313）。
+DELETE 路由的注册辅助 `restfulDeleteResource` 在 `endpoints/installer.go` · `restfulDeleteResource` `+0`。
 
 ---
 
@@ -411,21 +413,20 @@ DELETE 路由的注册辅助 `restfulDeleteResource` 在 installer.go `restfulDe
 
 ### 5.1 `store.Create` 写路径（etcd3）
 
-`etcd3 store.Create`（storage/etcd3/store.go `s.Create+0`，:293）是真正落 etcd 的地方：
+`etcd3 store.Create`（`staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` · `store.Create` `+0`，实现 `storage.Interface.Create`）是真正落 etcd 的地方：
 
 ```text
-s.Create(ctx, key, obj, out, ttl)                 s.Create+0
-├── s.versioner.PrepareObjectForStorage(obj)       版本化预处理（非加密）
-├── data = runtime.Encode(s.codec, obj)            序列化
-├── preparedKey = s.prepareKey(key, false)         key 防逃逸（s.prepareKey+0，:1232）
-├── if ttl > 0: lease = s.leaseManager.GetLease(ttl)   短 TTL 对象用 lease
-├── newData = s.transformer.TransformToStorage(data, authenticatedDataString(preparedKey))
-│     ↑ ★ 加密变换（s.Create+35，见 §5.3）
+store.Create(ctx, key, obj, out, ttl)                 store.Create+0
+├── s.prepareKey(key, false)                          store.Create+1    key 防逃逸（store.prepareKey+0）
+├── s.versioner.PrepareObjectForStorage(obj)          store.Create+16   版本化预处理（非加密）
+├── data = runtime.Encode(s.codec, obj)               store.Create+20   序列化
+├── if ttl != 0: lease = s.leaseManager.GetLease(...) store.Create+28   短 TTL 对象用 lease
+├── newData = s.transformer.TransformToStorage(...)   store.Create+35   ★ 加密变换（见 §5.3）
 └── txnResp = s.client.Kubernetes.OptimisticPut(ctx, preparedKey, newData, 0, {LeaseID: lease})
-      ↑ ★ 乐观事务，expectedRev=0（s.Create+43，Create 幂等：已存在即失败）
+      ↑ ★ 乐观事务，expectedRev=0（store.Create+43，Create 幂等：已存在即失败）
 ```
 
-**注意：** `OptimisticPut` 来自外部包 `go.etcd.io/etcd/client/v3/kubernetes`（经 `s.client.Kubernetes` 调用），**不在仓库内**——仓库内仅有测试记录器 `storage/testing/recorder.go`。乐观锁重试逻辑在 `storage/txn.go:GuaranteedUpdate`。
+**注意：** `OptimisticPut` 来自外部包 `go.etcd.io/etcd/client/v3/kubernetes`（经 `s.client.Kubernetes` 调用），**不在仓库内**——仓库内仅有测试记录器 `storage/testing/recorder.go` · `KubernetesRecorder.OptimisticPut+0`。乐观锁重试逻辑在 `storage/txn.go` · `GuaranteedUpdate`。
 
 **关键点：**
 1. **加密在 storage 层**：`TransformToStorage` 加密后才落 etcd，密文对 etcd 透明。
@@ -434,15 +435,15 @@ s.Create(ctx, key, obj, out, ttl)                 s.Create+0
 
 ### 5.2 乐观并发（`GuaranteedUpdate`）
 
-`etcd3 store.GuaranteedUpdate`（store.go `s.GuaranteedUpdate+0`，:437）与 `txn.go GuaranteedUpdate`（txn.go `GuaranteedUpdate+0`，:114）实现乐观事务：
+`etcd3 store.GuaranteedUpdate`（`store.go` · `store.GuaranteedUpdate` `+0`）与 `storage/txn.go` · `GuaranteedUpdate` `+0` 实现乐观事务：
 ```text
 GuaranteedUpdate(key, dest, preconditions, tryUpdate, origState)
 └── for:                                          乐观重试循环
      ├── 取当前状态 origState
      ├── newObj = tryUpdate(origState)            用户更新函数
-     ├── OptimisticPut(key, newData, origState.Rev)   条件于 Rev
+     ├── d.UpdateOnce(...)                        条件于 Rev 写入
      ├── RV 冲突 / 前置条件失败 → refreshOnError 重读
-     │     └── refreshOnError（txn.go refreshOnError+0，:148）：
+     │     └── refreshOnError（txn.go · refreshOnError+0）：
      │           st.Current → 返回原错误
      │           cachedRev == currentState.Rev → 数据没变，返回原错误
      │           否则 → 重读后重试
@@ -452,17 +453,17 @@ GuaranteedUpdate(key, dest, preconditions, tryUpdate, origState)
 
 ### 5.3 加密变换（`Transformer`）
 
-`value.Transformer`（value/transformer.go :59）= `Read` + `Write`（`TransformFromStorage`/`TransformToStorage`）。`prefixTransformers.TransformToStorage`（transformer.go `prefixTransformers.TransformToStorage+0`，:172）按前缀匹配多个 transformer，**每个用自己 prefix 作 `authenticatedDataString`**（AAD，绑定 key 与密文）。
+`value.Transformer`（`storage/value/transformer.go` · `Transformer` `+0`）= `Read` + `Write`（`TransformFromStorage`/`TransformToStorage`）。`prefixTransformers.TransformToStorage`（同文件 · `prefixTransformers.TransformToStorage` `+0`）按前缀匹配多个 transformer，**每个用自己 prefix 作 `authenticatedDataString`**（AAD，绑定 key 与密文）。
 
 实现：
 - `identityTransformer`：恒等（不加密）。
-- `envelopeTransformer`（KMSv2）：DEK 加密数据，DEK 用 KEK（KMS provider）加密后存 etcd annotation。
-- 压缩 transformer：先压缩再加密。
+- `envelopeTransformer`（KMSv2）：DEK 加密数据，DEK 用 KEK（KMS provider）加密后存 etcd annotation（`storage/value/encrypt/envelope/kmsv2/envelope.go` · `kmsv2EnvelopeTransformer.TransformToStorage`）。
+- 压缩 transformer：先压缩再加密（`storage/value/compression/compression.go` · `compressedValue.TransformToStorage`）。
 
 ### 5.4 Watch 与 Watch Cache
 
-- **etcd3 `s.Watch`**（store.go `s.Watch+0`，:1115）：打开 etcd watch，把 etcd 事件转为 Kubernetes watch.Event。
-- **`Cacher.Watch`**（cacher/cacher.go `Cacher.Watch+0`，:797）：**内存 watch cache**。List 一次全量到内存，后续 watch 从内存 buffer 服务，**不打 etcd**。这是读扩展的关键——大量 watch 客户端共享一份内存 buffer。
+- **etcd3 `store.Watch`**（`store.go` · `store.Watch` `+0`）：打开 etcd watch，把 etcd 事件转为 Kubernetes watch.Event。
+- **`Cacher.Watch`**（`storage/cacher/cacher.go` · `Cacher.Watch` `+0`）：**内存 watch cache**。`Cacher`（同文件 · `Cacher` `+0`）由 `NewCacherFromConfig` 构造，List 一次全量到内存，后续 watch 从内存 buffer 服务，**不打 etcd**。这是读扩展的关键——大量 watch 客户端共享一份内存 buffer。
 
 **读路径分流：** `Store.Get/List/Watch` 经 storage factory 注入的可能是 `Cacher` 包装的 etcd3 store。命中 cache 的读不打 etcd。
 
@@ -476,7 +477,7 @@ aggregator 在最外层，持有 `APIService` 资源表。每个 `APIService` �
 
 ### 6.2 `proxyHandler.ServeHTTP`
 
-`proxyHandler`（handler_proxy.go `proxyHandler` struct，:51）是聚合代理核心。`proxyHandler.ServeHTTP`（handler_proxy.go `proxyHandler.ServeHTTP+0`，:107）：
+`proxyHandler`（`staging/src/k8s.io/kube-aggregator/pkg/apiserver/handler_proxy.go` · `proxyHandler` `+0`）是聚合代理核心。`proxyHandler.ServeHTTP`（同文件 · `proxyHandler.ServeHTTP` `+0`）：
 
 ```text
 proxyHandler.ServeHTTP(w, req)
@@ -493,7 +494,7 @@ proxyHandler.ServeHTTP(w, req)
 
 ### 6.3 CRD 服务（apiextensions）
 
-- `crdHandler.getOrCreateServingInfoFor`（customresource_handler.go `crdHandler.getOrCreateServingInfoFor+0`，:617）：为每个 CRD 按需构建动态 REST handler（`serveResource`），缓存 serving info。
+- `crdHandler.getOrCreateServingInfoFor`（`staging/src/k8s.io/apiextensions-apiserver/pkg/apiserver/customresource_handler.go` · `crdHandler.getOrCreateServingInfoFor` `+0`）：为每个 CRD 按需构建动态 REST handler（`serveResource`），缓存 serving info。
 - CRD 请求 → apiextensions-apiserver → 动态 handler → CRD storage（etcd）。
 - CRD 变更（新增/更新）触发 **establish controller** 把 CRD 标记为 established（可服务）。
 
@@ -514,8 +515,8 @@ proxyHandler.ServeHTTP(w, req)
             └─ APIInstaller 注册的路由 → CreateResource → createHandler
                  ├─ admission.Admit（mutating）
                  ├─ validation
-                 └─ Store.Create（registry Store e.Create+0）
-                      └─ etcd3 s.Create+0
+                 └─ Store.Create（registry Store · `Store.Create`）
+                      └─ store.Create（etcd3 · `store.Create`，实现 `storage.Interface.Create`）
                            ├─ PrepareObjectForStorage
                            ├─ Encode
                            ├─ prepareKey
@@ -530,20 +531,37 @@ proxyHandler.ServeHTTP(w, req)
 
 ### 8.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上用 `grep -n`/`sed -n`/`awk` 复核（apiserver/aggregator/apiextensions 源码自 `782c049` 起无漂移）：
-- `Run+0`/`CreateServerChain+0`/`CreateKubeAPIServerConfig+0`（server.go:152/:189/:213）
-- `DefaultBuildHandlerChain+0`（config.go:1078）
-- `NewAPIServerHandler+0`（handler.go:73）、`director+0`（:115）
-- `APIInstaller.Install+0`（installer.go:196）、`registerResourceHandlers+0`（:288）、`restfulDeleteResource+0`（:1313）
-- `createHandler+0`（create.go:53）、`CreateResource+0`（:245）、`UpdateResource+0`（update.go:51）、`PatchResource+0`（patch.go:71）
-- 读路径 handler 同在 get.go：`GetResource+0`（:87）、`ListResource+0`（:168）、`handleWatch+0`（:258）、`handleList+0`（:314）
-- `e.Create+0`（registry store.go:564）、`e.create+0`（:595，内部 BeforeCreate+24/:619、createValidation+29/:624、Storage.Create+49/:644）
-- `BeforeCreate+0`（registry/rest/create.go:103）、`BeforeUpdate+0`（update.go:114）
-- `s.Create+0`（etcd3 store.go:293，加密 s.Create+35、OptimisticPut s.Create+43）、`s.GuaranteedUpdate+0`（:437）、`refreshOnError+0`（txn.go:148）
-- `prefixTransformers.TransformToStorage+0`（transformer.go:172）
-- `Cacher.Watch+0`（cacher.go:797）
-- `proxyHandler.ServeHTTP+0`（handler_proxy.go:107）、`getOrCreateServingInfoFor+0`（customresource_handler.go:617）
-- `NewChainHandler+0`（chain.go:26）、`WithAuthentication+0`（authentication.go:46）、`WithAuthorization+0`（authorization.go:61）
+本专题所有「符号+偏移」均在基准 `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4` 上用 MCP `codegraph_explore` 回核（下列均确认为当前定义行；行号请用文档库自带校验脚本实时获取，本文不写绝对行号）：
+
+| 锚点 | 文件 |
+|---|---|
+| `Run` / `CreateServerChain` / `CreateKubeAPIServerConfig` | `cmd/kube-apiserver/app/server.go` |
+| `DefaultBuildHandlerChain` | `staging/src/k8s.io/apiserver/pkg/server/config.go` |
+| `NewAPIServerHandler` / `director` | `staging/src/k8s.io/apiserver/pkg/server/handler.go` |
+| `APIInstaller.Install` / `APIInstaller.registerResourceHandlers` / `restfulDeleteResource` | `staging/src/k8s.io/apiserver/pkg/endpoints/installer.go` |
+| `createHandler` / `CreateResource` | `staging/src/k8s.io/apiserver/pkg/endpoints/handlers/create.go` |
+| `UpdateResource` | `staging/src/k8s.io/apiserver/pkg/endpoints/handlers/update.go` |
+| `PatchResource` | `staging/src/k8s.io/apiserver/pkg/endpoints/handlers/patch.go` |
+| `GetResource` / `ListResource` / `handleWatch` / `handleList` | `staging/src/k8s.io/apiserver/pkg/endpoints/handlers/get.go` |
+| `Store.Create` / `Store.create` / `Store.Update` / `Store.Get` / `Store.List` / `Store.Delete` / `Store.Watch` | `staging/src/k8s.io/apiserver/pkg/registry/generic/registry/store.go` |
+| `BeforeCreate` / `AdmissionToValidateObjectFunc` | `staging/src/k8s.io/apiserver/pkg/registry/rest/create.go` |
+| `BeforeUpdate` / `AdmissionToValidateObjectUpdateFunc` | `staging/src/k8s.io/apiserver/pkg/registry/rest/update.go` |
+| `store.Create` / `store.GuaranteedUpdate` / `store.Watch` / `store.prepareKey` | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` |
+| `GuaranteedUpdate` / `refreshOnError` / `TxnDelegator` | `staging/src/k8s.io/apiserver/pkg/storage/txn.go` |
+| `Transformer` / `prefixTransformers.TransformToStorage` | `staging/src/k8s.io/apiserver/pkg/storage/value/transformer.go` |
+| `Cacher.Watch` / `Cacher` | `staging/src/k8s.io/apiserver/pkg/storage/cacher/cacher.go` |
+| `proxyHandler.ServeHTTP` / `proxyHandler` | `staging/src/k8s.io/kube-aggregator/pkg/apiserver/handler_proxy.go` |
+| `crdHandler.getOrCreateServingInfoFor` | `staging/src/k8s.io/apiextensions-apiserver/pkg/apiserver/customresource_handler.go` |
+| `NewChainHandler` | `staging/src/k8s.io/apiserver/pkg/admission/chain.go` |
+| `WithAuthentication` | `staging/src/k8s.io/apiserver/pkg/endpoints/filters/authentication.go` |
+| `WithAuthorization` | `staging/src/k8s.io/apiserver/pkg/endpoints/filters/authorization.go` |
+| `WithAudit` / `evaluatePolicyAndCreateAuditEvent` | `staging/src/k8s.io/apiserver/pkg/endpoints/filters/audit.go` |
+| `WithImpersonation` | `staging/src/k8s.io/apiserver/pkg/endpoints/filters/impersonation/impersonation.go` |
+| `WithConstrainedImpersonation` | `staging/src/k8s.io/apiserver/pkg/endpoints/filters/impersonation/constrained_impersonation.go` |
+| `Config.New`（authenticator 装配） | `pkg/kubeapiserver/authenticator/config.go` |
+| `Interface`（storage）/ `Interface`（admission） | `storage/interfaces.go` / `admission/interfaces.go` |
+
+**全部偏移为 `+0`（声明行）**，除正文标注的体内偏移（`store.Create` `+35` 加密、`+43` OptimisticPut；`Config.New` `+21` x509、`+34` legacy-SA、`+41` projected-SA、`+99` tokenunion、`+131` union、`+135` anonymous；`createHandler` `+135` validate 回调、`+150` mutating Admit；`Store.create` `+24`/`+29`/`+49`）。上述体内偏移以 `codegraph_explore` 返回的定义行为 `+0` 推算。
 
 ### 8.2 生产实测
 
