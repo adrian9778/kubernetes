@@ -3,7 +3,7 @@
 # Garbage Collector 垃圾回收
 > **层级**：第四层——函数级源码解析。
 > **范围**：owner/dependent 依赖图维护、孤儿与悬挂引用判定、Foreground/Background/Orphan 三种级联删除。
-> **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区干净），Go 1.27.4。
+> **代码基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26），Go 1.27.4。
 > **锚点记法**：符号+偏移，函数定义行=+0；偏移为相对该符号定义的源码行差。
 
 ## 0. 生产视角
@@ -65,7 +65,7 @@ GC 的对外可见行为只有三类：
 
 ### 3.1 函数：NewGarbageCollector / NewComposedGarbageCollector
 **源码：** `garbagecollector.go:NewGarbageCollector+0`（:80）/ `NewComposedGarbageCollector+0`（:93）
-**执行流程：** NewGarbageCollector 先建 GraphBuilder；Composed 版经 `GraphBuilder.GetGraphResources+0`（:1016）取出两队列与 absentOwnerCache 完成 GC 装配。接线处在 `cmd/kube-controller-manager/app/core.go`。
+**执行流程：** NewGarbageCollector 先建 GraphBuilder；Composed 版经 `graph_builder.go:GetGraphResources+0`（:1016，`gb.GetGraphResources`）取出两队列与 absentOwnerCache 完成 GC 装配。接线处在 `cmd/kube-controller-manager/app/core.go`。
 
 ### 3.2 函数：Run
 **源码：** `garbagecollector.go:GarbageCollector.Run+0`（:129）
@@ -303,7 +303,7 @@ orphan workers → orphanDependents → removeFinalizer
 - **环检测防御**：owner/dependent 相互引用时 `attemptToDeleteItem` 走 `unblockOwnerReferences` patch 打断环，避免死锁。
 
 ### 10.2 验证
-- **源码锚点**：本稿全部符号+偏移经 grep/read 在当前基准（master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`）逐一核对，证据见 `.progress/evidence/15.md`。
+- **源码锚点**：本稿全部符号+偏移经 codegraph/MCP + grep/read 在当前基准（adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`，2026-11-26）逐一核对，证据见 `.progress/evidence/15.md`。
 - **关键修正已落实**：`GetGraphResources` 归属 graph_builder.go（`GetGraphResources+0`）；`event`/`monitor`/`monitors` 归属 graph_builder.go；`attemptToDeleteItem` 后半段偏移前移 9～35；`deleteWithPropagationPolicy` 无（0 命中）。
 - **零漂移锚点**：`GarbageCollector+0`（:61）、`GraphBuilder+0`（:82）、`node+0`（:63）、`concurrentUIDToNode+0`（:239）、`ReferenceCache+0`（:24）及全部 node 方法、garbagecollector.go/graph_builder.go/operations.go 各函数定义行均与旧文一致。
 - **未确认项**：无。
