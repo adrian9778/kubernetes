@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 **kube-aggregator 的代理转发**讲透：`proxyHandler.ServeHTTP` 全流程（APIService 解析 → 早退守卫 → 后端 endpoint 解析 → 请求改写 → transport 构建 → UpgradeAware 转发 → 错误处理）。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `r.ServeHTTP+0`。
 >
@@ -151,11 +151,11 @@ GET /apis/custom.metrics.k8s.io/v1beta1/...
 
 ### 6.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
-- `proxyHandler+0`（handler_proxy.go:51）、`localDelegate`（:53）、`proxyHandlingInfo`（:71，local :73/transportBuildingError :81/proxyRoundTripper :83/serviceAvailable :88）
-- `proxyError+0`（:94）、`r.ServeHTTP+0`（:107）、`r.Object+0`（:197）、`r.Error+0`（:201）、`r.setServiceAvailable+0`（:209）、`r.updateAPIService+0`（:215）
-- `aggregatorEndpointRouting.ResolveEndpoint+0`（resolvers.go:45）、`aggregatorClusterRouting.ResolveEndpoint+0`（:61）
-- `BuildTransportConfig+0`（remote_available_controller.go:163）
+本专题所有「符号+偏移」均在 adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4` 上复核：
+- `proxyHandler`+0、`localDelegate`+0（proxyHandler 字段）、`proxyHandlingInfo`+0（local :73 / transportBuildingError :81 / proxyRoundTripper :83 / serviceAvailable :88 为其字段）
+- handler_proxy.go：`proxyError`+0、`proxyHandler.ServeHTTP`+0、`responder.Object`+0、`responder.Error`+0、`proxyHandler.setServiceAvailable`+0、`proxyHandler.updateAPIService`+0
+- resolvers.go：`ResolveEndpoint`+0（`aggregatorEndpointRouting` 与 `aggregatorClusterRouting` 两个 receiver 各一份）
+- `staging/src/k8s.io/kube-aggregator/pkg/controllers/status/remote/remote_available_controller.go` · `BuildTransportConfig` `+0`
 
 ### 6.2 生产实测
 
