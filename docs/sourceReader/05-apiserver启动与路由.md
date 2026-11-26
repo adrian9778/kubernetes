@@ -4,7 +4,7 @@
 
 > **层级**：第四层——函数级源码解析。
 > **范围**：进程启动、三层委托 server 构造、handler 中间件链、HTTP 分流（director）、RESTStorage 到 go-restful 路由的生成。
-> **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区干净），Go 1.27.4。
+> **代码基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4）。旧基准 `8893923938…`（2026-11-18 master）→ 本版漂移区间内 apiserver 启动/路由链符号定义行零变化（抽查结论见 §6.5）。
 > **锚点记法**：源码引用用「符号 + 偏移」；函数定义行 = `+0`，其余为相对定义行的偏移。
 
 ## 1. 生产视角
@@ -167,6 +167,7 @@ CreateServerChain (+0)
 3. 取 `apiGroupInfo.VersionedResourcesStorageMap["v1"]`（+76，无则建空 map）
 4. serviceAccount 特殊处理（+87 ～ +95）
 5. **pods 分支**（+97）：`storage["pods"] = podStorage.Pod`；子资源 map（+100 ～ +109）：attach/status/log/exec/portforward/proxy/binding/ephemeralcontainers/resize，条件加 eviction/dynamic；循环写入 `storage[resource+"/"+subresource]`（+117 ～ +121）
+   - **本版变化（`pkg/registry/core/rest/storage_core.go` · `(*legacyProvider).NewRESTStorage` `+114`）：** `dynamic` 子资源的注册条件从「仅 `DynamicContainers` 开启」扩为「`DynamicContainers` **或** `DynamicNodeLocalEphemeralVolumes` 任一开启」；满足即在 `subresources["dynamic"] = podStorage.Dynamic` 追加动态子资源。子资源写回循环与 `DisabledPodSubresources` 过滤不变。
 6. 其余核心资源（bindings、podtemplates、replicationcontrollers、serviceaccounts 等）各自写入 map（+123 起）
 **关键动作：** PodStorage 的 `Pod` 放入 `VersionedResourcesStorageMap["v1"]["pods"]`；binding/status/eviction/log/exec 等子资源各自占 map 一项（`pods/<sub>`）。
 
@@ -460,9 +461,12 @@ CreateServerChain
 
 ### 6.5 验证与未确认
 
-- **已逐点回源码确认**（HEAD 8893923938107170c86eb4b8cc2b7225b4e44e9b）：全部锚点与语义修正均与证据一致，无符号消失。
+- **已逐点回源码确认**（HEAD 6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4）：全部锚点与语义修正均与证据一致，无符号消失。
 - **未确认项：** 无。所有标注均为源码可证或证据已判定；未标注 `[源码未确认]` 项。
+- **本版核对（旧基准 `8893923938…` → `6bf0bfd51d7…`，168 提交）：** 启动与路由链核心符号定义行零漂移——`DefaultBuildHandlerChain` 仍 `[staging] apiserver/pkg/server/config.go` `+0`（:1078）、`CreateServerChain` 仍 `cmd/kube-apiserver/app/server.go` `+0`（:189），`NewAPIServerHandler`/`director`/`director.ServeHTTP`/`WithAuthentication`/`WithAuthorization`/`WithConditionsAwareAuthorization`/`InstallAPIs`/`c.New`/`main`/`NewAPIServerCommand`/`Run` 全部与文内偏移一致。范围文件中仅 `storage_core.go` 变化（pods `dynamic` 子资源 gate 扩条件，见 §4 `NewRESTStorage`），已补写；`config.go`/`handler.go`/`genericapiserver.go`/`installer.go`/`groupversion.go`/`filters/authentication.go`/`filters/authorization.go`/`controlplane/apiserver/*`/`instance.go`/`pod/storage.go` 在漂移区间内均未改动。
 
 ---
+
+> **本版核对：** 与旧基准 `8893923938…`（2026-11-18）相比，apiserver 启动序列与路由链（三层委托构造、`DefaultBuildHandlerChain` 中间件链、director 分流、RESTStorage → go-restful 路由生成）符号定义行与调用关系**全部一致**；唯一语义变化为 `legacyProvider.NewRESTStorage` 的 pods `dynamic` 子资源注册 gate 扩为「`DynamicContainers` 或 `DynamicNodeLocalEphemeralVolumes`」（§4 已补写）。本版无其他增删。
 
 [上一篇](04-kubectl客户端.md) · [总目录](README.md) · [下一篇](06-apiserver请求处理与etcd.md)
