@@ -123,9 +123,9 @@ ServeHTTP(w, req)                                          r.ServeHTTP+0
 
 ```text
 GET /apis/custom.metrics.k8s.io/v1beta1/...
-└── aggregator 路由匹配 APIService → proxyHandler.ServeHTTP（`staging/src/k8s.io/kube-aggregator/pkg/apiserver/handler/proxy/proxy.go` · `proxyHandler.ServeHTTP` `+0`）
+└── aggregator 路由匹配 APIService → proxyHandler.ServeHTTP（`staging/src/k8s.io/kube-aggregator/pkg/apiserver/handler_proxy.go` · `proxyHandler.ServeHTTP` `+0`）
      ├── 守卫 1-5（local/不可用/transport 错/缺用户 → 早退）
-     ├── ResolveEndpoint（`staging/src/k8s.io/kube-aggregator/pkg/apiserver/handler/proxy/resolvers.go` · `ResolveEndpoint` `+0`）→ 后端 Service Host
+     ├── ResolveEndpoint（`staging/src/k8s.io/kube-aggregator/pkg/apiserver/resolvers.go` · `ResolveEndpoint` `+0`，`aggregatorEndpointRouting`/`aggregatorClusterRouting` 各一份）→ 后端 Service Host
      ├── 构造 location（https + Host + 原 Path/Query）
      ├── NewRequestForProxy 改写请求
      ├── NewAuthProxyRoundTripper 注入原始用户身份
