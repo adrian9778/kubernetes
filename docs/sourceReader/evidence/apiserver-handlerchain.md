@@ -2,7 +2,7 @@
 
 - 仓库：`/Users/vincent/workspace/12_GO/src/github.com/kubernetes/kubernetes`
 - 基线：**`3596eb69d25`**（2026-11-26 按 source-doc-refresh 从 `b5bcafc8ce9` 刷新：跨 166 提交/210 文件，逐条回核全部绝对行锚点并修正 24 处漂移，0 符号消失；行号以 `3596eb69d25` 工作区为准）
-- 记法：本篇锚点采用「文件路径:符号名」+ 函数内偏移 `+N`（`+0`=签名行），按 source-doc-refresh §2 / source-doc-4layer 事实红线不钉绝对行号（行号随重构漂移）。需要当前行号时按符号 `grep -n` 或用 `sr_tools.py offset` 现场取。
+- 记法：本篇锚点采用「文件路径:符号名」+ 函数内偏移 `+N`（`+0`=签名行），按 source-doc-refresh §2 / source-doc-4layer 事实红线不钉绝对行号（行号随重构漂移）。需要当前行号时按符号 `grep -n` 或用 sr_tools offset 现场取。
 - 路径校正（⚠️ 任务描述与实际不符）：
   - 任务写 `pkg/server/filters/audit.go`、`pkg/server/filters/impersonation.go` → 实际在 **`staging/src/k8s.io/apiserver/pkg/endpoints/filters/`**（`audit.go`、`impersonation/impersonation.go`）；`pkg/server/filters/` 下只有 cors/goaway/hsts/longrunning/maxinflight/priority-and-fairness/timeout/waitgroup/watch_termination/with_retry_after/wrap。
   - 任务写 RBAC 在 `plugin/pkg/authorizer/rbac/` → 实际为 **`plugin/pkg/auth/authorizer/rbac/`**。

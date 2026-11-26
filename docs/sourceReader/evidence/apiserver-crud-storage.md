@@ -1,7 +1,7 @@
 # API Server 证据：CRUD handlers + storage 层 (etcd3) + watch 机制
 
 - 仓库基线：**`3596eb69d25`**（2026-11-26 按 source-doc-refresh 从 `b5bcafc8ce9` 刷新：逐条回核全部绝对行锚点，修正 cacher.go 22 处漂移——该文件因上游 PR #144133 整体下移，0 符号消失；行号以 `3596eb69d25` 工作区为准）
-- 记法：本篇锚点采用「文件路径:符号名」+ 函数内偏移 `+N`（`+0`=签名行），按 source-doc-refresh §2 / source-doc-4layer 事实红线不钉绝对行号（行号随重构漂移）。需要当前行号时按符号 `grep -n` 或用 `sr_tools.py offset` 现场取。
+- 记法：本篇锚点采用「文件路径:符号名」+ 函数内偏移 `+N`（`+0`=签名行），按 source-doc-refresh §2 / source-doc-4layer 事实红线不钉绝对行号（行号随重构漂移）。需要当前行号时按符号 `grep -n` 或用 sr_tools offset 现场取。
 - 核实用法：`grep -n` 定位 + `read`（实际读取行）验证每个锚点。
 
 ---

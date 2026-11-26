@@ -382,7 +382,7 @@ getCrossNodesVictims
 
 ### 3.1 代码回核与生产实测记录
 
-- **代码回核**：本专题锚点均在基准 `6bf0bfd51d7` 上用 `codegraph_explore` 回核，抽样 5 处：`DefaultPreemption.PostFilter`、`Evaluator.Preempt`、`Evaluator.DryRunPreemption`、`Executor.ActuatePodPreemption`、`canReleaseOnNode`（定义行见 §3.3 索引表，行号由 `sr_tools.py offset` 实时获取）。`prepareCandidate` 经回核为 `+0` 定义（旧文档记的 `:370` 是注释行，已修正）。
+- **代码回核**：本专题锚点均在基准 `6bf0bfd51d7` 上用 `codegraph_explore` 回核，抽样 5 处：`DefaultPreemption.PostFilter`、`Evaluator.Preempt`、`Evaluator.DryRunPreemption`、`Executor.ActuatePodPreemption`、`canReleaseOnNode`（定义行见 §3.3 索引表，行号由 sr_tools offset 实时获取）。`prepareCandidate` 经回核为 `+0` 定义（旧文档记的 `:370` 是注释行，已修正）。
 - **生产实测**：**未实测** `[待运行验证]`。事件观测（`Scheduled` / `Preempted` / `FailedScheduling`）、`nominatedNodeName` 字段、被驱逐 Pod 的 Terminating 状态与 `DisruptionTarget` 条件均为代码推断，未在真实集群执行抢占验证。
 
 ### 3.2 已知缺口和待验证事项
