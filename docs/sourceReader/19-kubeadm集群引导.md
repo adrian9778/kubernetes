@@ -4,7 +4,7 @@
 
 > **层级**：第四层——函数级源码解析。
 > **范围**：kubeadm 命令组织、init 阶段工作流、静态 Pod 控制面落盘、join 与 bootstrap token。
-> **基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区干净），Go 1.27.4。
+> **基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净），Go 1.27.4。
 
 ---
 
@@ -162,12 +162,12 @@ Preflight → ControlPlanePrepare（仅 control-plane 节点）→ CheckEtcd
 
 | 函数 | 锚点 | 职责 |
 |---|---|---|
-| `token.BuildInsecureBootstrapKubeConfig` | 定义 `cmd/kubeadm/app/discovery/token/token.go#BuildInsecureBootstrapKubeConfig+0`（:155）；调用点 `cmd/kubeadm/app/cmd/join.go#newCmdJoin+433`（:598） | 用 token 建临时 bootstrap kubeconfig |
-| `configutil.FetchInitConfigurationFromCluster` | 定义 `cmd/kubeadm/app/util/config/cluster.go#FetchInitConfigurationFromCluster+0`（:58）；调用点 `cmd/kubeadm/app/cmd/join.go#newCmdJoin+557`（:722） | 拉集群配置（API bind 端口、版本） |
+| `token.BuildInsecureBootstrapKubeConfig` | 定义 `cmd/kubeadm/app/discovery/token/token.go#BuildInsecureBootstrapKubeConfig+0`（:155）；调用点 `cmd/kubeadm/app/cmd/join.go#joinData.Client+16`（:598，`joinData.Client` 内） | 用 token 建临时 bootstrap kubeconfig |
+| `configutil.FetchInitConfigurationFromCluster` | 定义 `cmd/kubeadm/app/util/config/cluster.go#FetchInitConfigurationFromCluster+0`（:58）；调用点 `cmd/kubeadm/app/cmd/join.go#fetchInitConfiguration+4`（:722） | 拉集群配置（API bind 端口、版本） |
 | `CreateBootstrapConfigMapIfNotExists` | `cmd/kubeadm/app/phases/bootstraptoken/clusterinfo/clusterinfo.go#CreateBootstrapConfigMapIfNotExists+0`（:42） | 建 `cluster-info` ConfigMap |
 | `NewKubeletStartPhase` | `cmd/kubeadm/app/cmd/phases/join/kubelet.go#NewKubeletStartPhase+0`（:50） | TryStopKubelet → WriteInstanceConfigToDisk/WriteConfigToDisk → kubeletphase.TryStartKubelet（`NewKubeletStartPhase+180`，调用点） |
 
-> **修正说明（相对旧版）**：`BuildInsecureBootstrapKubeConfig` 与 `FetchInitConfigurationFromCluster` 的**定义**均不在 join.go 内——分别迁移至 `discovery/token/token.go#BuildInsecureBootstrapKubeConfig+0` 与 `util/config/cluster.go#FetchInitConfigurationFromCluster+0`，join.go 的 `newCmdJoin+433`/`newCmdJoin+557` 现仅剩调用点（旧文按「join.go 内定义」标注需更正）。
+> **修正说明（相对旧版）**：`BuildInsecureBootstrapKubeConfig` 与 `FetchInitConfigurationFromCluster` 的**定义**均不在 join.go 内——分别迁移至 `discovery/token/token.go#BuildInsecureBootstrapKubeConfig+0` 与 `util/config/cluster.go#FetchInitConfigurationFromCluster+0`，join.go 的调用点分别为 `joinData.Client+16`（:598）与 `fetchInitConfiguration+4`（:722）——均不在 `newCmdJoin` 体内（旧文按「join.go 内定义」且归到 `newCmdJoin` 偏移需更正）。
 
 **证书引导语义：** kubelet 先用 bootstrap token 向 apiserver 申请客户端证书（CSR），`AutoApproveNodeBootstrapTokens` 等预置 RBAC 自动批准；后续证书轮转走 `AutoApproveNodeCertificateRotation`。kubelet 取得正式证书后脱离 bootstrap 身份。
 
@@ -211,8 +211,8 @@ kubeadm 的设计把「引导」与「运行」彻底分离：它只负责把集
 | kubeadm 是否在 staging | 否（`staging/src/k8s.io/kubeadm/` 不存在，go.mod 无引用） |
 | `cmd/kubeadm/` 是否只剩 main | 否（仍含完整 `app/`、`apis/`、`discovery/`、`util/`、`constants/`） |
 | `WriteStaticPodToDisk` 定义 | `WriteStaticPodToDisk+0`（旧 :175，+16） |
-| `BuildInsecureBootstrapKubeConfig` 定义 | `BuildInsecureBootstrapKubeConfig+0`（`newCmdJoin+433` 仅调用点） |
-| `FetchInitConfigurationFromCluster` 定义 | `FetchInitConfigurationFromCluster+0`（`newCmdJoin+557` 仅调用点） |
+| `BuildInsecureBootstrapKubeConfig` 定义 | `BuildInsecureBootstrapKubeConfig+0`（调用点 `joinData.Client+16`） |
+| `FetchInitConfigurationFromCluster` 定义 | `FetchInitConfigurationFromCluster+0`（调用点 `fetchInitConfiguration+4`） |
 | workflow Runner 路径 | `cmd/kubeadm/app/cmd/phases/workflow/runner.go#Runner+0`（旧文 `app/cmd/workflow/` 需更正） |
 | 其余锚点 | 零漂移（main :24、Run :32、NewKubeadmCommand :32、newCmdInit :112、newInitData :307、newCmdJoin :165、newCmdReset :214、NewCmdUpgrade :44、phases 全部、ComponentPod :63、GetStaticPodFilepath :603、NewKubeletStartPhase :50、TryStartKubelet 调用点 :230、CreateBootstrapConfigMapIfNotExists :42） |
 
