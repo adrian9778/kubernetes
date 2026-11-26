@@ -1,0 +1,62 @@
+{
+  "baseline_doc": "b5bcafc8ce9",
+  "target_head": "3596eb69d25",
+  "head_full": "3596eb69d25147bd790810090712c79f02426b90",
+  "branch": "adrian",
+  "worktree": "clean except untracked docs/sourceReader/ and scripts/ (scripts/ now committed)",
+  "commits_doc_to_head": 166,
+  "changed_files_in_scope": 210,
+  "units": [
+    {
+      "file": "docs/sourceReader/.progress/evidence/apiserver-handlerchain.md",
+      "status": "completed",
+      "phase": "verified",
+      "anchors_total": 209,
+      "ok": 174,
+      "drift_fixed": 24,
+      "symbols_gone": 0,
+      "drift_files": [
+        "authentication/authenticator/interfaces.go",
+        "authentication/request/union/union.go",
+        "authorization/authorizer/interfaces.go",
+        "kubeapiserver/authorizer/config.go",
+        "kubeapiserver/options/authorization.go",
+        "server/options/authorization.go",
+        "auth/authorizer/rbac/rbac.go",
+        "admission/interfaces.go",
+        "admission/handler.go",
+        "admission/chain.go",
+        "endpoints/handlers/create.go"
+      ]
+    },
+    {
+      "file": "docs/sourceReader/.progress/evidence/apiserver-crud-storage.md",
+      "status": "completed",
+      "phase": "verified",
+      "anchors_total": 153,
+      "ok": 136,
+      "drift_fixed": 22,
+      "symbols_gone": 0,
+      "drift_files": [
+        "storage/cacher/cacher.go (upstream PR #144133 shifted file +1..+5)"
+      ]
+    }
+  ],
+  "verifier": "subagent anchor-verify (section-aware, def vs call-site discriminated) + direct grep re-verification of all 46 corrections",
+  "known_drift_confirmed_by_hand": [
+    "storage/cacher/cacher.go shifted +1..+5 lines (upstream PR #144133 deliver events sharing a resourceVersion): Watch 797->798, watch 848->849, registerWatcherLocked 959->960, initWatcherIntervalLocked 970->972, Cacher.Get 1028->1030, GetList 1096->1098, processEvent 1244->1246, dispatchEvents 1252->1254, setCachingObjects 1314->1316, dispatchEvent 1345->1347, startDispatching 1449->1454, allMatchingWatchers 1479->1484, Compact 1621->1626",
+    "authentication/request/union/union.go: unionAuthRequestHandler 23->27, AuthenticateRequest 56->53 (New=36, NewFailOnError=45 unchanged)",
+    "authorization/authorizer/interfaces.go: UnconditionalAuthorizer 83->86, AuthorizerFunc 135->133, AttributesRecord 163->159"
+  ],
+  "notes": "config.go DefaultBuildHandlerChain=1078 and BuildHandlerChainWithStorageVersionPrecondition=1072 still exact. handler.go APIServerHandler.ServeHTTP=187 / director.ServeHTTP=121 still exact.",
+  "refresh_date": "2026-11-26",
+  "content_audit_2026_11_26": {
+    "scope": "b5bcafc8ce9..HEAD (166 commits), 文档覆盖的 apiserver server/handlers/registry/storage/cacher + filters/admission/authn/authz 包",
+    "core_files_changed": "12 个核心描述文件中仅 cacher/cacher.go 有非 merge 改动(+7/-2)；config.go/handler.go/全部 CRUD handlers/store.go/watcher.go/txn.go/watch_cache.go 均 0 非merge提交",
+    "new_capability": "cacher.go PR #144133：dispatchEvent 跳过判据 dispatchedResourceVersion→syncedResourceVersion；cacheWatcher 新增 syncedResourceVersion 字段；setCachingObjects 改 DeepCopy —— 已补入 §4.5 行为变更注记",
+    "removed_capability": "无（26 个核心 filter + 全部 CRUD/storage handler 符号在 HEAD 全部存在）",
+    "out_of_scope": "rbac/bootstrappolicy 新增 feature-gated kube-service-serving-signer ClusterRole —— 属 bootstrap RBAC 角色数据，非本两篇(请求链/存储)覆盖范围",
+    "test_only": "endpoints/filters/authentication_test.go、storage 各 *_test.go 改动不影响正文",
+    "conclusion": "内容层面已同步：无遗漏新能力、无未标记的删除、46 处行漂移已修、1 处行为变更已补注"
+  }
+}

@@ -1,0 +1,80 @@
+# Basename → canonical repo path overrides for symbol+offset migration.
+# Format: basename=path/to/file.go
+# Subagents: pass each line as `basename=path` arg to go_resolve.py.
+# For dual-meaning basenames (config.go/create.go/store.go/update.go/algorithm.go/
+# framework.go/controller.go), resolve PER-REFERENCE by reading the doc line's
+# context (it names the symbol/package); verify real path with
+# `git ls-files '*<basename>' | grep -v vendor/`.
+
+# kubectl / cli
+run.go=staging/src/k8s.io/kubectl/pkg/cmd/run/run.go
+helper.go=staging/src/k8s.io/cli-runtime/pkg/resource/helper.go
+# apiserver core
+config.go=staging/src/k8s.io/apiserver/pkg/server/config.go
+create.go=staging/src/k8s.io/apiserver/pkg/endpoints/handlers/create.go
+update.go=staging/src/k8s.io/apiserver/pkg/endpoints/handlers/update.go
+patch.go=staging/src/k8s.io/apiserver/pkg/endpoints/handlers/patch.go
+get.go=staging/src/k8s.io/apiserver/pkg/endpoints/handlers/get.go
+store.go=staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go
+txn.go=staging/src/k8s.io/apiserver/pkg/storage/txn.go
+client.go=staging/src/k8s.io/apiserver/pkg/storage/etcd3/client.go
+apiserver.go=staging/src/k8s.io/apiserver/pkg/server/apiserver.go
+handler.go=staging/src/k8s.io/apiserver/pkg/server/handler.go
+authentication.go=staging/src/k8s.io/apiserver/pkg/endpoints/filters/authentication.go
+authorization.go=staging/src/k8s.io/apiserver/pkg/endpoints/filters/authorization.go
+audit.go=staging/src/k8s.io/apiserver/pkg/endpoints/filters/audit.go
+impersonation.go=staging/src/k8s.io/apiserver/pkg/endpoints/filters/impersonation/impersonation.go
+chain.go=staging/src/k8s.io/apiserver/pkg/admission/chain.go
+transformer.go=staging/src/k8s.io/apiserver/pkg/storage/value/transformer.go
+lease_manager.go=staging/src/k8s.io/apiserver/pkg/storage/etcd3/lease_manager.go
+# scheduler
+algorithm.go=pkg/scheduler/algorithm.go
+schedule_one.go=pkg/scheduler/schedule_one.go
+scheduler.go=pkg/scheduler/scheduler.go
+framework.go=pkg/scheduler/framework/runtime/framework.go
+default_preemption.go=pkg/scheduler/framework/plugins/defaultpreemption/default_preemption.go
+preemption.go=pkg/scheduler/framework/preemption/preemption.go
+executor.go=pkg/scheduler/framework/preemption/executor.go
+manager.go=pkg/scheduler/framework/preemption/manager.go
+victims.go=pkg/scheduler/framework/preemption/victims.go
+# informer / client-go
+shared_informer.go=staging/src/k8s.io/client-go/tools/cache/shared_informer.go
+reflector.go=staging/src/k8s.io/client-go/tools/cache/reflector.go
+delta_fifo.go=staging/src/k8s.io/client-go/tools/cache/delta_fifo.go
+leaderelection.go=staging/src/k8s.io/client-go/tools/leaderelection/leaderelection.go
+leaselock.go=staging/src/k8s.io/client-go/tools/leaderelection/resourcelock/leaselock.go
+# kubelet
+kubelet.go=pkg/kubelet/kubelet.go
+pod_workers.go=pkg/kubelet/pod_workers.go
+worker.go=pkg/kubelet/prober/worker.go
+prober.go=pkg/kubelet/prober/prober.go
+prober_manager.go=pkg/kubelet/prober/prober_manager.go
+results_manager.go=pkg/kubelet/prober/results/results_manager.go
+status_manager.go=pkg/kubelet/status/status_manager.go
+generic.go=pkg/kubelet/pleg/generic.go
+evented.go=pkg/kubelet/pleg/evented.go
+pod.go=pkg/kubelet/util/format/pod.go
+kuberuntime_manager.go=pkg/kubelet/kuberuntime/kuberuntime_manager.go
+kuberuntime_container.go=pkg/kubelet/kuberuntime/kuberuntime_container.go
+csi_plugin.go=pkg/volume/csi/csi_plugin.go
+# controllers
+deployment_controller.go=pkg/controller/deployment/deployment_controller.go
+rolling.go=pkg/controller/deployment/rolling.go
+recreate.go=pkg/controller/deployment/recreate.go
+job_controller.go=pkg/controller/job/job_controller.go
+cronjob_controllerv2.go=pkg/controller/cronjob/cronjob_controllerv2.go
+daemon_controller.go=pkg/controller/daemon/daemon_controller.go
+replica_set.go=pkg/controller/replicaset/replica_set.go
+replica_set_utils.go=pkg/controller/replicaset/replica_set_utils.go
+garbagecollector.go=pkg/controller/garbagecollector/garbagecollector.go
+graph_builder.go=pkg/controller/garbagecollector/graph_builder.go
+deployment_util.go=pkg/controller/deployment/util/deployment_util.go
+daemonset_util.go=pkg/controller/daemon/util/daemonset_util.go
+controller_utils.go=pkg/controller/controller_utils.go
+proxier.go=pkg/proxy/iptables/proxier.go
+# aggregation / CRD
+handler_proxy.go=staging/src/k8s.io/kube-aggregator/pkg/apiserver/handler_proxy.go
+customresource_handler.go=staging/src/k8s.io/apiextensions-apiserver/pkg/apiserver/customresource_handler.go
+# device plugin
+devicemanager/manager.go=pkg/kubelet/cm/devicemanager/manager.go
+manager.go is dual -> see above; device manager explicitly: pkg/kubelet/cm/devicemanager/manager.go
