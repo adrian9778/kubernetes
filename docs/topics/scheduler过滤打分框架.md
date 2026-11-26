@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 kube-scheduler 调度周期里的**过滤（Filter）与打分（Score）插件框架**讲透：扩展点接口、frameworkImpl 执行器、候选集缩小→逐节点过滤→打分归一化→选节点的完整链路。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上用 `grep -n`/`sed -n` 复核。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上用 MCP `codegraph_explore` 复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `f.RunFilterPlugins+0`。
 >
@@ -68,27 +68,38 @@
 
 ```text
 SchedulePod(ctx, fw, state, podInfo)
-├── findNodesThatFitPod(...)          过滤：筛可行节点集
+├── findNodesThatFitPod(...)            过滤：筛可行节点集（[]NodeWithRank）
 ├── 无可行节点 → FitError（触发 PostFilter/抢占）
-├── 1 个可行节点 → 直接返回（跳过打分）
-└── prioritizeNodes(...)              打分：选最高分节点
+├── 1 个可行节点 或 firstFit → 按 Rank 选最优直接返回（跳过打分，+24）
+└── prioritizeNodes(..., feasibleNodes)  打分：选最高分节点（+42）
 ```
 
 ### 2.2 `findNodesThatFitPod`（algorithm.go `a.findNodesThatFitPod+0`，:351）
+
+返回 `([]NodeWithRank, *Diagnosis, nodeHint string, error)`——比早期版本多带一个 `nodeHint`（来自批处理模块的提示节点）。
 
 ```text
 findNodesThatFitPod(ctx, fw, state, podInfo)
 ├── prefilterNodes（+2）：
 │     └── RunPreFilterPlugins（framework.go f.RunPreFilterPlugins+0，:1119）
-│           └── 可返回节点子集（缩小候选集）
-└── findNodesThatPassFilters（+44）→ 见 §2.3
+│           └── 可返回节点子集（缩小候选集），另返回 pluginsWithNodes 集合
+├── 批处理启用时取 nodeHint（+12）
+├── 有 nominatedNodeName / nodeHint → evaluateNominatedNode（+27）先试单一候选节点
+├── getCandidateNodes（+37）：从 PreFilter 结果取候选集
+├── findNodesThatPassFilters（+44）→ 见 §2.3
+└── filterWithExtenders（+56）：HTTP extender 再过滤一轮
 ```
 
 ### 2.3 `findNodesThatPassFilters`（algorithm.go `a.findNodesThatPassFilters+0`，:449）
 
+签名：`(ctx, fw, state, pod, diagnosis, nodes []fwk.NodeInfo, numNodesToFind int32, allowRankNodes bool) → ([]NodeWithRank, error)`。
+
 ```text
-findNodesThatPassFilters(ctx, fw, state, podInfo, nodes, diagnosis)
-├── parallelize over nodes（并行评估）
+findNodesThatPassFilters(ctx, fw, state, pod, diagnosis, nodes, numNodesToFind, allowRankNodes)
+├── allowRankNodes && PodGroup 调度周期 && 多节点 → RunRankNodesPlugins（+22）重排节点
+├── 无 Filter 插件 → 直接取前 numNodesToFind 个 ranked 节点返回（+37）
+├── parallelize over nodes（并行评估，+46 起）
+│     └── nodeFilterCoordinator 协调：找到足够可行节点 / 命中更高 rank 即提前取消
 │     └── RunFilterPluginsWithNominatedPods（调用点 algorithm.go:506，函数内偏移 +57）
 │           ↑ 定义 frameworkImpl.RunFilterPluginsWithNominatedPods+0（framework.go:1467）
 ├── 每节点聚合 Filter 结果（可行 / 被哪个插件拒绝）
@@ -111,13 +122,17 @@ RunFilterPlugins(ctx, state, pod, nodeInfo)
 
 ### 3.1 `prioritizeNodes`（schedule_one.go `prioritizeNodes+0`，:644）
 
+签名：`(ctx, fw, state, pod, rankedNodes []framework.NodeWithRank) → ([]fwk.NodePluginScores, error)`——吃的是带 Rank 的节点，不再单独传 minRank。
+
 ```text
-prioritizeNodes(ctx, sched, fw, state, pod, nodes, minRank)
+prioritizeNodes(ctx, sched, fw, state, pod, rankedNodes)
+├── InPlacePodVerticalScalingSchedulerPreemption 未 deferred 才取 extenders（+9）
 ├── 按 minRank 过滤最低排名节点（+14～+27）
+├── 无 extender 且无 Score 插件 → 全部给 TotalScore=1 返回（+31）
 ├── RunPreScorePlugins（framework.go f.RunPreScorePlugins+0，:1547）（+43）
 ├── RunScorePlugins（framework.go f.RunScorePlugins+0，:1598）（+49）
 │     └── 返回 nodesScores（每节点每插件分 + TotalScore）
-├── 归一化 + 汇总 extender 分数（+49～）
+├── 归一化 + 汇总 extender 分数（+64～，extender 并发跑 goroutine 池）
 └── 返回 nodesScores（供 selectHost 选最高分）
 ```
 
@@ -137,7 +152,8 @@ RunScorePlugins(ctx, state, pod, nodes) → []NodePluginScores
 
 - **PreScore 可提前算权重**：如 `NodeAffinity` 的 Preferred 表达式权重在 PreScore 一次性算好，Score 时复用。
 - **归一化**：Score 插件原始分可能不在 0-100，`NormalizeScore` 统一到 0-100 再加权。
-- **跳过打分**：单可行节点直接返回（schedule_one.go :122 注释）。
+- **跳过打分**：单可行节点或 firstFit 直接返回（algorithm.go :185 注释、:186 判断）。
+- **选节点**：打分结果经 `framework.NewSortedScoredNodes(priorityList)` 建堆，`Pop()` 取最高分（algorithm.go :209）——早期版本的 `selectHost` 已由此取代。
 
 ---
 
@@ -145,7 +161,7 @@ RunScorePlugins(ctx, state, pod, nodes) → []NodePluginScores
 
 | 扩展点 | 接口定义 | 核心方法 |
 |---|---|---|
-| PreFilter | `PreFilterPlugin`（interface.go:539） | `PreFilter(ctx, state, pod) → (PreFilterResult, Status)` |
+| PreFilter | `PreFilterPlugin`（interface.go:539） | `PreFilter(ctx, state, pod, nodes []NodeInfo) → (PreFilterResult, Status)` + `PreFilterExtensions` |
 | Filter | `FilterPlugin`（:568） | `Filter(ctx, state, pod, nodeInfo) → Status` |
 | PostFilter | `PostFilterPlugin`（:597） | `PostFilter(ctx, state, pod, filteredNodeStatusMap) → (PostFilterResult, Status)` |
 | PreScore | `PreScorePlugin`（:657） | `PreScore(ctx, state, pod, nodes) → Status` |
@@ -167,16 +183,19 @@ SchedulePod (algorithm.go:162)
 ├── [过滤阶段]
 │    findNodesThatFitPod (algorithm.go:351)
 │    ├── prefilterNodes → RunPreFilterPlugins (framework.go:1119)   缩小候选集
+│    ├── [nominated/nodeHint] evaluateNominatedNode 先试单一候选节点
 │    └── findNodesThatPassFilters (algorithm.go:449)
+│         ├── [PodGroup+多节点] RunRankNodesPlugins 重排
 │         └── parallelize → RunFilterPluginsWithNominatedPods (:1467) 逐节点
 │              └── RunFilterPlugins (:1290) → Filter 插件逐个判断
+│    └── filterWithExtenders 再过滤一轮
 ├── 无可行 → FitError → PostFilter（抢占）/ Unschedulable
-├── 单可行 → 直接返回
+├── 单可行 / firstFit → 按 Rank 选最优直接返回
 └── [打分阶段]
      prioritizeNodes (schedule_one.go:644)
      ├── RunPreScorePlugins (framework.go:1547)
      ├── RunScorePlugins (framework.go:1598) → nodesScores（分×权重求和）
-     └── selectHost → 最高分节点（平局随机）
+     └── NewSortedScoredNodes().Pop() → 最高分节点（平局随机）
           └── Reserve → Permit → PreBind → Bind（写 apiserver）→ PostBind
 ```
 
@@ -186,7 +205,7 @@ SchedulePod (algorithm.go:162)
 
 ### 6.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
+本专题所有「符号+偏移」均在基准 `adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4` 上用 MCP `codegraph_explore` 复核：
 - `SchedulePod+0`（algorithm.go:162）、`a.findNodesThatFitPod+0`（:351）、`a.findNodesThatPassFilters+0`（:449）、过滤调用点（:506，+57）
 - `prioritizeNodes+0`（schedule_one.go:644）、打分调用点 RunScorePlugins（:693，+49）
 - `f.RunPreFilterPlugins+0`（framework.go:1119）、`f.RunFilterPlugins+0`（:1290）、`f.RunFilterPluginsWithNominatedPods+0`（:1467）、`f.RunPreScorePlugins+0`（:1547）、`f.RunScorePlugins+0`（:1598）
@@ -203,7 +222,9 @@ SchedulePod (algorithm.go:162)
 | 各默认插件实现 | 未深挖 | NodeResourcesFit/NodeAffinity/InterPodAffinity 等具体 Filter/Score 插件的打分公式未逐行读 |
 | parallelize 并行度 | 未深挖 | `parallelize` 的 goroutine 池大小与调度未展开 |
 | extender 打分 | 未深挖 | HTTP extender 的分数合并未读 |
-| selectHost | 未深挖 | 选节点与 `NodeWithRank` 排序细节未逐行读 |
+| 选节点排序 | 未深挖 | `NewSortedScoredNodes`（sorted_nodes.go:32）建堆与 `NodeWithRank` 排序细节未逐行读 |
+| RankNodes 扩展点 | 未深挖 | PodGroup 调度周期下 `RunRankNodesPlugins`（framework.go:1072）重排节点逻辑未展开 |
+| SignPlugin / 批处理 | 未深挖 | 各扩展点接口现要求 co-implement `SignPlugin`（:799）以启用 `OpportunisticBatch` 缓存复用，本文未展开 |
 
 ### 6.4 修改联动
 
