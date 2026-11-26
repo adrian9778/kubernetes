@@ -1,22 +1,4 @@
-[上一篇](../sourceReader/21-设备插件与网络边界.md) · ### 6.5 基准同步核对（`6bf0bfd`，2026-11-26）
-
-GC 包（`pkg/controller/garbagecollector/`）在本轮漂移区间**零改动**，本文档结论与锚点无需改写。用 MCP `codegraph_explore` 抽查关键锚点，定义行与本文档记录**逐一吻合**：
-
-| 锚点 | 文件 | def 行 |
-|---|---|---|
-| `GraphBuilder` | graph_builder.go | 82 |
-| `gb.GetGraphResources` | graph_builder.go | 1016 |
-| `NewDependencyGraphBuilder` | graph_builder.go | 141 |
-| `gb.Run` / `gb.addDependentToOwners` / `gb.insertNode` / `gb.processTransitions` / `gb.processGraphChanges` | graph_builder.go | 391 / 450 / 547 / 675 / 710 |
-| `hasDeleteDependentsFinalizer` / `hasOrphanFinalizer` / `hasFinalizer` / `startsWaitingForDependentsDeleted` / `startsWaitingForDependentsOrphaned` | graph_builder.go | 623 / 627 / 631 / 638 / 644 |
-| `GarbageCollector` / `NewGarbageCollector` | garbagecollector.go | 61 / 80 |
-| `gc.attemptToDeleteItem` | garbagecollector.go | 500 |
-| `gc.classifyReferences` / `gc.isDangling` / `gc.orphanDependents` / `gc.processAttemptToDeleteWorker` / `gc.attemptToDeleteWorker` / `gc.processAttemptToOrphanWorker` / `gc.attemptToOrphanWorker` | garbagecollector.go | 461 / 380 / 680 / 294 / 319 / 728 / 746 |
-| `gc.deleteOwnerRefJSONMergePatch` | patch.go | 109 |
-
-**关于 `changes.go`**：该文件在当前基准的 GC 包中**不存在**（包内实际文件为 `garbagecollector.go`、`graph_builder.go`、`graph.go`、`patch.go`、`operations.go`、`errors.go`、`uid_cache.go`、`dump.go` 及各自测试）。本文档正文从未引用 `changes.go`，故此差异只作核对记录，不构成文档失效。
-
-`sr_tools.py verify` 本篇：✗ 0（48 项引用，46 ✓ + 2 `?` 均为 `patch.go` 跨包同名歧义，非失效）。
+[上一篇](../sourceReader/21-设备插件与网络边界.md) · [总目录](../sourceReader/README.md) · [返回专题索引](../sourceReader/README.md#专题topics)
 
 ---
 
@@ -247,7 +229,7 @@ GC 包（`pkg/controller/garbagecollector/`）在本轮漂移区间**零改动**
 
 **关于 `changes.go`**：该文件在当前基准的 GC 包中**不存在**（包内实际文件为 `garbagecollector.go`、`graph_builder.go`、`graph.go`、`patch.go`、`operations.go`、`errors.go`、`uid_cache.go`、`dump.go` 及各自测试）。本文档正文从未引用 `changes.go`，故此差异只作核对记录，不构成文档失效。
 
-`sr_tools.py verify` 本篇：✗ 0（48 项引用，46 ✓ + 2 `?` 均为 `patch.go` 跨包同名歧义，非失效）。
+sr_tools verify 本篇：✗ 0（48 项引用，46 ✓ + 2 `?` 均为 `patch.go` 跨包同名歧义，非失效）。
 
 ---
 
