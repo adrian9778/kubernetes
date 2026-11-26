@@ -4,7 +4,7 @@
 > **层级**：第四层——函数级源码解析（kubelet 侧 CSI）。
 > **范围**：driver 注册（pluginwatcher → RegistrationHandler）、卷插件装配、CSI attacher 的 Attach/MountDevice（NodeStage）、mounter 的 SetUpAt（NodePublish）与 TearDownAt（NodeUnpublish）、CSINode 维护、CSI migration 翻译。
 > **不覆盖**：driver 自身（Identity/Node/Controller gRPC 服务端）、external-attacher/provisioner/snapshotter、具体 CNI/云 provider。
-> **基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区干净），Go 1.27.4。
+> **基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净），Go 1.27.4。
 
 ## 0. 结论速览
 CSI 在 kubelet 侧是一组"插件 + 卷插件 + attacher/mounter"：
@@ -74,7 +74,7 @@ CSI 在 kubelet 侧是一组"插件 + 卷插件 + attacher/mounter"：
 ## 7. 操作执行（operationexecutor）
 - `operation_executor.go AttachVolume 偏移：+773`、`MountVolume 偏移：+835`。
 - `operation_generator.go GenerateAttachVolumeFunc 偏移：+248`、`GenerateMountVolumeFunc 偏移：+431`（生成 mount 执行函数，调卷插件 mounter SetUp）。
-- 状态机：`volumemanager/cache` desired（`NewDesiredStateOfWorld` 偏移：+151）/actual（`actual_state_of_world.go` 偏移：+266）；reconciler（`volumemanager/reconciler/reconciler.go Run 偏移：+26`、`reconcile 偏移：+33`）驱动；失败保留 desired，下轮退避重试。
+- 状态机：`volumemanager/cache` desired（`NewDesiredStateOfWorld` 偏移：+161）/actual（`actual_state_of_world.go` 偏移：+266）；reconciler（`volumemanager/reconciler/reconciler.go Run 偏移：+26`、`reconcile 偏移：+33`）驱动；失败保留 desired，下轮退避重试。
 
 ## 8. CSINode 与 migration
 - `csi_node_updater.go`：`NewCSINodeUpdater` 偏移：+46、`Run` +57、`onDriverAdd/Update/Delete` +73/+86/+111、`syncDriverUpdater` +122、`runPeriodicUpdate` +179。
@@ -89,7 +89,7 @@ driver socket 出现
             └─ installDriver(+189) → DriversStore + CSINode/CSIDriver 更新
 
 Pod 含 CSI 卷
-  └─ DesiredStateOfWorld(+151) → reconciler(+33) 差异
+  └─ DesiredStateOfWorld(+161) → reconciler(+33) 差异
        ├─ MountVolume(+835) → GenerateMountVolumeFunc(+431)
        │    ├─ csiAttacher.MountDevice(+264) → NodeStageVolume（若支持 stage）
        │    └─ csiMountMgr.SetUpAt(+103) → NodePublishVolume RPC（绝对 301，偏移 +198）
@@ -145,5 +145,6 @@ CSI 把「把卷交给 Pod 用」拆成 **attach → stage → publish** 三步�
 - **`pkg/kubelet/csi` 与 `staging k8s.io/csi-api` 不存在**（ls/grep 零命中）。
 - 行号全部经 `grep -n` 回付当前 HEAD：`csiClient` :43、`csiDriverClient` :132、`newCsiDriverClient` :192、`NodePublishVolume` :253、`SetUpAt` :103、`MountDevice` :264、`Attach` :63、`GenerateMountVolumeFunc` :431、`AttachVolume` :773。
 - 与旧版差异：旧版把 SetUpAt RPC 写成绝对行号 `:282`/`:301`（实为 SetUpAt 内偏移 +301）；`csiBlockMapper` 旧写 `csi_block.go:257` 无对应函数（实为 `publishVolumeForBlock` +207 / `SetUpDevice` +280 / `MapPodDevice` +342，block 走 `NodePublishVolume` 经 `csiBlockMapper.publishVolumeForBlock`）；`VolumeManager` :191 → :195。均已修正。
+- 基准 `8893923→6bf0bfd`（2026-11-26）复核：漂移集中在 `pkg/kubelet/volumemanager/`。**唯一失效锚点** `NewDesiredStateOfWorld`（def 151→**161**，§7 与 §9 流程图已改）；`ActualStateOfWorld` +266、reconciler `Run` +26/`reconcile` +33、operationexecutor `AttachVolume` +773/`MountVolume` +835、`GenerateMountVolumeFunc` +431 经复核未变。CSI 侧 `csi_plugin.go`（`RegisterPlugin` +129、`installDriver` +189、`nodeInfoFromController` +205、`syncNodeInfoFromController` +229、`updateCSIDriver` +261、`VerifyExhaustedResource` +288、`isResourceExhaustError` +330、`validateVersions` +338、`DeRegisterPlugin` +366）、`csi_attacher.go`（`Attach` +63、`WaitForAttach` +146、`MountDevice` +264、`getAttachmentName` +595）、`csi_mounter.go`（`csiMountMgr` +64、`SetUpAt` +103、`NodePublishVolume` 调用点偏移 +198、`TearDownAt` +437）、`csi_client.go`（`csiClient` +43、`csiDriverClient` +132、`newCsiDriverClient` +192）、`csi_drivers_store.go`（`DriversStore` +36）、`csi_node_updater.go`（`NewCSINodeUpdater` +46）、`nodeinfomanager`（`NewNodeInfoManager` +110）、`pluginmanager`（`PluginManager` +36、`NewPluginManager` +55、`NewWatcher` +42、`NewReconciler` +61）、`volume_manager.go`（`NewVolumeManager` def 199、+60 指向 reconciler 装配行）全部与当前代码吻合，未改。
 
 [上一篇](19-kubeadm集群引导.md) · [总目录](README.md) · [下一篇](21-设备插件与网络边界.md)
