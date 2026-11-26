@@ -4,7 +4,8 @@
 
 > **层级**：跨篇机制纵深专题——把 **watch** 这条 kube-apiserver 最关键的实时推送链路讲透：etcd3 watcher → watchChan 事件处理 → Cacher（watch cache）→ apiserver watch handler → 客户端。这是 informer、控制器、kubectl `-w` 共同依赖的数据平面。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **基准漂移核对**：区间内 `etcd3/watcher.go`、`Cacher.Watch`、`dispatchEvents` 等主锚点定义行未变；唯一行为变更是 `Cacher.dispatchEvent` 跳过判据由 `watcher.dispatchedResourceVersion` 改为新增字段 `watcher.syncedResourceVersion`（`cacher.go` +7/−2，见下文 §watch 广播）。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `w.Watch+0`。
 >

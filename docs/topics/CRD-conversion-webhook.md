@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 **CRD 多版本转换**讲透：CRD 声明多个 version 时，对象在不同 version 间如何转换（webhook vs 内部默认转换）、`Converter` 接口、safe/unsafe 包装、转换校验。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区 `*.go` 零差异），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `c.Convert+0`。
 >
@@ -148,10 +148,13 @@ ConvertToVersion(in, target)
 
 ### 7.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
-- webhook_converter.go：`newWebhookConverterFactory+0`（:48）、`webhookConverter+0`（:69）、`NewWebhookConverter+0`（:107）、`getObjectsToConvert+0`（:126）、`getConvertedObjectsFromResponse+0`（:186）、`c.Convert+0`（:236）、`validateConvertedObject+0`（:392）
-- converter.go：`NewCRConverterFactory+2`（:47）、`m.NewConverter+9`（:65 nopConverter）、`m.NewConverter+11`（:67 webhookConverter）、`c.ConvertToVersion+0`（:175 crConverter）、`c.ConvertFieldLabel+0`（:218）/`c.ConvertToVersion+0`（:232 safeConverterWrapper）
-- nop_converter.go：`nopConverter`（:26）、`Convert+0`（:32）
+基准 `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26）抽查结论：**零漂移**——下列锚点的定义行与本文记法逐一比对，全部一致，无一处需改写。`git diff 6bf0bfd..HEAD -- '*.go'` 为空，工作区 HEAD 之后的提交均为纯文档改动。
+
+- webhook_converter.go：`newWebhookConverterFactory+0`（def :48）、`webhookConverter+0`（def :69）、`NewWebhookConverter+0`（def :107）、`getObjectsToConvert+0`（def :126）、`getConvertedObjectsFromResponse+0`（def :186）、`c.Convert+0`（def :236）、`validateConvertedObject+0`（def :392）
+- converter.go：`NewCRConverterFactory+2`（def :45，+2 即工厂构造行 :47）、`m.NewConverter+9`（def :56，+9 即 :65 `nopConverter` 分派）、`m.NewConverter+11`（def :56，+11 即 :67 `NewWebhookConverter` 分派）、`c.ConvertToVersion+0`（def :175 crConverter）、`c.ConvertFieldLabel+0`（def :218）/`c.ConvertToVersion+0`（def :232 safeConverterWrapper）
+- nop_converter.go：`nopConverter`（def :26）、`Convert+0`（def :32）
+
+引用校验本篇 ✗=0；余下 `?` 档均为同名符号跨文件歧义（如 `Convert`/`ConvertToVersion` 在多个 staging 包同名），非失效，按文件路径消歧后归属正确。
 
 ### 7.2 生产实测
 

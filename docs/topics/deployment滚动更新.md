@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 Deployment 滚动更新的**先扩后缩、可用性预算、比例伸缩、回滚**讲透：`syncDeployment` 策略分派、`rolloutRolling` 调谐新/旧 RS、`maxSurge`/`maxUnavailable` 计算、`GetReplicaSetProportion` 比例分配。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `dc.rolloutRolling+0`。
 >
@@ -169,3 +169,21 @@ Pod 模板变更 → Deployment 入队 → syncDeployment (deployment_controller
 **关联文档：** [12-deployment控制器](../sourceReader/12-deployment控制器.md)（Deployment 全貌）、[08-controller副本控制](../sourceReader/08-controller副本控制.md)（ReplicaSet 侧）、[workqueue机制](workqueue机制.md)（控制器队列）。
 
 [总目录](../sourceReader/README.md)
+
+---
+
+## 7. 基准同步核对（2026-11-26）
+
+本篇于基准 `adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4）复核。Deployment 包在漂移区间（旧基准 `88939239381` → 当前 HEAD）零改动，正文锚点未变，故仅更新头部基准、不改正文。
+
+用 MCP codegraph_explore 抽查关键锚点，定义行与正文记载逐一相符：
+
+| 锚点 | 文件 | def 行 |
+|---|---|---|
+| `dc.rolloutRolling+0` | rolling.go | 31 |
+| `dc.reconcileRollingReplicaSets+0` | rolling.go | 42 |
+| sync（DeploymentController 方法） | sync.go | 59 |
+| `MaxSurge+0` | util/deployment_util.go | 470 |
+| `FindOldReplicaSets+0` | util/deployment_util.go | 646 |
+
+引用校验：✗ 0（未引入新失效）。
