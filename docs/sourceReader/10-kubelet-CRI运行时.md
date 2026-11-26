@@ -3,7 +3,7 @@
 # kubelet CRI 运行时
 > **层级**：第四层——函数级源码解析。
 > **范围**：kubeGenericRuntimeManager.SyncPod 的 sandbox/container 执行、镜像拉取、CRI gRPC 客户端落点。
-> **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区源码干净），Go 1.27.4。
+> **代码基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区源码干净），Go 1.27.4。
 
 ## 1. 生产视角：CRI 执行对外行为与可见结果
 
@@ -16,13 +16,14 @@
 1. **决策（不可见但决定行为）**：`computePodActions`（#computePodActions+0）比较 Pod 期望与 `podStatus` 差集，产出 `podActions`——是否需要新建 sandbox、杀哪些容器、各容器是 create 还是 skip/重启。
 2. **新建 sandbox（可见）**：当决策为 `CreateSandbox` 时，先 `createPodSandbox`（kuberuntime_sandbox.go#createPodSandbox+0）生成 `PodSandboxConfig`、建日志目录、解析 runtime handler，再经 `remoteRuntimeService.RunPodSandbox`（remote_runtime.go#RunPodSandbox+0）向运行时发 gRPC。运行时侧由此创建 Pod 沙箱并完成 CNI 配网。
 3. **杀旧容器（可见）**：sandbox 变化或容器全死时 `KillPod` 批量终止；否则按 `ContainersToKill` 逐个终止（含 `ContainersToReset` 的移除/强杀分支）。
-4. **sandbox 就绪回调（可见，新步骤）**：sandbox 创建成功后触发 `OnPodSandboxReady` 回调（SyncPod+233～+241），设置 `PodReadyToStartContainers=True` 条件。
-5. **动态资源与校验（可见）**：`PrepareDynamicResources`（SyncPod+153～+162）准备动态资源，随后对 `PodSandboxStatus` 做校验（SyncPod+189～+203）。
+4. **sandbox 就绪回调（可见）**：sandbox 创建成功后触发 `OnPodSandboxReady` 回调（SyncPod+234～+242），设置 `PodReadyToStartContainers=True` 条件。
+5. **动态资源与校验（可见）**：`PrepareDynamicResources`（SyncPod+154～+163）准备动态资源，随后对 `PodSandboxStatus` 做校验（SyncPod+190～+204）。
 6. **容器生命周期（可见）**：对每个保留/新建容器调用 `startContainer`（kuberuntime_container.go#startContainer+0）——拉镜像、生成配置、建容器、启容器，各步经 `runtimeService.CreateContainer`/`StartContainer`（remote_runtime.go#CreateContainer+0 / #StartContainer+0）发 gRPC。
-7. **Pod 调整（可见，新步骤）**：`Resize` 步骤（SyncPod+252～+259）按 `InPlacePodVerticalScalingAllowed` 对 Pod 与运行中容器做垂直伸缩；`VolumesToUpsize/Downsize/UpdatePodResources` 触发 `doPodResizeAction`。
-8. **临时容器（可见，新步骤）**：`Step 7` 启动临时容器（SyncPod 后续段），先于 init 容器启动，允许在 init 失败时仍运行临时容器。
+7. **Pod 调整（可见）**：`Resize` 步骤（SyncPod+254～+259）按 `InPlacePodVerticalScalingAllowed` 对 Pod 与运行中容器做垂直伸缩；`VolumesToUpsize/Downsize/ContainersToUpdate/PodCgroupResourcesToUpdate` 触发 `doPodResizeAction`。
+8. **临时容器（可见）**：`Step 7` 启动临时容器（SyncPod+357～+368），先于 init 容器启动，允许在 init 失败时仍运行临时容器。
+9. **init 容器（可见）**：`Step 8` 逐个启动 init 容器（SyncPod+370～+390），失败时 restartable init（sidecar）跳过继续、普通 init 容器中止本轮同步。
 
-**对上层（kubelet）的可见结果**：`SyncPod` 返回 `kubecontainer.PodSyncResult`，聚合每步结果与错误；某步失败即写入对应 `SyncResult` 并立即返回。Pod 在创建期间被删除时，sandbox 失败按非错误静默返回（SyncPod+173～+176）。
+**对上层（kubelet）的可见结果**：`SyncPod` 返回 `kubecontainer.PodSyncResult`，聚合每步结果与错误；某步失败即写入对应 `SyncResult` 并立即返回。Pod 在创建期间被删除时，sandbox 失败按非错误静默返回（SyncPod+174～+177）。
 
 **对使用者的可见结果**：容器/镜像事件（如 `FailedToCreateContainer`）、容器 ID 与状态、Pod 就绪条件。镜像拉取失败通过事件与错误消息上报，由上层重试。
 
@@ -38,7 +39,7 @@
 | 类型 | 文件 | 职责 |
 |---|---|---|
 | `kubeGenericRuntimeManager` | `pkg/kubelet/kuberuntime/kuberuntime_manager.go#kubeGenericRuntimeManager+0` | 实现 kubecontainer.Runtime：把 Pod 同步翻译为 CRI sandbox/container 调用，持有 runtimeService、imageService、imagePuller |
-| `podActions` | 同文件 #podActions+0 | computePodActions 的结果：CreateSandbox、SandboxID、KillPod、ContainersToKill、各容器 next 动作 |
+| `podActions` | 同文件 #podActions+0 | computePodActions 的结果：CreateSandbox、SandboxID、KillPod、ContainersToKill、各容器 next 动作；`ContainersToReset`（#podActions+39，`[]containerToRemoveInfo`）承载 in-place restart 前要移除的容器，`PodCgroupResourcesToUpdate`（#podActions+35，`sets.Set[v1.ResourceName]`）承载 Pod 级 cgroup 资源调整 |
 | `startSpec` | `kuberuntime_container.go#startSpec+0` | 容器/init 容器规格的统一包装（container 字段） |
 | `remoteRuntimeService` | `[staging] cri-client/pkg/remote_runtime.go#remoteRuntimeService+0` | internalapi.RuntimeService 实现，持有 grpc RuntimeServiceClient |
 
@@ -54,25 +55,31 @@
 SyncPod (+0)
 ├── Step 1 computePodActions 求差集 (+14)
 ├── CreateSandbox 分支：新 Pod 日志/SandboxChanged 事件 (+16 ～ +26)
-├── Step 2 KillPod（sandbox 变化或容器全死）(+29 ～ +45)
-│    killPodWithSyncResult；成功后 purgeInitContainers
-├── Step 3（否则）杀 ContainersToKill (+48 ～ +60)
-│    （feature gate）ContainersToReset 移除/强杀 (+62 ～ +89)
-├── pruneInitContainersBeforeStart (+95)
-├── 取 podIPs（默认来自 podStatus）(+107 ～ +110)
+├── Step 2 KillPod（sandbox 变化或容器全死）(+29 ～ +46)
+│    killPodWithSyncResult；成功后 purgeInitContainers (+44)
+├── Step 3（否则）杀 ContainersToKill (+47 ～ +61)
+│    pruneRemovedContainers（清理已从 spec 移除的容器，失败不阻塞本轮）(+64)
+│    （feature gate）ContainersToReset 移除/强杀 (+66 ～ +90)
+├── pruneInitContainersBeforeStart (+96)
+├── 取 podIPs（默认来自 podStatus）(+108 ～ +111)
 ├── Step 4 CreateSandbox：
-│    sysctl 分隔符转换 (+150)
-│    PrepareDynamicResources (+153 ～ +162)
-│    createPodSandbox (+164)
-│    Pod 删除时 sandbox 失败非错误 (+173 ～ +176)
-│    PodSandboxStatus 校验 (+189 ～ +203)
-├── Step 5 OnPodSandboxReady 回调 (+233 ～ +241)
-├── Step 6 Resize（Pod 与运行中容器垂直伸缩）(+252 ～ +259)
-├── startContainer（每容器，含 init：startWithInitState 内 +290）
-└── Step 7 start ephemeral 容器（后续段）
+│    UserNamespacesSupport 指标 defer (+121 ～ +138)
+│    sysctl 分隔符转换 (+151)
+│    PrepareDynamicResources (+154 ～ +163)
+│    createPodSandbox (+165)
+│    Pod 删除时 sandbox 失败非错误 (+174 ～ +177)
+│    PodSandboxStatus 校验 (+190 ～ +204)
+│    网络隔离却拿到 IP → StopPodSandbox 并失败 (+218 ～ +232)
+├── Step 5 OnPodSandboxReady 回调 (+234 ～ +242)
+├── Step 6 Resize（Pod 与运行中容器垂直伸缩）(+254 ～ +259)
+├── startContainer（每容器，经 startWithInitState 内 +291）
+├── Step 7 start ephemeral 容器 (+357 ～ +368)
+├── Step 8 start init 容器 (+370 ～ +390)
+└── Step 9 start 常规容器 (+407 ～ +415)
 ```
-**错误处理：** 每步失败写入对应 SyncResult 后立即返回；Pod 在创建期间被删除时 sandbox 失败按非错误处理（+173 ～ +176）。
-**设计意图（注释 +92 ～ +94）：** prune init 容器是相对 GC 的提前优化。
+**容器启动的懒初始化（当前代码）：** 三个启动循环共用 `startWithInitState` 闭包（SyncPod+267），并由 `lazyStart`（SyncPod+331）惰性生成 `PodSandboxConfig` 与 `imageVolumePullResults`——只在确有容器要启动时才生成，避免无谓开销。
+**错误处理：** 每步失败写入对应 SyncResult 后立即返回；Pod 在创建期间被删除时 sandbox 失败按非错误处理（+174 ～ +177）。
+**设计意图（注释 +93 ～ +95）：** prune init 容器是相对 GC 的提前优化。
 
 ### 函数：(*kubeGenericRuntimeManager).computePodActions
 **源码：** `pkg/kubelet/kuberuntime/kuberuntime_manager.go#computePodActions+0`
@@ -80,7 +87,10 @@ SyncPod (+0)
 **返回值：** `podActions`。
 **关键分支：**
 - 无现存 sandbox → `CreateSandbox=true`、Attempt 递增；容器配置 hash 变化 → 旧容器进 `ContainersToKill` 并新建。
-- `RestartAllContainersOnContainerExits` feature gate 开启且 `restartAllContainers` 为真（computePodActions+15～+28）：按逆序 kill 并移除容器（源容器最后移除），`ContainersToReset` 依次追加 target 容器、target init 容器、source 容器、source init 容器，再 `killRemovedContainers`，随后提前返回 `changes`。
+- `RestartAllContainersOnContainerExits` feature gate 开启且 `restartAllContainers` 为真（computePodActions+15～+28）：按逆序 kill 并移除容器（源容器最后移除），`ContainersToReset` 依次追加 target 容器、target init 容器、source 容器、source init 容器，再 `killRemovedContainers`，随后提前返回 `changes`。`ContainersToReset` 的取值由 `getContainersToReset`（#getContainersToReset+0）产出：已退出且命中 `ContainerRestartRuleActionRestartAllContainers` 的进 sources，其余已退出容器进 targets，仍在运行（或 Unknown）的标 `kill=true` 后进 targets。
+- **actuated 状态对账（新增）**：`DynamicNodeLocalEphemeralVolumes` 或 `DynamicContainers` 开启时，从 `actuatedState` 取只读 actuated Pod 并经 `reconcileNonRunningActuatedContainers` 对账（computePodActions+31～+36，`DynamicNodeLocalEphemeralVolumes`/`DynamicContainers` 门控），得到的 `actuatedPod` 随后作为卷就绪判定的参照。
+- **动态卷未就绪则推迟启动（新增）**：sandbox 新建路径、ephemeral 路径、常规容器重启路径三处都先过 `containerVolumesReady`（computePodActions+98～+105 / +117～+118 / +176～+181），卷未就绪的容器本轮不进 `ContainersToStart`，并置 `hasDeferredContainerStart`，避免误判为「无可启动容器」而 KillPod。
+- **Pod 级 cgroup 资源（字段改名）**：非 KillPod 时经 `computePodLevelResourcesResizeAction` 填 `PodCgroupResourcesToUpdate`（computePodActions+134～+135）——旧实现的 `UpdatePodResources`/`UpdatePodLevelResources` 布尔字段已由该 `sets.Set[v1.ResourceName]` 取代。
 
 ### 函数：(*kubeGenericRuntimeManager).createPodSandbox
 **源码：** `pkg/kubelet/kuberuntime/kuberuntime_sandbox.go#createPodSandbox+0`
@@ -208,18 +218,18 @@ kubeGenericRuntimeManager.SyncPod
 | 序 | CRI gRPC 方法 | 关键请求字段 | 成功信号 | 失败事件（reason） |
 |---|---|---|---|---|
 | 1 | `PullImage` | image、auth（pullSecrets）、sandboxConfig | `imageRef` 返回 | `FailedToPullImage`（`m.pullImage+45`） |
-| 2 | `RunPodSandbox` | PodSandboxConfig（hostname、dns、logDir、labels、cgroup、linux namespaces） | `podSandboxID` | `FailedCreatePodSandBox`（`m.SyncPod+184`） |
-| 3 | `PodSandboxStatus` | podSandboxID、verbose=false | `resp.Status`（含 podIPs） | `FailedStatusPodSandBox`（`m.SyncPod+196`） |
+| 2 | `RunPodSandbox` | PodSandboxConfig（hostname、dns、logDir、labels、cgroup、linux namespaces） | `podSandboxID` | `FailedCreatePodSandBox`（`kuberuntime_manager.go#SyncPod+185`） |
+| 3 | `PodSandboxStatus` | podSandboxID、verbose=false | `resp.Status`（含 podIPs） | `FailedStatusPodSandBox`（`kuberuntime_manager.go#SyncPod+197`） |
 | 4 | `CreateContainer`（每容器） | podSandboxID、ContainerConfig、PodSandboxConfig | `containerID` | `FailedToCreateContainer`（`m.startContainer+85`） |
 | 5 | `StartContainer`（每容器） | containerID | 无返回体 | `FailedToStartContainer`（`m.startContainer+100`） |
 
 **调用顺序（源码锚点）：**
 ```text
-SyncPod (m.SyncPod+0)
+SyncPod (kuberuntime_manager.go#SyncPod+0)
   ├─ computePodActions (m.computePodActions+0)  ← 决策：建 sandbox + 启哪些容器
-  ├─ createPodSandbox (m.createPodSandbox+164 调用) → runtimeService.RunPodSandbox
-  ├─ runtimeService.PodSandboxStatus (m.SyncPod+189) → 取 podIPs
-  │     └─ 网络隔离但拿到 IP → StopPodSandbox + 失败（m.SyncPod+219）
+  ├─ createPodSandbox (m.createPodSandbox+165 调用) → runtimeService.RunPodSandbox
+  ├─ runtimeService.PodSandboxStatus (kuberuntime_manager.go#SyncPod+190) → 取 podIPs
+  │     └─ 网络隔离但拿到 IP → StopPodSandbox + 失败（kuberuntime_manager.go#SyncPod+220）
   └─ 逐容器 startContainer (m.startContainer+0)
        ├─ imagePuller.EnsureImageExists (m.startContainer+20) → PullImage
        ├─ runtimeService.CreateContainer (m.startContainer+82) → containerID
@@ -233,8 +243,8 @@ SyncPod (m.SyncPod+0)
 | gRPC 方法 | 失败事件 reason | 事件类型 | 锚点 |
 |---|---|---|---|
 | `PullImage` | `FailedToPullImage` | Warning | `m.pullImage+45` |
-| `RunPodSandbox` | `FailedCreatePodSandBox` | Warning | `m.SyncPod+184` |
-| `PodSandboxStatus` | `FailedStatusPodSandBox` | Warning | `m.SyncPod+196` |
+| `RunPodSandbox` | `FailedCreatePodSandBox` | Warning | `kuberuntime_manager.go#SyncPod+185` |
+| `PodSandboxStatus` | `FailedStatusPodSandBox` | Warning | `kuberuntime_manager.go#SyncPod+197` |
 | `CreateContainer` | `FailedToCreateContainer` | Warning | `m.startContainer+85` |
 | `PreStartContainer` 钩子 | `FailedToStartContainer` | Warning | `m.startContainer+91` |
 | `StartContainer` | `FailedToStartContainer` | Warning | `m.startContainer+100` |
@@ -243,35 +253,38 @@ SyncPod (m.SyncPod+0)
 #### gRPC 错误的统一处理
 
 - 每个 CRI 调用的 gRPC status 经 `grpcstatus.FromError(err)` 取出 `s.Message()`，包装成 K8s 事件 + Go error（`m.startContainer+85`、`m.startContainer+91`、`m.startContainer+100`）。
-- sandbox 创建失败的错误可能是 CNI/CSI/CRI 任一来源；若 Pod 已被标记删除（`IsPodTerminationRequested`）则**静默返回**、不记失败（`m.SyncPod+166` ～ `+172`）。
-- PodSandboxStatus 拿到 IP 后，若 Pod 要求网络隔离但运行时仍配了网（`IsNetworkIsolatedPod && len(podIPs)>0`），则 `StopPodSandbox` 拆掉 sandbox 并失败（`m.SyncPod+219`）。
+- sandbox 创建失败的错误可能是 CNI/CSI/CRI 任一来源；若 Pod 已被标记删除（`IsPodTerminationRequested`）则**静默返回**、不记失败（`kuberuntime_manager.go#SyncPod+174` ～ `+177`）。
+- PodSandboxStatus 拿到 IP 后，若 Pod 要求网络隔离但运行时仍配了网（`IsNetworkIsolatedPod && len(podIPs)>0`），则 `StopPodSandbox` 拆掉 sandbox 并失败（`kuberuntime_manager.go#SyncPod+220`）。
 
 #### 关键 gRPC 调用的顺序依赖（源码可证）
 
 1. **RunPodSandbox 必须先于 CreateContainer**：容器建在 sandbox 的 network namespace 内，sandbox 没起来就没有可加入的网络。
-2. **PodSandboxStatus 必须在 CreateContainer 前**：容器的 IP 来自 sandbox status（`m.determinePodSandboxIPs`，`m.SyncPod+209`），要先把 IP 填进容器环境。
+2. **PodSandboxStatus 必须在 CreateContainer 前**：容器的 IP 来自 sandbox status（`m.determinePodSandboxIPs`，`kuberuntime_manager.go#SyncPod+210`），要先把 IP 填进容器环境。
 3. **PullImage 必须先于 CreateContainer**：CreateContainer 的 config 引用镜像引用，镜像不在本地则 Create 失败。
 4. **CreateContainer 必须先于 StartContainer**：先建后启，PreStartContainer 钩子夹在两者之间。
 
 ## 6. 关键边界与错误
 | 场景 | 行为 |
 |---|---|
-| Pod 创建中被删除 | sandbox 错误静默返回（SyncPod+173～+176） |
+| Pod 创建中被删除 | sandbox 错误静默返回（SyncPod+174～+177） |
 | 镜像拉取失败 | FailedToCreateContainer 事件，上层 SyncPod 失败重试 |
 | runtimeClass handler 解析失败 | createPodSandbox 返回错误，不落 CRI |
 | PreCreate/PreStart 钩子失败 | 带哨兵错误返回，不继续 CRI 调用 |
 | sandbox status 查询失败 | 结果失败并跳过该 Pod，等待下轮同步 |
-| `RestartAllContainersOnContainerExits` 开启 | computePodActions 提前返回，全部容器进 ContainersToReset（computePodActions+15～+28） |
+| 动态卷未就绪 | 容器本轮不进 `ContainersToStart`，推迟到下轮（computePodActions+98～+105 等） |
+| `RestartAllContainersOnContainerExits` 开启 | computePodActions 提前返回，全部容器进 ContainersToReset（computePodActions+15～+28）；SyncPod 在 Step 3 内逐个 RemoveContainer，需强杀的先以 0 grace period kill（SyncPod+66～+90） |
 
 ## 7. 设计意图与验证
 **设计意图：**
-- **prune init 容器提前优化**：SyncPod 在创建 sandbox 前调用 `pruneInitContainersBeforeStart`（SyncPod+95），比容器 GC 更早清理已终止的 init 容器，降低资源占用（注释 SyncPod+92～+94）。
-- **sandbox 就绪回调（Step 5）**：在动态资源准备好、卷挂载完成后，触发 `OnPodSandboxReady` 设置 `PodReadyToStartContainers=True`，失败仅记日志并继续创建（SyncPod+233～+241）。
-- **临时容器先于 init 启动（Step 7）**：允许 init 容器启动失败时仍能运行临时容器（SyncPod 后续段）。
+- **prune init 容器提前优化**：SyncPod 在创建 sandbox 前调用 `pruneInitContainersBeforeStart`（SyncPod+96），比容器 GC 更早清理已终止的 init 容器，降低资源占用（注释 SyncPod+93～+95）。
+- **sandbox 就绪回调（Step 5）**：在动态资源准备好、卷挂载完成后，触发 `OnPodSandboxReady` 设置 `PodReadyToStartContainers=True`，失败仅记日志并继续创建（SyncPod+234～+242）。
+- **临时容器先于 init 启动（Step 7）**：允许 init 容器启动失败时仍能运行临时容器（SyncPod+357～+368）。
+- **容器启动的懒初始化**：`lazyStart`（SyncPod+331）把 `PodSandboxConfig` 与镜像卷拉取结果的生成推迟到「确有容器要启动」时，三个启动循环（ephemeral/init/常规）共享同一份状态。
+- **in-place restart 的容器移除前移**：`ContainersToReset` 在 `computePodActions` 决策阶段产出、在 SyncPod Step 3 落地为 `RemoveContainer`（必要时先 0 grace period kill，kill reason `reasonRestartAllContainers`，`kuberuntime_manager.go` · `Const:reasonRestartAllContainers`），使 RestartAllContainers 不必等容器 GC 即可清掉旧运行实例。
 
 **验证：**
-- 所有函数位置、内部偏移、CRI 客户端落点、kubelet 调用点均按当前代码基准 `master@8893923` 逐行核实（见 `.progress/evidence/10.md` 证据索引）。
-- 关键差异（当前绝对行号，供核对）：`SyncPod` 起点由旧文 :1576 漂移至 :1854（+278）；`computePodActions` :1272 → :1388（+116）；`startContainer` :200 → :213（+13）；`createPodSandbox` :42 → :43（+1）；CRI 客户端方法均 +1 ～ +5。
-- 新增/修正内容：SyncPod 步骤由「Step 1-5」扩为「Step 1-7」，新增 Step 5（OnPodSandboxReady 回调）、Step 6（Resize）、Step 7（ephemeral）；startContainer 新增 `ensureContainerSecurityProfile` 步骤（+15）；调用点由 `setActuatedContainerResources` 修正为 `setActuatedContainer`（独立方法 #setActuatedContainerResources+0）；`NewRemoteRuntimeService` 标记 Deprecated，推荐 `NewRemoteRuntimeServiceBuilder`；computePodActions 补入 `RestartAllContainersOnContainerExits` 分支。
+- 所有函数位置、内部偏移、CRI 客户端落点、kubelet 调用点均按当前代码基准 adrian@`6bf0bfd5`（2026-11-26）逐行核实（见 `.progress/evidence/10.md` 证据索引）。
+- 关键差异（当前绝对行号，供核对）：`SyncPod` 起点由旧基准 :1854 漂移至 :2365（+511）；`computePodActions` :1388 → :1859（+471）；`startContainer` :213、`createPodSandbox` :43 未变；`kuberuntime_sandbox.go` 与 `[staging] cri-client/pkg/remote_runtime.go` 本轮无改动，锚点沿用。
+- 本轮新增/修正内容：SyncPod 启动序列由「Step 7 ephemeral 收尾」扩为「Step 7 ephemeral / Step 8 init / Step 9 常规」三段，并补 `startWithInitState`+`lazyStart` 懒初始化结构；Resize 触发条件由 `UpdatePodResources`/`UpdatePodLevelResources` 改为 `PodCgroupResourcesToUpdate`；computePodActions 补入 actuated Pod 对账、动态卷就绪门控（推迟启动）、Pod 级 cgroup 资源计算与 `getContainersToReset` 的 source/target 分类；`pkg/kubelet/container/runtime.go` 的 `RuntimeHandler` 新增 `SupportsCgroupNamespaces`、`PodStatus` 新增 `HasRunningOrUnknownContainer`、`Runtime.InitializeActuatedPod` 增加 `podStatus` 参数。
 
 [上一篇](09-kubelet同步循环.md) · [总目录](README.md) · [下一篇](11-informer与workqueue机制.md)
