@@ -2,7 +2,7 @@
 
 # informer resync 机制专题
 
-> **代码基准**：`k8s.io/kubernetes`，master@`782c049`（工作区文档产物外干净），Go 1.27.4。
+> **代码基准**：adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4）。工作区 HEAD 在其后者为纯文档提交，`.go` 零差异，故本文锚点即基线代码事实。
 > **范围**：client-go SharedIndexInformer 的 resync（重新同步）机制——resyncPeriod 如何确定、shouldResync 如何判定、resync 事件如何产生并分发、以及 resync 与 List/Watch 的关系。
 > **不覆盖**：DeltaFIFO 的 List/Watch 增量（见篇 11）；etcd 侧的 watch；具体 controller 如何使用 resync。
 > **主文件**：`staging/src/k8s.io/client-go/tools/cache/shared_informer.go`（resync 判定与分发）、`.../cache/delta_fifo.go`（Sync Delta）、`.../cache/controller.go`（Config.FullResyncPeriod）。
@@ -208,7 +208,7 @@ sharedIndexInformer.Run
 
 ### 3.1 代码回核与生产实测记录
 
-- **代码回核**：本专题所有「符号+偏移」均在 HEAD `782c049` 上用 `grep -n` / `awk` 复核（`shouldResync` :1364/:1593、`determineResyncPeriod` :1035、`minimumResyncPeriod` :1050、`distribute` sync 分支、`addNotification` :842/:844、`Sync DeltaType` delta_fifo.go:201）。
+- **代码回核**：本专题所有「符号+偏移」均在基准 `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26）上复核（`shouldResync` :1364/:1593、`determineResyncPeriod` :1035、`minimumResyncPeriod` :1050、`distribute` sync 分支、`addNotification` :842/:844、`Sync DeltaType` delta_fifo.go:201、`sharedIndexInformer` :753、`handleDeltas` :1124、`sharedProcessor` :1221、`sharedProcessor.run` :1324）。相对旧基准 `782c049`，resync 机制相关符号的定义行与语义**零漂移**。
 - **生产实测**：**未实测** `[待运行验证]`。resync 的实际触发周期、`OnUpdate(old==new)` 的到达、以及控制器对 resync 的处理均为代码推断，未在真实集群观测。
 
 ### 3.2 已知缺口和待验证事项
