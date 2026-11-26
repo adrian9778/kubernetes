@@ -2,10 +2,12 @@
 
 # etcd3 写入路径专题
 
-> **代码基准**：`k8s.io/kubernetes`，master@`782c049`（工作区文档产物外干净），Go 1.27.4。
+> **代码基准**：`k8s.io/kubernetes`，adrian@`6bf0bfd51d7`（2026-11-26），Go 1.27.4。
 > **范围**：apiserver 的 storage 层如何把一个对象写进 etcd——从 `storage.Interface.Create` / `GuaranteedUpdate` 进入，经 key 准备、编码、加密变换、lease、乐观事务（OptimisticPut），到冲突重试与短路写。覆盖 Create 与 Update 两条写路径，以及读-改-写的重试循环。
 > **不覆盖**：etcd 集群自身的 raft/compaction/lease 续期机制；watch 推送链路；KMS 加密 provider 的具体实现（只讲 `transformer.TransformToStorage` 这一层）。
-> **主文件**：`staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go`（Create/Get/GuaranteedUpdate/UpdateOnce）、`.../storage/txn.go`（通用重试循环）、`.../storage/interfaces.go`（PrepareKey）、`vendor/go.etcd.io/etcd/client/v3/kubernetes/client.go`（OptimisticPut，本分支魔改）。
+> **主文件**：`staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go`（`Create`/`Get`/`GuaranteedUpdate`/`UpdateOnce`/`updateOnce`）、`staging/src/k8s.io/apiserver/pkg/storage/txn.go`（通用重试循环 `GuaranteedUpdate`）、`staging/src/k8s.io/apiserver/pkg/storage/interfaces.go`（`PrepareKey`）、`vendor/go.etcd.io/etcd/client/v3/kubernetes/client.go`（`OptimisticPut`，本分支魔改）。
+>
+> **记法**：`` `完整路径` · `Symbol` `+N` ``，`+0` = 符号定义行，`+N` = 符号体内第 N 行；staging 文件写完整路径（含 `staging/src/k8s.io/`）。本文不写绝对行号。
 
 ## 0. 结论速览
 
@@ -40,8 +42,9 @@ apiserver 对 etcd 的写入**全部走乐观事务**：每次写都是一个 et
 | 角色 | 是谁 | 做什么 |
 |---|---|---|
 | 调用方 | apiserver 的 registry 层（如 `generic/registry/store.go` 的 `Store.Create`/`Store.update`） | 发起 `Create`/`GuaranteedUpdate` |
-| storage 实现 | `pkg/storage/etcd3/store.go` 的 `store`（实现 `storage.Interface`） | 执行 key 准备、编码、加密、事务 |
-| 通用重试循环 | `pkg/storage/txn.go GuaranteedUpdate` | 驱动读-改-写重试 |
+| storage 实现 | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` 的 `store`（实现 `storage.Interface`） | 执行 key 准备、编码、加密、事务 |
+| 通用重试循环 | `staging/src/k8s.io/apiserver/pkg/storage/txn.go` 的 `GuaranteedUpdate` | 驱动读-改-写重试 |
+| 事务代理 | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` 的 `storeTxnDelegator`（实现 `storage.TxnDelegator`） | 把通用循环的 `GetCurrentState`/`UpdateOnce`/`DeleteOnce` 委回 store |
 | etcd 客户端 | `vendor/go.etcd.io/etcd/client/v3/kubernetes.Client`（**本分支魔改**，加 `OptimisticPut`/`OptimisticDelete`/`Get`） | 发 etcd txn |
 | transformer | `s.transformer`（`ValueTransformer`，KMS/AES 等 provider） | 写前加密、读前解密 |
 | leaseManager | `s.leaseManager` | 为带 TTL 的对象申请 etcd lease |
@@ -139,13 +142,15 @@ key = /registry/pods/default/nginx
 
 ### 2.1 实现地图：进程、入口、核心源码
 
-| 角色 | 文件 | 符号（偏移以定义行为 +0） |
+| 角色 | 文件 | 符号（`+0` = 定义行） |
 |---|---|---|
-| storage 实现 | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` | `store.Create`（:293）、`store.Get`（:244）、`store.Delete`（:361）、`store.GuaranteedUpdate`（:437）、`store.UpdateOnce`（:472）、`store.updateOnce`（:485）、`store.prepareKey`（:1232） |
-| 通用重试循环 | `staging/src/k8s.io/apiserver/pkg/storage/txn.go` | `GuaranteedUpdate`（:114） |
-| key 校验 | `staging/src/k8s.io/apiserver/pkg/storage/interfaces.go` | `PrepareKey`（:438） |
-| etcd 客户端（魔改） | `vendor/go.etcd.io/etcd/client/v3/kubernetes/client.go` | `Client.OptimisticPut`（:83） |
-| registry 调用方 | `staging/src/k8s.io/apiserver/pkg/registry/generic/registry/store.go` | `Store.Create`（:564）、`Store.create`（:595） |
+| storage 实现 | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` | `Get` `+0`、`Create` `+0`、`Delete` `+0`、`DeleteOnce` `+0`、`deleteOnce` `+0`、`GuaranteedUpdate` `+0`、`UpdateOnce` `+0`、`updateOnce` `+0`、`getCurrentState` `+0`、`stateFromEtcdResponse` `+0`、`prepareKey` `+0`、`txnError` `+0` |
+| 事务代理 | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` | `storeTxnDelegator` `+0`、`newStoreTxnDelegator` `+0`、`storeTxnDelegator.GetCurrentState` `+0`、`storeTxnDelegator.UpdateOnce` `+0`、`storeTxnDelegator.DeleteOnce` `+0` |
+| 通用重试循环 | `staging/src/k8s.io/apiserver/pkg/storage/txn.go` | `TxnDelegator` `+0`、`ObjState` `+0`、`GuaranteedUpdate` `+0`、`refreshOnError` `+0`、`updateState` `+0`、`ConditionalDelete` `+0` |
+| key 校验 | `staging/src/k8s.io/apiserver/pkg/storage/interfaces.go` | `PrepareKey` `+0` |
+| etcd 客户端（魔改） | `vendor/go.etcd.io/etcd/client/v3/kubernetes/client.go` | `Client.OptimisticPut` `+0`、`Client.OptimisticDelete` `+0`；`interface.go`：`PutOptions` `+0`、`PutResponse` `+0` |
+| registry 调用方 | `staging/src/k8s.io/apiserver/pkg/registry/generic/registry/store.go` | `Store.Create` `+0`、`Store.create` `+0`、`Store.Update` `+0` |
+| lease 管理 | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/lease_manager.go` | `leaseManager.GetLease` `+0`、`getReuseDurationSecondsLocked` `+0` |
 
 **注意**：`OptimisticPut`/`OptimisticDelete`/`Get` 是**本分支魔改** `vendor/go.etcd.io/etcd/client/v3/kubernetes` 包新增的方法；上游 etcd client v3 无此 `kubernetes.Client`。见篇 00 分支差异。
 
@@ -164,41 +169,41 @@ key = /registry/pods/default/nginx
 ### 2.3 真实调用链与关键源码锚点（Create 路径）
 
 ```text
-Store.Create (registry store.go:564)
-  └── store.Create (etcd3 store.go:293)
-       ├── prepareKey (+? :1232) → PrepareKey (interfaces.go:438) → 拼 pathPrefix
-       ├── ObjectResourceVersion(obj) != 0 → ErrResourceVersionSetOnCreate
-       ├── PrepareObjectForStorage(obj)  [versioner]
-       ├── runtime.Encode(codec, obj) → data
-       ├── ttl!=0 → leaseManager.GetLease(ttl)
-       ├── transformer.TransformToStorage(data, key) → newData
-       ├── OptimisticPut(key, newData, 0, {LeaseID})  [client.go:83]
-       │    └── etcd txn: If ModRevision=0 Then Put  (client.go:85-91)
-       ├── !Succeeded → NewKeyExistsError
-       └── out!=nil → decoder.Decode(data, out, Revision)
+registry `Store.Create` · `staging/.../registry/generic/registry/store.go` · `Store.Create` `+0`
+  └── etcd3 `Create` · `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` · `Create` `+0`
+       ├── `prepareKey` `+0` → `storage.PrepareKey`（`staging/.../storage/interfaces.go` · `PrepareKey` `+0`）→ 拼 `pathPrefix`
+       ├── `versioner.ObjectResourceVersion(obj) != 0` → `ErrResourceVersionSetOnCreate`
+       ├── `versioner.PrepareObjectForStorage(obj)`
+       ├── `runtime.Encode(s.codec, obj)` → data
+       ├── ttl!=0 → `leaseManager.GetLease`（`staging/.../etcd3/lease_manager.go` · `GetLease` `+0`）
+       ├── `transformer.TransformToStorage(data, authenticatedDataString(preparedKey))` → newData
+       ├── `Client.OptimisticPut(key, newData, 0, {LeaseID})`
+       │    └── etcd txn: If ModRevision=expectedRev Then Put（`vendor/.../kubernetes/client.go` · `OptimisticPut` `+1~+8`）
+       ├── !Succeeded → `storage.NewKeyExistsError`
+       └── out!=nil → `s.decoder.Decode(data, out, txnResp.Revision)`
 ```
 
 ### 2.4 真实调用链与关键源码锚点（Update 路径）
 
 ```text
-Store.GuaranteedUpdate (registry store.go)
-  └── store.GuaranteedUpdate (etcd3 store.go:437)
-       ├── prepareKey
-       ├── origState = cachedExistingObject 或 GetCurrentState
-       └── storage.GuaranteedUpdate (txn.go:114)   ← 通用重试循环
-            └── for {
-                  ├── preconditions.Check → 失败 refreshOnError 重读
-                  ├── updateState(origState, tryUpdate) → ret, ttl
-                  └── UpdateOnce (+472) → updateOnce (:485)
-                       ├── PrepareObjectForStorage
-                       ├── Encode → data
-                       ├── !Stale && data==origState.Data → 短路成功
-                       ├── TransformToStorage → newData
-                       ├── ttl!=0 → GetLease
-                       ├── OptimisticPut(key, newData, origState.Rev)  ← CAS
-                       ├── !Succeeded → ResourceVersionConflicts → 重读重试
-                       └── Succeeded → Decode(data, destination, Rev)
-                }
+registry `Store.GuaranteedUpdate` · `staging/.../registry/generic/registry/store.go`
+  └── etcd3 `GuaranteedUpdate` · `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` · `GuaranteedUpdate` `+0`
+       ├── `prepareKey` `+0`
+       ├── origState = `cachedExistingObject` 走 `storage.GetStateFromObject`，否则 `storeTxnDelegator.GetCurrentState` `+0` → `getCurrentState` `+0`
+       └── `storage.GuaranteedUpdate` · `staging/.../storage/txn.go` · `GuaranteedUpdate` `+0`（通用重试循环）
+            └── `for` 循环：
+                 ├── `preconditions.Check` 失败 → `refreshOnError` `+0` 重读
+                 ├── `updateState(origState, tryUpdate)` → ret, ttl
+                 └── `d.UpdateOnce`（`TxnDelegator.UpdateOnce`）→ etcd3 `UpdateOnce` `+0` → `updateOnce` `+0`（getOnFailure=true）
+                      ├── `versioner.PrepareObjectForStorage`
+                      ├── `runtime.Encode` → data
+                      ├── `!Stale && bytes.Equal(data, origState.Data)` → 短路成功（见下）
+                      ├── `transformer.TransformToStorage` → newData
+                      ├── ttl!=0 → `leaseManager.GetLease`
+                      ├── `Client.OptimisticPut(key, newData, origState.Rev)` ← CAS
+                      ├── !Succeeded → `storage.NewResourceVersionConflictsError`（getOnFailure=false 路径）
+                      │    └── getOnFailure=true → `stateFromEtcdResponse` `+0` 取回最新值 → 返回 (state, false, nil) 让循环重试
+                      └── Succeeded → `decoder.Decode(data, destination, txnResp.Revision)`
 ```
 
 **Create vs Update 的唯一区别（`OptimisticPut` 的 expectedRev）：**
@@ -225,17 +230,17 @@ Store.GuaranteedUpdate (registry store.go)
 
 | 规则 | 锚点 | 为什么必须保持 |
 |---|---|---|
-| Create 时 RV 必须为 0 | `store.Create`（:303 ～ :305） | 否则破坏「新建无 RV」契约，etcd 侧 CAS 语义失效 |
-| 落盘必加密 | `TransformToStorage`（Create :328 / updateOnce :527） | 落盘明文会泄露数据；读时 `TransformFromStorage` 对称解密 |
-| 冲突走重读重试、不加锁 | `txn.go GuaranteedUpdate`（:114 `for` 循环） | etcd 乐观并发模型；加锁会破坏 etcd 线性化语义 |
-| 短路前必须确认非 stale | `updateOnce`（:508 ～ :521） | 缓存可能滞后于 etcd，直接短路会丢写 |
-| key 防逃逸 | `PrepareKey`（interfaces.go:438） | 防 `..`/`./` 逃逸出 resourcePrefix，越权访问其它 key |
-| Create 不覆盖 | `OptimisticPut(expectedRev=0)` | 保证 Create 幂等语义：已存在即失败 |
+| Create 时 RV 必须为 0 | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` · `Create` `+13~+15` | 否则破坏「新建无 RV」契约，etcd 侧 CAS 语义失效 |
+| 落盘必加密 | `store.go` · `Create` `+36`；`store.go` · `updateOnce` `+43` | 落盘明文会泄露数据；读时 `TransformFromStorage` 对称解密 |
+| 冲突走重读重试、不加锁 | `staging/.../storage/txn.go` · `GuaranteedUpdate` `+1`（`for` 循环） | etcd 乐观并发模型；加锁会破坏 etcd 线性化语义 |
+| 短路前必须确认非 stale | `store.go` · `updateOnce` `+15~+32` | 缓存可能滞后于 etcd，直接短路会丢写 |
+| key 防逃逸 | `staging/.../storage/interfaces.go` · `PrepareKey` `+0` | 防 `..`/`./` 逃逸出 resourcePrefix，越权访问其它 key |
+| Create 不覆盖 | `vendor/.../kubernetes/client.go` · `OptimisticPut`（expectedRev=0） | 保证 Create 幂等语义：已存在即失败 |
 | uid 前置条件（上层） | registry 层 `AdmissionToValidateObjectFunc` | 见篇 06；storage 层只负责 RV 前置条件 |
 
 ### 2.7 refreshOnError、transformer 链与 lease 复用（加深）
 
-#### refreshOnError（txn.go:146）——冲突后重读的精确语义
+#### refreshOnError（`staging/.../storage/txn.go` · `refreshOnError` `+0`）——冲突后重读的精确语义
 
 `GuaranteedUpdate` 的 `for` 循环在冲突/前置条件失败时调 `refreshOnError` 重读。其精确语义：
 ```text
@@ -251,24 +256,24 @@ refreshOnError(st, err, ignoreNotFound, getCurrentState)
 
 #### transformer 链（value/transformer.go）
 
-`transformer.TransformToStorage` 的实现是一个 **provider 链**：
-- `Transformer` 接口（transformer.go:59）= `Read` + `Write`（即 `TransformFromStorage` / `TransformToStorage`）。
-- `prefixTransformers`（transformer.go:172）：按前缀匹配多个 transformer，**每个 transformer 用自己的 prefix 作为 `authenticatedDataString`**——这是加密的关联数据（AAD），保证 key 绑定密文。
+`transformer.TransformToStorage`（storage 层只看到这一个接口）的实际实现是一个 **provider 链**：
+- `Transformer` 接口（`staging/.../storage/value/transformer.go` · `Transformer` `+0`）= `Read` + `Write`（即 `TransformFromStorage` / `TransformToStorage`）。
+- `prefixTransformers`（`transformer.go` · `prefixTransformers.TransformToStorage` `+0`）：按前缀匹配多个 transformer，**每个 transformer 用自己的 prefix 作为 `authenticatedDataString`**——这是加密的关联数据（AAD），保证 key 绑定密文。
 - 具体实现：
-  - `identityTransformer`（encrypt/identity/identity.go:55）：恒等变换（不加密，用于未启用加密的资源）。
-  - `envelopeTransformer`（encrypt/envelope/kmsv2/envelope.go:256）：KMS envelope 加密——用 DEK 加密数据，DEK 用 KEK（KMS provider）加密后存 etcd annotation。
-  - `compression.go:68`：压缩 transformer（先压缩再加密）。
+  - `identityTransformer`（`staging/.../storage/value/encrypt/identity/identity.go` · `identityTransformer.TransformToStorage` `+0`）：恒等变换（不加密，用于未启用加密的资源）。
+  - `envelopeTransformer`（`staging/.../storage/value/encrypt/envelope/kmsv2/envelope.go` · `envelopeTransformer.TransformToStorage` `+0`）：KMS v2 envelope 加密——生成 DEK/seed 加密数据，DEK 用 KEK（KMS plugin）加密后连同 keyID/annotations 一起 proto 编码进落盘字节。同一目录另有非 KMS 版 `staging/.../encrypt/envelope/envelope.go` · `envelopeTransformer.TransformToStorage` `+0`。
+  - 压缩 transformer（`staging/.../storage/value/compression/compression.go` · `transformer.TransformToStorage` `+0`，由 `WithCompression` `+0` 包装）：先压缩再交下层加密。
 
 **provider 链的意义：** 资源可按 `ResourceTransformers.TransformerForResource(GroupResource)` 选择不同 transformer——不同资源可用不同加密策略。
 
-#### lease 复用（`leaseManager.GetLease`，lease_manager.go:90）
+#### lease 复用（`staging/.../etcd3/lease_manager.go` · `leaseManager.GetLease` `+0`）
 
 etcd lease 是**有限资源**（每个 lease 有 maxObjectCount），故 `leaseManager` 复用 lease：
 ```text
 GetLease(ttl)
 ├── reuseDurationSeconds = getReuseDurationSecondsLocked(ttl)
 ├── valid = now + ttl < prevLeaseExpirationTime（lease 未过期）
-├── sufficient = now + (ttl + reuseDurationSeconds) < prevLeaseExpirationTime
+├── sufficient = now + (ttl + reuseDurationSeconds) > prevLeaseExpirationTime
 │     （lease 还有足够余量）
 ├── leaseAttachedObjectCount++
 ├── valid && sufficient && count <= maxObjectCount → 复用 prevLeaseID
@@ -277,58 +282,61 @@ GetLease(ttl)
 ```
 **语义：** 复用条件是「lease 未过期 + 余量足够 + 对象数未超限」。不满足则申请新 lease（带额外 `reuseDurationSeconds` 余量）。这避免为每个对象都申请新 lease（etcd lease 有上限）。
 
-#### GetList 分页（store.GetList，:736）
+#### GetList 分块与流式（`staging/.../etcd3/store.go` · `GetList` `+0`）
 
-`GetList` 支持 etcd 分页：
-- `prepareKey(key, Recursive)` → keyPrefix。
-- `limit = opts.Predicate.Limit; paging = limit > 0`——`limit > 0` 时启用分页。
-- etcd 请求带 `limit` + `continue`（续读 token），实现大 list 的分页。
+`GetList` 不再是「一次 Range + continue」，而是**分块迭代**：
+- `prepareKey(key, opts.Recursive)` → keyPrefix；`limit = opts.Predicate.Limit`、`paging = limit > 0`。
+- `storage.ValidateListOptions` 校验并解析出 `withRev` + `continueKey`。
+- 默认走 `pagedChunks` `+0`（一页一个 `listChunk`，用 etcd `limit`+`continue` 续读）；当 etcd 支持 RangeStream 且 `shouldStream` `+0` 判定可流式时，改走 `streamChunks` `+0`，不支持则回退分页并标记该 etcd 不支持 RangeStream。
+- 每个 chunk 经 `appendChunk` 过滤/追加；`hasMore`/`limitReached` 决定是否继续；最终 `storage.PrepareContinueToken` 生成续读 token，`finalizeList` 回填 list 对象。
 
 ## 3. 验证、缺口与后续修改
 
 ### 3.1 代码回核与生产实测记录
 
-- **代码回核**：本专题所有「符号+偏移」均在 HEAD `782c049` 上用 `grep -n` / `sed -n` 复核（`store.Create` :293、`store.GuaranteedUpdate` :437、`store.updateOnce` :485、`prepareKey` :1232、`OptimisticPut` client.go:83、`txn.go GuaranteedUpdate` :114、`PrepareKey` interfaces.go:438）。
+- **代码回核**：本专题所有「符号+偏移」均在基准 `6bf0bfd51d7` 上用 `codegraph_explore` + `grep -n` 复核：`staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` 的 `Get`/`Create`/`Delete`/`DeleteOnce`/`GuaranteedUpdate`/`UpdateOnce`/`updateOnce`/`GetList`/`prepareKey`/`txnError`/`getCurrentState`/`stateFromEtcdResponse`、`storage/txn.go` 的 `GuaranteedUpdate`/`refreshOnError`/`updateState`、`storage/interfaces.go` 的 `PrepareKey`、`vendor/go.etcd.io/etcd/client/v3/kubernetes/client.go` 的 `OptimisticPut`、`lease_manager.go` 的 `GetLease`、`value/encrypt/identity/identity.go` 的 `identityTransformer.TransformToStorage`、`value/encrypt/envelope/kmsv2/envelope.go` 的 `envelopeTransformer.TransformToStorage`、`value/compression/compression.go` 的 `transformer.TransformToStorage`。文档内不写绝对行号，行号由读者按符号实时获取。
 - **生产实测**：**未实测** `[待运行验证]`。etcd txn 的实际 `ModRevision` 比较、加密 provider 行为、lease 到期清理均为代码推断，未在真实 etcd 集群抓包/查 key 验证。
 
 ### 3.2 已知缺口和待验证事项
 
 | 缺口 | 性质 | 说明 |
 |---|---|---|
-| 通用 `GuaranteedUpdate` 的 `refreshOnError` | 未逐行读 | 冲突/前置条件失败后的重读细节（txn.go:146 起）未展开 |
+| 通用 `GuaranteedUpdate` 的 `refreshOnError` | 已回核 | 冲突/前置条件失败后的重读语义见 §2.7；`getCurrentState` 的 etcd 读细节未展开 |
 | `TransformToStorage` 的 provider 链 | 未深挖 | KMS/AES-gcm 等具体 provider 实现未读（只讲 storage 层调用点） |
 | etcd lease 续期 | 未深挖 | `leaseManager` 如何续期、到期清理时序未读 |
 | watch 推送 | 不在范围 | 写入后的 watch 广播属 watch 链路，本专题不覆盖 |
-| `GetList` 分页/续读 | 未深挖 | `store.GetList`（:736）的 list/continue 语义未展开 |
+| `GetList` 分块/流式/续读 | 部分回核 | `GetList`/`pagedChunks`/`streamChunks`/`shouldStream` 入口已核对；`appendChunk` 过滤与 continue token 生成细节未展开 |
 
 ### 3.3 修改联动清单、源码索引与关联文档
 
 **改动这块前必查：**
-- 改 `OptimisticPut` 签名或语义 → 同步 etcd3 `store.Create`/`updateOnce`/`deleteOnce` 三处调用，以及魔改 client `vendor/.../kubernetes/client.go`。
+- 改 `OptimisticPut` 签名或语义 → 同步 etcd3 `Create`/`updateOnce`/`deleteOnce` 三处调用，以及魔改 client `vendor/go.etcd.io/etcd/client/v3/kubernetes/client.go`（`OptimisticPut`/`OptimisticDelete`）与 `interface.go`（`PutOptions`/`PutResponse`）。
 - 改加密变换 → 同步写路径 `TransformToStorage` 与读路径 `TransformFromStorage`（对称）。
-- 改 key 前缀/校验 → `prepareKey`（etcd3）与 `PrepareKey`（interfaces.go）两处都要改。
-- 改重试循环 → `txn.go GuaranteedUpdate` 的 `for` 循环与 `refreshOnError`。
-- 改短路写 → `updateOnce` 的 `!Stale && data==origState.Data` 分支与其 `FromStorage` 判定。
+- 改 key 前缀/校验 → `staging/.../etcd3/store.go` · `prepareKey` 与 `staging/.../storage/interfaces.go` · `PrepareKey` 两处都要改。
+- 改重试循环 → `staging/.../storage/txn.go` · `GuaranteedUpdate` 的 `for` 循环与 `refreshOnError`（注意 `TxnDelegator` 现在是中间接口，etcd3 `storeTxnDelegator` 与 cacher `txnDelegator` 都实现它）。
+- 改短路写 → `staging/.../etcd3/store.go` · `updateOnce` 的 `!Stale && bytes.Equal(data, origState.Data)` 分支与其 `FromStorage` 判定。
 
-**源码索引：**
+**源码索引（符号 → 文件；行号由读者用 `sr_tools.py offset` 实时获取，本文不写绝对行号）：**
 
-| 符号 | 文件:行 |
+| 符号 | 文件（完整路径，`+0` = 定义行） |
 |---|---|
-| `store.Get` | `etcd3/store.go:244` |
-| `store.Create` | `etcd3/store.go:293` |
-| `store.Delete` | `etcd3/store.go:361` |
-| `store.DeleteOnce` | `etcd3/store.go:394` |
-| `store.GuaranteedUpdate` | `etcd3/store.go:437` |
-| `store.UpdateOnce` | `etcd3/store.go:472` |
-| `store.updateOnce` | `etcd3/store.go:485` |
-| `store.GetList` | `etcd3/store.go:736` |
-| `store.prepareKey` | `etcd3/store.go:1232` |
-| `txnError` | `etcd3/store.go:1253` |
-| `Client.OptimisticPut` | `vendor/.../kubernetes/client.go:83` |
-| `GuaranteedUpdate`（通用循环） | `storage/txn.go:114` |
-| `PrepareKey` | `storage/interfaces.go:438` |
-| registry `Store.Create` | `generic/registry/store.go:564` |
-| registry `Store.create` | `generic/registry/store.go:595` |
+| `Get` / `Create` / `Delete` / `DeleteOnce` / `deleteOnce` | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` |
+| `GuaranteedUpdate` / `UpdateOnce` / `updateOnce` | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` |
+| `GetList` / `pagedChunks` / `streamChunks` / `shouldStream` | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` |
+| `getCurrentState` / `stateFromEtcdResponse` / `prepareKey` / `txnError` | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` |
+| `storeTxnDelegator` / `newStoreTxnDelegator` / `storeTxnDelegator.{GetCurrentState,UpdateOnce,DeleteOnce}` | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/store.go` |
+| `TxnDelegator` / `ObjState` / `GetStateFromObject` | `staging/src/k8s.io/apiserver/pkg/storage/txn.go` |
+| `GuaranteedUpdate`（通用循环）/ `refreshOnError` / `updateState` / `ConditionalDelete` | `staging/src/k8s.io/apiserver/pkg/storage/txn.go` |
+| `PrepareKey` | `staging/src/k8s.io/apiserver/pkg/storage/interfaces.go` |
+| `leaseManager.GetLease` / `getReuseDurationSecondsLocked` | `staging/src/k8s.io/apiserver/pkg/storage/etcd3/lease_manager.go` |
+| `Client.OptimisticPut` / `Client.OptimisticDelete` | `vendor/go.etcd.io/etcd/client/v3/kubernetes/client.go` |
+| `Interface`（Kubernetes 客户端接口）/ `PutOptions` / `PutResponse` | `vendor/go.etcd.io/etcd/client/v3/kubernetes/interface.go` |
+| `identityTransformer.TransformToStorage` | `staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/identity/identity.go` |
+| `envelopeTransformer.TransformToStorage`（KMS v2） | `staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/kmsv2/envelope.go` |
+| `envelopeTransformer.TransformToStorage`（非 KMS 版） | `staging/src/k8s.io/apiserver/pkg/storage/value/encrypt/envelope/envelope.go` |
+| `transformer.TransformToStorage` / `WithCompression` | `staging/src/k8s.io/apiserver/pkg/storage/value/compression/compression.go` |
+| `Transformer` / `prefixTransformers.TransformToStorage` | `staging/src/k8s.io/apiserver/pkg/storage/value/transformer.go` |
+| registry `Store.Create` / `Store.create` / `Store.Update` | `staging/src/k8s.io/apiserver/pkg/registry/generic/registry/store.go` |
 
 **关联文档：** [06-apiserver请求处理与etcd](../sourceReader/06-apiserver请求处理与etcd.md)（§2.3 泛型 Store 与 etcd、§5.3 deleteObject 为本专题的上层入口浓缩版）；[03-主链路逐步拆解](../sourceReader/03-主链路逐步拆解.md)（第二段 apiserver 持久化）。
 
