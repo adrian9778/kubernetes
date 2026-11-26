@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 kubelet **镜像拉取与背压**讲透：`EnsureImageExists` 拉取决策、pull backoff（指数退避）、QPS 节流（throttleImagePulling）、并行/串行 puller、镜像 GC。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `m.EnsureImageExists+0`。
 >
@@ -60,7 +60,7 @@ NewImageManager(...)
 └── serialized（串行/并行 puller 选择）                              (:87/:95)
 ```
 
-### 2.2 QPS 节流（`throttleImagePulling`，helpers.go :32）
+### 2.2 QPS 节流（`pkg/kubelet/images/helpers.go` · `throttleImagePulling` +0，:32）
 
 `throttleImagePulling(imageService, qps, burst)`：用 rate limiter 包装 ImageService，限制拉取 QPS/burst——**避免并发拉取打爆仓库**。
 
@@ -136,7 +136,7 @@ SyncPod → startContainer → imagePuller.EnsureImageExists (image_manager.go:1
 ├── pullImage (:335)
 │    ├── backOffKey = podUID_image (:354)
 │    ├── backOff 退避中 → 跳过 + BackOffPullImage 事件 (:355)
-│    └── 实际拉取（经 throttleImagePulling 限速，helpers.go:32）
+│    └── 实际拉取（经 throttleImagePulling 限速，pkg/kubelet/images/helpers.go:32）
 │         └── parallel/serial puller 并发控制 (puller.go)
 └── evalCRIPullErr (:402) 解析错误
      └── 镜像就绪 → 创建容器
@@ -149,7 +149,7 @@ SyncPod → startContainer → imagePuller.EnsureImageExists (image_manager.go:1
 
 | 保证 | 锚点 | 为什么必须保持 |
 |---|---|---|
-| QPS 节流 | `throttleImagePulling`（helpers.go:32） | 并发拉取不打爆镜像仓库 |
+| QPS 节流 | `pkg/kubelet/images/helpers.go` · `throttleImagePulling`（:32） | 并发拉取不打爆镜像仓库 |
 | pull backoff | `m.pullImage+20`（flowcontrol.Backoff） | 失败不快速连续重试 |
 | 并发控制 | parallel/serial puller（puller.go:46/:97） | 控制拉取并发度 |
 | 磁盘保护 | `GarbageCollect+0`（image_gc_manager.go:349） | 镜像不撑满节点磁盘 |
@@ -160,10 +160,12 @@ SyncPod → startContainer → imagePuller.EnsureImageExists (image_manager.go:1
 
 ### 7.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
+本专题所有「符号+偏移」均在 adrian `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26）上复核：
 - image_manager.go：`NewImageManager+0`（:81）、`throttleImagePulling`（NewImageManager+23/:104，helpers.go:32）、`m.EnsureImageExists+0`（:181）、`m.imagePullPrecheck+0`（:120）、`m.imageNotPresentOnNeverPolicyError+0`（:173）、`m.pullImage`（:335）、backOff（:62/:354/:355）、`m.evalCRIPullErr+0`（:402）
 - puller.go：`parallelImagePuller+0`（:46）、`newParallelImagePuller+0`（:51）、`serialImagePuller+0`（:97）、`newSerialImagePuller+0`（:102）
 - image_gc_manager.go：`NewImageGCManager+0`（:192）、`detectImages+0`（:244）、`GarbageCollect+0`（:349）
+
+**基准漂移核对（88939239381 → 6bf0bfd）：** 漂移区间内 kubelet 镜像相关代码仅 `pkg/kubelet/container/helpers.go` 变更（+6 行），内容是 `RuntimeHelper` 接口新增 `PodSwapStats`、`CleanContainerSubPaths` 两个方法，与镜像拉取决策、pull backoff、QPS 节流、parallel/serial puller、image GC 语义均无关。`image_manager.go`、`image_gc_manager.go`、`puller.go`、`pkg/kubelet/images/helpers.go` 四个文件零改动，故本文所有镜像拉取与背压锚点与语义维持原样，无需改写；本次仅更新头部基准并消除 `helpers.go` 裸文件名的跨包歧义（`throttleImagePulling` 实际定义在 `pkg/kubelet/images/helpers.go`）。
 
 ### 7.2 生产实测
 
