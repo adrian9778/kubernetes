@@ -2,7 +2,7 @@
 
 # Job 与 CronJob 控制器
 
-> **代码基准**：master@`8893923938107170c86eb4b8cc2b7225b4e44e9b`（2026-11-18，工作区 `.go` 干净），Go 1.27.4。
+> **代码基准**：adrian@`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区 `.go` 干净），Go 1.27.4。
 > **层级**：第四层——函数级源码解析。
 > **范围**：Job 的 Pod 调谐与 tracking finalizer、完成/失败计数、退避；CronJob 的周期调度与并发策略。
 > **记法**：函数定义行记 `符号+0`，`符号+N` 表示自该函数定义行起第 N 行（仅 Job/CronJob 控制器函数）。类型与常量无偏移语义，记 `符号 @ 文件:行号`。
@@ -283,7 +283,7 @@ CronJob sync
 
 ### 验证
 - 证据索引：`docs/sourceReader/.progress/evidence/13.md`（2026-11-18 21:17+08:00 生成）。
-- 本轮核对：HEAD `8893923938107170c86eb4b8cc2b7225b4e44e9b`；Job 17 个函数锚点、CronJob 14 个符号锚点逐行回源码验证成立；`exceedsBackoffLimit` 确认为 `syncJob` 内局部变量（:1087）；`jobControlInterface` 确认在 `jobControlInterface+0`；`syncJobCtx` 确认含 `podGroup`/`ready`/`terminating`/`podsWithDelayedDeletionPerIndex` 新增字段。
+- 本轮核对：基准 `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，自旧基准 `8893923` 起 168 提交）；`pkg/controller/job`、`pkg/controller/cronjob`、`pkg/util/parsers`、`staging/src/k8s.io/api/batch` 四处在该区间与 `6bf0bfd..HEAD`（49 提交）两次 diff 均为空，工作区无未提交改动，故正文锚点无需改写。codegraph 复核定义行未变：`syncJob` :929（体至 1225）、`manageJob` :1771、`getNewFinishedPods` :1751、`canRemoveFinalizer` :1478、`syncJobCtx` :152（含 `podGroup`/`ready`/`terminating`/`podsWithDelayedDeletionPerIndex`）、`syncCronJob` :449（体至 697）、`mostRecentScheduleTime` :100、`jobControlInterface` :81（injection.go）；`exceedsBackoffLimit` 仍为 `syncJob` 内局部变量（+158）。
 - 未确认项：无（本文件全部锚点均已回源码验证，无 `[源码未确认]` 项）。
 
 [上一篇](12-deployment控制器.md) · [总目录](README.md) · [下一篇](14-daemonset控制器.md)
