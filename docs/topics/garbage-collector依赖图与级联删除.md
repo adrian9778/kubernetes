@@ -1,10 +1,32 @@
-[上一篇](../sourceReader/21-设备插件与网络边界.md) · [总目录](../sourceReader/README.md) · [返回专题索引](../sourceReader/README.md#专题topics)
+[上一篇](../sourceReader/21-设备插件与网络边界.md) · ### 6.5 基准同步核对（`6bf0bfd`，2026-11-26）
+
+GC 包（`pkg/controller/garbagecollector/`）在本轮漂移区间**零改动**，本文档结论与锚点无需改写。用 MCP `codegraph_explore` 抽查关键锚点，定义行与本文档记录**逐一吻合**：
+
+| 锚点 | 文件 | def 行 |
+|---|---|---|
+| `GraphBuilder` | graph_builder.go | 82 |
+| `gb.GetGraphResources` | graph_builder.go | 1016 |
+| `NewDependencyGraphBuilder` | graph_builder.go | 141 |
+| `gb.Run` / `gb.addDependentToOwners` / `gb.insertNode` / `gb.processTransitions` / `gb.processGraphChanges` | graph_builder.go | 391 / 450 / 547 / 675 / 710 |
+| `hasDeleteDependentsFinalizer` / `hasOrphanFinalizer` / `hasFinalizer` / `startsWaitingForDependentsDeleted` / `startsWaitingForDependentsOrphaned` | graph_builder.go | 623 / 627 / 631 / 638 / 644 |
+| `GarbageCollector` / `NewGarbageCollector` | garbagecollector.go | 61 / 80 |
+| `gc.attemptToDeleteItem` | garbagecollector.go | 500 |
+| `gc.classifyReferences` / `gc.isDangling` / `gc.orphanDependents` / `gc.processAttemptToDeleteWorker` / `gc.attemptToDeleteWorker` / `gc.processAttemptToOrphanWorker` / `gc.attemptToOrphanWorker` | garbagecollector.go | 461 / 380 / 680 / 294 / 319 / 728 / 746 |
+| `gc.deleteOwnerRefJSONMergePatch` | patch.go | 109 |
+
+**关于 `changes.go`**：该文件在当前基准的 GC 包中**不存在**（包内实际文件为 `garbagecollector.go`、`graph_builder.go`、`graph.go`、`patch.go`、`operations.go`、`errors.go`、`uid_cache.go`、`dump.go` 及各自测试）。本文档正文从未引用 `changes.go`，故此差异只作核对记录，不构成文档失效。
+
+`sr_tools.py verify` 本篇：✗ 0（48 项引用，46 ✓ + 2 `?` 均为 `patch.go` 跨包同名歧义，非失效）。
+
+---
+
+[总目录](../sourceReader/README.md) · [返回专题索引](../sourceReader/README.md#专题topics)
 
 # garbage-collector 依赖图与级联删除
 
 > **层级**：跨篇机制纵深专题——把 kube-controller-manager 的 **Garbage Collector** 讲透：owner/dependent 依赖图维护、孤儿与悬挂引用判定、Foreground/Background/Orphan 三种级联删除。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4）。所有「符号+偏移」均在该基准上复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `gc.attemptToDeleteItem+0`。
 >
@@ -179,7 +201,7 @@ owner 删除（带 orphan finalizer）
 
 ### 6.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
+本专题所有「符号+偏移」均在 HEAD `6bf0bfd` 上复核：
 - `GarbageCollector+0`（garbagecollector.go:61）、`NewGarbageCollector+0`（:80）、`Run+0`（:129）
 - `processAttemptToDeleteWorker+0`（:294）、`attemptToDeleteWorker+0`（:319）、`attemptToDeleteItem+0`（:500）、`classifyReferences+0`（:461）、`isDangling+0`（:380）、`orphanDependents+0`（:680）、`processAttemptToOrphanWorker+0`（:728）、`attemptToOrphanWorker+0`（:746）
 - `deleteOwnerRefJSONMergePatch+0`（patch.go:109）
@@ -206,5 +228,27 @@ owner 删除（带 orphan finalizer）
 - 改孤儿化 → `orphanDependents`/`deleteOwnerRefJSONMergePatch`，同步 §4.3。
 
 **关联文档：** [15-garbage-collector垃圾回收](../sourceReader/15-garbage-collector垃圾回收.md)（GC 全貌）、[12-deployment控制器](../sourceReader/12-deployment控制器.md)（Deployment→RS→Pod 依赖链）、[08-controller副本控制](../sourceReader/08-controller副本控制.md)（ReplicaSet）。
+
+### 6.5 基准同步核对（`6bf0bfd`，2026-11-26）
+
+GC 包（`pkg/controller/garbagecollector/`）在本轮漂移区间**零改动**，本文档结论与锚点无需改写。用 MCP `codegraph_explore` 抽查关键锚点，定义行与本文档记录**逐一吻合**：
+
+| 锚点 | 文件 | def 行 |
+|---|---|---|
+| `GraphBuilder` | graph_builder.go | 82 |
+| `gb.GetGraphResources` | graph_builder.go | 1016 |
+| `NewDependencyGraphBuilder` | graph_builder.go | 141 |
+| `gb.Run` / `gb.addDependentToOwners` / `gb.insertNode` / `gb.processTransitions` / `gb.processGraphChanges` | graph_builder.go | 391 / 450 / 547 / 675 / 710 |
+| `hasDeleteDependentsFinalizer` / `hasOrphanFinalizer` / `hasFinalizer` / `startsWaitingForDependentsDeleted` / `startsWaitingForDependentsOrphaned` | graph_builder.go | 623 / 627 / 631 / 638 / 644 |
+| `GarbageCollector` / `NewGarbageCollector` | garbagecollector.go | 61 / 80 |
+| `gc.attemptToDeleteItem` | garbagecollector.go | 500 |
+| `gc.classifyReferences` / `gc.isDangling` / `gc.orphanDependents` / `gc.processAttemptToDeleteWorker` / `gc.attemptToDeleteWorker` / `gc.processAttemptToOrphanWorker` / `gc.attemptToOrphanWorker` | garbagecollector.go | 461 / 380 / 680 / 294 / 319 / 728 / 746 |
+| `gc.deleteOwnerRefJSONMergePatch` | patch.go | 109 |
+
+**关于 `changes.go`**：该文件在当前基准的 GC 包中**不存在**（包内实际文件为 `garbagecollector.go`、`graph_builder.go`、`graph.go`、`patch.go`、`operations.go`、`errors.go`、`uid_cache.go`、`dump.go` 及各自测试）。本文档正文从未引用 `changes.go`，故此差异只作核对记录，不构成文档失效。
+
+`sr_tools.py verify` 本篇：✗ 0（48 项引用，46 ✓ + 2 `?` 均为 `patch.go` 跨包同名歧义，非失效）。
+
+---
 
 [总目录](../sourceReader/README.md)
