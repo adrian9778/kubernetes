@@ -4,9 +4,9 @@
 
 > **层级**：跨篇机制纵深专题——把 **admission webhook**（mutating + validating）讲透：两种 webhook 插件的装配、Dispatch 分发、webhook 调用与 patch 应用、失败语义（fail-open/fail-closed）。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
 >
-> **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `a.Dispatch+0`。
+> **锚点记法**：函数内偏移以函数声明行为 **+0**，统一写作 `` `完整路径.go` · `Symbol` `+N` ``（符号名不带 `func`/`type` 前缀、不带 receiver）。
 >
 > **事实红线**：生产实测与代码推断分开标注；未实测项标 `[待运行验证]`。
 >
@@ -62,28 +62,28 @@
 
 ### 2.1 装配（mutating/plugin.go）
 
-`NewMutatingWebhook+0`（mutating/plugin.go :72）读配置文件、构造 `Plugin`（含 `newMutatingDispatcher`，dispatcher.go :73）。
+`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/plugin.go` · `NewMutatingWebhook` `+0` 读配置文件、构造 `Plugin`（含 `newMutatingDispatcher`，`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/dispatcher.go` · `newMutatingDispatcher` `+0`）。
 
-### 2.2 `Plugin.Admit`——入口（mutating/plugin.go `a.Admit+0`，:99）
+### 2.2 `Plugin.Admit`——入口
 
 ```text
-Admit(ctx, attr, o)                              a.Admit+0
-└── Dispatch(ctx, attr, o, hooks)                a.Dispatch+0 (dispatcher.go:105)
+Admit(ctx, attr, o)                              mutating/plugin.go · a.Admit+0
+└── Dispatch(ctx, attr, o, hooks)                mutating/dispatcher.go · a.Dispatch+0
       ↑ 选出匹配的 mutating webhook，逐个调用
 ```
 
-### 2.3 `mutatingDispatcher.Dispatch`——分发（dispatcher.go `a.Dispatch+0`，:105）
+### 2.3 `mutatingDispatcher.Dispatch`——分发
 
 ```text
-Dispatch(ctx, attr, o, hooks)                    a.Dispatch+0
+Dispatch(ctx, attr, o, hooks)                    mutating/dispatcher.go · a.Dispatch+0
 ├── 按规则筛选匹配的 webhook（namespaceSelector/objectSelector/rules/apiGroups/verbs）
 ├── for each 匹配的 webhook（可多轮 reinvocation）:
-│    └── callAttrMutatingHook(...)                a.callAttrMutatingHook+0 (:244)
+│    └── callAttrMutatingHook(...)                mutating/dispatcher.go · a.callAttrMutatingHook+0
 │         ↑ 调 webhook server，拿 JSON Patch，应用到对象
 └── 应用所有 patch 到对象（mutated 则记 annotation）
 ```
 
-### 2.4 `callAttrMutatingHook`——调单个 webhook（dispatcher.go `a.callAttrMutatingHook+0`，:244）
+### 2.4 `callAttrMutatingHook`——调单个 webhook
 
 调 webhook server 的 `/mutate` 接口，拿 `AdmissionReview` 响应（含 JSON Patch），应用到对象。失败按 `failurePolicy` 处理。
 
@@ -93,17 +93,17 @@ Dispatch(ctx, attr, o, hooks)                    a.Dispatch+0
 
 ### 3.1 装配（validating/plugin.go）
 
-`NewValidatingAdmissionWebhook+0`（validating/plugin.go :74）构造 `Plugin`（含 `newValidatingDispatcher`，:60）。
+`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/validating/plugin.go` · `NewValidatingAdmissionWebhook` `+0` 构造 `Plugin`（含 `newValidatingDispatcher`，`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/validating/dispatcher.go` · `newValidatingDispatcher` `+0`）。
 
-### 3.2 `Plugin.Validate`——入口（validating/plugin.go `a.Validate+0`，:93）
+### 3.2 `Plugin.Validate`——入口
 
 ```text
-Validate(ctx, attr, o)                           a.Validate+0
-└── Dispatch(ctx, attr, o, hooks)                d.Dispatch+0 (dispatcher.go:88)
+Validate(ctx, attr, o)                           validating/plugin.go · a.Validate+0
+└── Dispatch(ctx, attr, o, hooks)                validating/dispatcher.go · d.Dispatch+0
       ↑ 选出匹配的 validating webhook，逐个调用（只 allow/deny，不改对象）
 ```
 
-### 3.3 `validatingDispatcher.Dispatch`（dispatcher.go `d.Dispatch+0`，:88）
+### 3.3 `validatingDispatcher.Dispatch`
 
 与 mutating 类似，但**不应用 patch**——只收集各 webhook 的 allow/deny 决定，任一 deny 则拒绝。
 
@@ -113,15 +113,15 @@ Validate(ctx, attr, o)                           a.Validate+0
 
 ### 4.1 mutating 内联触发
 
-`createHandler` 直接调 `mutatingAdmission.Admit(ctx, admissionAttributes, scope)`（create.go :203）——在对象默认化之前修改对象。
+`createHandler`（`staging/src/k8s.io/apiserver/pkg/endpoints/handlers/create.go` · `createHandler` `+0`）直接调 `mutatingAdmission.Admit(ctx, admissionAttributes, scope)`（调用点 `staging/src/k8s.io/apiserver/pkg/endpoints/handlers/create.go` · `createHandler` `+150`）——在对象默认化之前修改对象。
 
 ### 4.2 validating 经 storage 写触发
 
-`createHandler` 把 `rest.AdmissionToValidateObjectFunc(admit, attrs, scope)`（create.go :188，函数在 registry/rest/create.go `AdmissionToValidateObjectFunc+0`，:218）作为 validate 回调传给 `Store.Create`——validating 在 storage 写路径内执行，**看最终写入对象**。update 用 `AdmissionToValidateObjectUpdateFunc+0`（update.go :286）。
+`createHandler` 把 `rest.AdmissionToValidateObjectFunc(admit, attrs, scope)`（调用点 `staging/src/k8s.io/apiserver/pkg/endpoints/handlers/create.go` · `createHandler` `+135`，函数在 `staging/src/k8s.io/apiserver/pkg/registry/rest/create.go` · `AdmissionToValidateObjectFunc` `+0`）作为 validate 回调传给 `Store.Create`——validating 在 storage 写路径内执行，**看最终写入对象**。update 用 `staging/src/k8s.io/apiserver/pkg/registry/rest/update.go` · `AdmissionToValidateObjectUpdateFunc` `+0`。
 
 ### 4.3 admission 链（chain）
 
-`NewChainHandler+0`（admission/chain.go :26）串联多个 admission 插件；`admission.Interface`（interfaces.go :124）定义 `Admit`/`Validate`。
+`staging/src/k8s.io/apiserver/pkg/admission/chain.go` · `NewChainHandler` `+0` 串联多个 admission 插件；`staging/src/k8s.io/apiserver/pkg/admission/interfaces.go` · `Interface` `+0`（`Admit`/`Validate` 分别由同文件 `MutationInterface`/`ValidationInterface` 定义）。
 
 ---
 
@@ -129,15 +129,15 @@ Validate(ctx, attr, o)                           a.Validate+0
 
 ```text
 POST /api/v1/namespaces/default/pods
-└── createHandler (create.go:53)
-     ├── mutatingAdmission.Admit (mutating/plugin.go:99)
-     │    └── Dispatch (dispatcher.go:105)
-     │         └── callAttrMutatingHook (:244) × N 匹配的 mutating webhook
+└── createHandler (endpoints/handlers/create.go · createHandler+0)
+     ├── mutatingAdmission.Admit (mutating/plugin.go · a.Admit+0)
+     │    └── Dispatch (mutating/dispatcher.go · a.Dispatch+0)
+     │         └── callAttrMutatingHook (mutating/dispatcher.go · a.callAttrMutatingHook+0) × N 匹配的 mutating webhook
      │              └── webhook server /mutate → JSON Patch → 应用到对象
      ├── 对象默认化 + validation
-     └── Store.Create → validating 回调 AdmissionToValidateObjectFunc (create.go:218)
-          └── validatingAdmission.Validate (validating/plugin.go:93)
-               └── Dispatch (dispatcher.go:88) × N 匹配的 validating webhook
+     └── Store.Create → validating 回调 AdmissionToValidateObjectFunc (registry/rest/create.go · AdmissionToValidateObjectFunc+0)
+          └── validatingAdmission.Validate (validating/plugin.go · a.Validate+0)
+               └── Dispatch (validating/dispatcher.go · d.Dispatch+0) × N 匹配的 validating webhook
                     └── webhook server /validate → allow/deny
                          └── 全部 allow → 落 etcd；任一 deny → 拒绝
 ```
@@ -148,10 +148,10 @@ POST /api/v1/namespaces/default/pods
 
 | 保证 | 锚点 | 为什么必须保持 |
 |---|---|---|
-| mutating 在 validation 前 | `a.Admit+0` → `a.Dispatch+0` | 先改对象再校验最终形态 |
-| validating 看最终对象 | `AdmissionToValidateObjectFunc+0`（storage 写内） | 校验的是真正要写入的对象 |
-| 失败语义可控 | `callAttrMutatingHook+0`（failurePolicy） | fail-open/fail-closed 按配置 |
-| 多 webhook 顺序分发 | `a.Dispatch+0`（逐个调用 + reinvocation） | 一个 webhook 的修改对后续可见 |
+| mutating 在 validation 前 | `staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/plugin.go` · `a.Admit` `+0` → `staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/dispatcher.go` · `a.Dispatch` `+0` | 先改对象再校验最终形态 |
+| validating 看最终对象 | `staging/src/k8s.io/apiserver/pkg/registry/rest/create.go` · `AdmissionToValidateObjectFunc` `+0`（storage 写内） | 校验的是真正要写入的对象 |
+| 失败语义可控 | `staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/dispatcher.go` · `a.callAttrMutatingHook` `+0`（failurePolicy） | fail-open/fail-closed 按配置 |
+| 多 webhook 顺序分发 | `staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/dispatcher.go` · `a.Dispatch` `+0`（逐个调用 + reinvocation） | 一个 webhook 的修改对后续可见 |
 
 ---
 
@@ -159,11 +159,11 @@ POST /api/v1/namespaces/default/pods
 
 ### 7.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
-- mutating：`NewMutatingWebhook+0`（plugin.go:72）、`a.Admit+0`（:99）、`a.Dispatch+0`（dispatcher.go:105）、`a.callAttrMutatingHook+0`（:244）、`newMutatingDispatcher`（:73）
-- validating：`NewValidatingAdmissionWebhook+0`（plugin.go:74）、`a.Validate+0`（:93）、`d.Dispatch+0`（dispatcher.go:88）、`newValidatingDispatcher`（:60）
-- chain：`NewChainHandler+0`（chain.go:26）、`admission.Interface`（interfaces.go:124）
-- 触发：`AdmissionToValidateObjectFunc+0`（registry/rest/create.go:218）、`AdmissionToValidateObjectUpdateFunc+0`（update.go:286）、create.go 调用点（:188/:203）
+本专题所有「符号+偏移」均在 `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4` 上复核：
+- mutating：`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/plugin.go` · `NewMutatingWebhook` `+0`、`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/plugin.go` · `a.Admit` `+0`、`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/dispatcher.go` · `a.Dispatch` `+0`、`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/dispatcher.go` · `a.callAttrMutatingHook` `+0`、`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/dispatcher.go` · `newMutatingDispatcher` `+0`
+- validating：`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/validating/plugin.go` · `NewValidatingAdmissionWebhook` `+0`、`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/validating/plugin.go` · `a.Validate` `+0`、`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/validating/dispatcher.go` · `d.Dispatch` `+0`、`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/validating/dispatcher.go` · `newValidatingDispatcher` `+0`
+- chain：`staging/src/k8s.io/apiserver/pkg/admission/chain.go` · `NewChainHandler` `+0`、`staging/src/k8s.io/apiserver/pkg/admission/interfaces.go` · `Interface` `+0`
+- 触发：`staging/src/k8s.io/apiserver/pkg/registry/rest/create.go` · `AdmissionToValidateObjectFunc` `+0`、`staging/src/k8s.io/apiserver/pkg/registry/rest/update.go` · `AdmissionToValidateObjectUpdateFunc` `+0`、`staging/src/k8s.io/apiserver/pkg/endpoints/handlers/create.go` · `createHandler` `+0`（两处调用点 `+135`/`+150`）
 
 ### 7.2 生产实测
 
