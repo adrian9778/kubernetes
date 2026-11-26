@@ -277,7 +277,7 @@ flowchart TD
 ## 3. 证据与缺口
 
 - 本文符号均在当前工作区 `pkg/scheduler/framework/plugins/dynamicresources/`、`pkg/controller/resourceclaim/`、`pkg/controller/devicetainteviction/`、`pkg/kubelet/cm/dra/`、`staging/src/k8s.io/api/resource/v1beta1/` 下经 grep 核实存在；偏移以定义行为 `+0`。
-- §2.5 抢占子系统的符号定义行经 codegraph 逐个回核（`preemptionData`@59、`nominate`@86、`PodEligibleToPreempt`@81、`holdsOnNode`@47、`Filter`@1024、`stateData`@73、`nodeAllocation`@197 等），与文中偏移一致。§2.5 锚点采用带路径的 `pkg/.../file.go` · `Symbol` `+0` 记法以消歧同名符号（`stateData`、`podGroupStateData` 等在多文件存在），与 §2.3 的裸 `Symbol+0` 记法并存（此处 `Symbol+0` 为记法示例，非具体符号引用）。
+- §2.5 抢占子系统的符号定义行经 codegraph 逐个回核（`preemptionData`@59、`nominate`@86、`PodEligibleToPreempt`@81、`holdsOnNode`@47、`Filter`@1024、`stateData`@73、`nodeAllocation`@197 等），与文中偏移一致。§2.5 锚点采用带路径的「文件 · 符号 +0」记法（路径与符号写在同一单元格）以消歧同名符号（stateData、podGroupStateData 等在多文件存在），与 §2.3 的裸符号记法并存。
 - 生产实测：抢占链路（受害者选定、设备保留、HoldReleased 事件、PodEligibleToPreempt 阻止重复抢占）需 `DRAPreemption` 启用 + 真实多优先级设备工作负载才能观察 `[待运行验证]`。
 - 源自旧库 `docs/adrian/sourceReader2/11-v1.37-Workload-PodGroup与DRA.md` 的主题，按当前源码重写并替换其 `#L` 行号引用为符号+偏移。
 - 待确认：resource API 的默认启用版本与各版本 gate 关系，以 `staging/src/k8s.io/api/resource/` 当前版本目录与 `pkg/features/` 为准 `[待运行验证]`。
