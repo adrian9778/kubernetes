@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 kubelet 的**主循环（syncLoop）、per-Pod 串行 worker（podWorkers）、PLEG 容器状态探测**讲透：三源 PodConfig 合并、syncLoop 事件分派、per-Pod 串行化、PLEG Relist 生成容器事件。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd5`（2026-11-26，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `kl.syncLoop+0`。
 >
@@ -67,63 +67,77 @@ Pod 的 `status.phase`/`containerStatuses` 被逐步推进到期望；异常容�
 
 ## 3. 开发视角：主循环（syncLoop）
 
-### 3.1 `Run` → `syncLoop`（kubelet.go `kl.Run+0`，:1988 → `kl.syncLoop+0`，:2814）
+### 3.1 `Run` → `syncLoop`（kubelet.go `kl.Run+0` → `kl.syncLoop+0`）
 
-`Run` 启动全部内部组件（runtime、pleg、podWorkers、statusManager、volumeManager），最后进 `syncLoop`。`syncLoop` 是 select 循环，消费 `PodConfig.Updates()`。
+`Run` 启动全部内部组件（runtime、pleg、podWorkers、statusManager、volumeManager），最后进 `syncLoop`。`syncLoop` 是 for+select 循环，消费 `PodConfig.Updates()`；每轮先查 `runtimeState.runtimeErrors()`，runtime 报错则指数退避跳过本轮同步。
 
-### 3.2 `syncLoopIteration`——事件分派（kubelet.go `kl.syncLoopIteration+0`，:2889）
+### 3.2 `syncLoopIteration`——事件分派（kubelet.go `kl.syncLoopIteration+0`）
 
 ```text
-syncLoopIteration(ctx, configCh, handler, ...)
+syncLoopIteration(ctx, configCh, syncCh, housekeepingCh, plegCh, ...)
 ├── select configCh（期望 Pod 变化）：
 │   ├── ADD      → HandlePodAdditions
 │   ├── UPDATE   → HandlePodUpdates
 │   ├── REMOVE   → HandlePodRemoves
 │   ├── RECONCILE→ HandlePodReconcile
-│   └── DELETE   → HandlePodRemoves
-├── select plegCh（PLEG 容器事件）→ HandlePodSyncs
-├── select housekeepingTicker → housekeeping（清理孤儿容器/镜像）
-└── select livenessManager.Updates() → 处理 liveness 失败
+│   └── DELETE   → HandlePodUpdates（因优雅删除，DELETE 视同 UPDATE）
+├── select plegCh（PLEG 容器事件）→ isSyncPodWorthy 过滤 → HandlePodSyncs；
+│   └── 事件为 ContainerDied 时额外 cleanUpContainersInPod
+├── select syncCh（周期 resync）→ getPodsToSync → HandlePodSyncs
+├── select liveness/readiness/startupManager.Updates() → handleProbeSync（探针失败/就绪/启动）
+├── select containerManager.Updates()（设备等）→ HandlePodSyncs
+├── select volumeSyncCh（卷状态就绪，新增）→ drainVolumePodSyncs → HandlePodSyncs
+└── select housekeepingCh → HandlePodCleanups（清理孤儿容器/镜像，sources 未就绪则跳过）
 ```
 
-**两种事件源：** 期望变化（configCh，来自 apiserver/静态文件）+ 容器实际变化（plegCh，来自 PLEG 探测）——后者是 kubelet 主动发现容器挂掉的关键。
+**两种事件源：** 期望变化（configCh，来自 apiserver/静态文件）+ 容器实际变化（plegCh，来自 PLEG 探测）——后者是 kubelet 主动发现容器挂掉的关键。其余 channel（探针、containerManager、volumeSyncCh）是把「非 config 的同步诉求」统一汇到 `HandlePodSyncs`。
 
 ---
 
 ## 4. 开发视角：per-Pod 串行 worker（podWorkers）
 
-### 4.1 `UpdatePod`——分派入口（pod_workers.go `p.UpdatePod+0`，:784）
+### 4.1 `UpdatePod`——分派入口（pod_workers.go `p.UpdatePod+0`）
 
 `syncLoopIteration` 经 `SyncHandler` 最终调 `podWorkers.UpdatePod`：
 ```text
-UpdatePod(options)
+UpdatePod(ctx, options)
 ├── 写/合并 podSyncStatuses（记录最新期望）
-├── 该 Pod 已有 worker → 唤醒（workQueue.Enqueue）
+├── 取分配态：allocationManager.GetAllocatedPod → 写回 pendingUpdate.Pod 与 .AllocatedGeneration
+├── 该 Pod 已有 worker → 唤醒（向 podUpdates channel 投递）
 └── 无 worker → 创建 goroutine 跑 podWorkerLoop
 ```
 
-### 4.2 `podWorkerLoop`——每 Pod 串行（pod_workers.go `p.podWorkerLoop+0`，:1266）
+### 4.2 `podWorkerLoop`——每 Pod 串行（pod_workers.go `p.podWorkerLoop+0`）
 
-每个 Pod 一个 goroutine 跑 `podWorkerLoop`：
+每个 Pod 一个 goroutine 跑 `podWorkerLoop`，签名含一个空复合字面量类型的 channel：
+`func (p *podWorkers) podWorkerLoop(parentCtx context.Context, podUID types.UID, podUpdates <-chan struct{})`
 ```text
-podWorkerLoop(ctx, podUID)
-├── for（串行处理该 Pod 的同步请求）:
-│   ├── 从 workQueue 取一个 work item（带 jitter 背压）
-│   ├── completeWork 前先检查是否要 requeue（处理期间又来新更新）
-│   └── 调 syncPodFn（= Kubelet.SyncPod）执行真正同步
+podWorkerLoop(parentCtx, podUID, podUpdates)
+├── for range podUpdates（串行处理该 Pod 的同步请求）:
+│   ├── startPodSync 取出 pendingUpdate（无则 continue）
+│   ├── 按 update.WorkType 分派：
+│   │   ├── TerminatedPod  → podSyncer.SyncTerminatedPod
+│   │   ├── TerminatingPod → SyncTerminatingPod / SyncTerminatingRuntimePod
+│   │   └── 默认（Sync）   → relistSuspender.SuspendRelist → podSyncer.SyncPod（= Kubelet.SyncPod）
+│   ├── 同步返回后 ResumeRelist（先于 lastSyncTime 更新）→ 决定是否补一次 Relist
+│   └── completeWork 决定是否 requeue（处理期间又来新更新）
 ```
 
-**串行语义：** 同一 Pod 任意时刻只有一个 SyncPod 在跑——避免并发同步同一 Pod 导致卷/容器状态竞争。不同 Pod 各自 goroutine，互不阻塞。
+**串行语义：** 同一 Pod 任意时刻只有一个同步在跑——避免并发同步同一 Pod 导致卷/容器状态竞争。不同 Pod 各自 goroutine，互不阻塞。
 
-### 4.3 `SyncPod`——真正同步（kubelet.go `kl.SyncPod+0`，:2158）
+### 4.3 `SyncPod` / `SyncTerminatedPod`——真正同步（kubelet.go `kl.SyncPod+0` / `kl.SyncTerminatedPod+0`）
 
-`SyncPod` 是 kubelet 的核心：计算 Pod 与容器现状的差集，创建/重启/杀死容器，挂载卷，跑探针（详见 [kubelet-CRI运行时](../sourceReader/10-kubelet-CRI运行时.md)、[kubelet探针机制](kubelet探针机制.md)）。
+`SyncPod` 是 kubelet 的核心：计算 Pod 与容器现状的差集，创建/重启/杀死容器，挂载卷，跑探针（详见 [kubelet-CRI运行时](../sourceReader/10-kubelet-CRI运行时.md)、[kubelet探针机制](kubelet探针机制.md)）。当前基线两处要点：
+
+- `SyncPod` 接收 `allocatedGeneration`，用它设置/清除 `PodResizeInProgressCondition`，并把 `AllocatedGeneration` 透传到运行时（Pod 原地 resize 的代际对齐）。
+- `SyncTerminatedPod` 在卷路径清理后，额外从 `kl.actuatedState` 反注册该 Pod 的卷（`GetPodVolumes`/`RemovePodVolume`），再通知 secret/configmap manager。
 
 ### 4.4 workQueue 背压（带 jitter）
 
 per-Pod workQueue 的重入队带随机抖动：
-- 正常 resync：`wait.Jitter(resyncInterval, ...)`（pod_workers.go:1572）。
-- 失败退避：`wait.Jitter(backOffPeriod, ...)`（:1082）、`backOffOnTransientErrorPeriod`（:1575）。
+- 正常 resync：`wait.Jitter(p.resyncInterval, ...)`（pod_workers.go `p.completeWork+4`）。
+- 瞬时网络错误退避：`wait.Jitter(backOffOnTransientErrorPeriod, ...)`（`p.completeWork+7`）。
+- 失败/启动前退避：`wait.Jitter(p.backOffPeriod, ...)`（pod_workers.go `p.allowPodStart+12`）。
 - **目的：** 避免大量 Pod 同步风暴打爆 runtime/apiserver。
 
 ---
@@ -134,17 +148,17 @@ per-Pod workQueue 的重入队带随机抖动：
 
 | 类型 | 实现 | 触发方式 |
 |---|---|---|
-| **GenericPLEG** | generic.go `NewGenericPLEG+0`（:139） | 周期 Relist（默认 1s） |
-| **EventedPLEG** | evented.go `NewEventedPLEG+0`（:52） | 监听 CRI 容器事件（低延迟，feature gate） |
+| **GenericPLEG** | generic.go `NewGenericPLEG+0` | 周期 Relist（默认 1s） |
+| **EventedPLEG** | evented.go `NewEventedPLEG+0` | 监听 CRI 容器事件（低延迟，feature gate） |
 
-### 5.2 `GenericPLEG.Relist`——周期探测（generic.go `g.Relist+0`，:296）
+### 5.2 `GenericPLEG.Relist`——周期探测（generic.go `g.Relist+0`）
 
 ```text
 Relist(ctx)                                    g.Relist+0
 ├── podList = g.runtime.GetPods(ctx, true)     g.Relist+17（列全部容器现状）
 ├── g.podRecords.setCurrent(pods)
 ├── for pid ∈ podRecords:
-│    └── reconcilePodRecord(ctx, pid)          （g.reconcilePodRecord+0，:339）
+│    └── reconcilePodRecord(ctx, pid)          （g.reconcilePodRecord+0）
 │          ├── oldPod vs currentPod 比对
 │          └── 容器状态变化 → 生成 PodLifecycleEvent（Started/Died/...）→ eventChannel
 └── g.cache.UpdateTime(timestamp)              更新缓存时间戳
@@ -162,12 +176,12 @@ Relist(ctx)                                    g.Relist+0
 
 ```text
 容器 OOMKilled（apiserver 不知道）
-└── GenericPLEG.Relist (generic.go:296) 周期探测
-     └── reconcilePodRecord (:339) 发现容器 Died → PodLifecycleEvent → plegCh
-          └── syncLoopIteration (kubelet.go:2889) 收 plegCh → HandlePodSyncs
-               └── podWorkers.UpdatePod (pod_workers.go:784) 唤醒 worker
-                    └── podWorkerLoop (pod_workers.go:1266) 串行取 work
-                         └── Kubelet.SyncPod (kubelet.go:2158)
+└── GenericPLEG.Relist (generic.go g.Relist+0) 周期探测
+     └── reconcilePodRecord (g.reconcilePodRecord+0) 发现容器 Died → PodLifecycleEvent → plegCh
+          └── syncLoopIteration (kubelet.go kl.syncLoopIteration+0) 收 plegCh → HandlePodSyncs
+               └── podWorkers.UpdatePod (pod_workers.go p.UpdatePod+0) 唤醒 worker
+                    └── podWorkerLoop (pod_workers.go p.podWorkerLoop+0) 串行取 work
+                         └── Kubelet.SyncPod (kubelet.go kl.SyncPod+0)
                               └── 按 restartPolicy 重启容器 → 上报 status
 ```
 
@@ -177,11 +191,17 @@ Relist(ctx)                                    g.Relist+0
 
 ### 7.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
-- `kl.Run+0`（kubelet.go:1988）、`kl.syncLoop+0`（:2814）、`kl.syncLoopIteration+0`（:2889）、`kl.SyncPod+0`（:2158）
-- `p.UpdatePod+0`（pod_workers.go:784）、`p.podWorkerLoop+0`（:1266）；workQueue 重入队（:1082/:1572/:1575，带 Jitter）
-- `g.Relist+0`（generic.go:296）、`g.Relist+17`（GetPods）、`g.reconcilePodRecord+0`（:339）、`NewGenericPLEG+0`（:139）
-- `NewEventedPLEG+0`（evented.go:52）
+本专题所有「符号+偏移」均在 HEAD `6bf0bfd5` 上复核（读者用 `offset` 子命令取实时行号）：
+- `kl.Run+0`、`kl.syncLoop+0`、`kl.syncLoopIteration+0`、`kl.SyncPod+0`、`kl.SyncTerminatedPod+0`（均 kubelet.go）
+- `p.UpdatePod+0`、`p.podWorkerLoop+0`、`p.completeWork+0`、`p.allowPodStart+0`（均 pod_workers.go，签名 `podWorkerLoop` 含 `podUpdates <-chan struct{}`）
+- `g.Relist+0`、`g.Relist+17`（GetPods）、`g.reconcilePodRecord+0`、`NewGenericPLEG+0`（均 generic.go）
+- `NewEventedPLEG+0`（evented.go）
+
+**本次基准漂移（`782c049`→`6bf0bfd5`）核对结论：**
+- `syncLoopIteration` 新增 `volumeSyncCh` 分支（卷状态就绪触发 `HandlePodSyncs`），已补入 §3.2；并订正 DELETE 实际走 `HandlePodUpdates`（非 Removes）。
+- `podWorkerLoop` 分派按 `WorkType` 走 Sync/Terminating/Terminated 三态，`UpdatePod` 现取分配态 `GetAllocatedPod` 并透传 `AllocatedGeneration`；`SyncPod`/`SyncTerminatedPod` 相应变化见 §4.3。已补入 §4。
+- `status_manager.go` 漂移集中在 Pod resize condition 的 `ObservedGeneration` 语义与 `DynamicNodeLocalEphemeralVolumes`，属 §7.3 既有「statusManager 未深挖」缺口，本篇不展开。
+- `kubelet_pleg.go`/`generic.go`/`evented.go` 的 PLEG 符号定义行与语义未变，无需改写。
 
 ### 7.2 生产实测
 
