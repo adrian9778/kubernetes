@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 apiserver 的 **discovery（服务发现）与 OpenAPI 生成**讲透：`/api`/`/apis` discovery 层级、aggregated discovery、OpenAPI v2/v3 生成。
 >
-> **代码基准**：`master@782c049`（2026-11-19，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：adrian @ `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，Go 1.27.4）。所有「符号+偏移」均在该基准上用 MCP `codegraph_explore` 回核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `NewRootAPIsHandler+0`。
 >
@@ -51,40 +51,40 @@
 
 ## 2. 开发视角：discovery 三层 handler
 
-### 2.1 顶层 `/apis`（`NewRootAPIsHandler+0`，root.go :69）
+### 2.1 顶层 `/apis`（`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/root.go` · `NewRootAPIsHandler` `+0`）
 
-`rootAPIsHandler.ServeHTTP+0`（:134）返回 `metav1.APIGroupList`（所有非核心 group）：
+`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/root.go` · `rootAPIsHandler.ServeHTTP` `+0` 返回 `metav1.APIGroupList`（所有非核心 group）：
 ```text
-ServeHTTP                                            s.ServeHTTP+0
+ServeHTTP                                            rootAPIsHandler.ServeHTTP+0
 ├── groupList = APIGroupList{Groups: groupsLocked(ctx, req)}
 └── WriteObjectNegotiated(serializer, ..., &groupList)   序列化返回
 ```
 
-### 2.2 组级 `/apis/<group>`（`NewAPIGroupHandler+0`，group.go :38）
+### 2.2 组级 `/apis/<group>`（`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/group.go` · `NewAPIGroupHandler` `+0`）
 
-`APIGroupHandler.ServeHTTP+0`（:71）返回该组的 version 列表（`APIGroup`）。
+`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/group.go` · `APIGroupHandler.ServeHTTP` `+0` 返回该组的 version 列表（`APIGroup`）。
 
-### 2.3 版本级 `/apis/<group>/<version>`（`NewAPIVersionHandler+0`，version.go :50）
+### 2.3 版本级 `/apis/<group>/<version>`（`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/version.go` · `NewAPIVersionHandler` `+0`）
 
-`APIVersionHandler.ServeHTTP+0`（:80）返回该 version 的资源列表（`APIResourceList`：每个资源的 name、singularName、namespaced、kind、verbs）。
+`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/version.go` · `APIVersionHandler.ServeHTTP` `+0` 返回该 version 的资源列表（`APIResourceList`：每个资源的 name、singularName、namespaced、kind、verbs）。
 
 **resource 列表来源：** `APIResourceLister`（由 APIInstaller 注册资源时填充，见 [api-server](api-server.md) §2.2）。
 
-### 2.4 aggregated discovery（`NewResourceManager+0`，aggregated/handler.go :168）
+### 2.4 aggregated discovery（`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/aggregated/handler.go` · `NewResourceManager` `+0`）
 
-`resourceDiscoveryManager.ServeHTTP+0`（:533）：把所有 group/version 的资源列表**聚合为一次请求**返回（`/apis` 带 Accept: `application/json;g=apidiscovery.k8s.io;v=v2`）——减少客户端逐组请求的往返。支持 ETag 缓存。
+`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/aggregated/handler.go` · `resourceDiscoveryManager.serveHTTP` `+0`：把所有 group/version 的资源列表**聚合为一次请求**返回（`/apis` 带 Accept: `application/json;g=apidiscovery.k8s.io;v=v2`）——减少客户端逐组请求的往返。支持 ETag 缓存（`ServeHTTPWithETag` 包裹，`aggregated/etag.go`）。
 
 ---
 
 ## 3. 开发视角：OpenAPI 生成
 
-### 3.1 OpenAPI v2（`DefaultOpenAPIConfig+0`，config.go :522）
+### 3.1 OpenAPI v2（`staging/src/k8s.io/apiserver/pkg/server/config.go` · `DefaultOpenAPIConfig` `+0`）
 
-`DefaultOpenAPIConfig(getDefinitions, defNamer)`：构造 OpenAPI v2（Swagger）配置。`getDefinitions` 从各 API 类型的 `zz_generated.openapi.go` 取 schema 定义，`defNamer` 生成 schema 名。
+`staging/src/k8s.io/apiserver/pkg/server/config.go` · `DefaultOpenAPIConfig(getDefinitions, defNamer)`：构造 OpenAPI v2（Swagger）配置。`getDefinitions` 从各 API 类型的 `zz_generated.openapi.go` 取 schema 定义，`defNamer` 生成 schema 名。
 
-### 3.2 OpenAPI v3（`DefaultOpenAPIV3Config+0`，config.go :543）
+### 3.2 OpenAPI v3（`staging/src/k8s.io/apiserver/pkg/server/config.go` · `DefaultOpenAPIV3Config` `+0`）
 
-`DefaultOpenAPIV3Config`：构造 OpenAPI v3 配置（`OpenAPIV3Config` 字段，config.go :221）。v3 按 group/version 分文件（`/openapi/v3/apis/<group>/<version>`），比 v2 更精确。
+`staging/src/k8s.io/apiserver/pkg/server/config.go` · `DefaultOpenAPIV3Config`：构造 OpenAPI v3 配置，写入 `Config` 结构体的 `OpenAPIV3Config` 字段（`staging/src/k8s.io/apiserver/pkg/server/config.go` · `Field:Config.OpenAPIV3Config`）。v3 按 group/version 分文件（`/openapi/v3/apis/<group>/<version>`），比 v2 更精确。
 
 ### 3.3 CRD 的 OpenAPI（apiextensions）
 
@@ -96,7 +96,8 @@ apiextensions-apiserver 有独立的 OpenAPI 控制器（`pkg/controller/openapi
 
 ```text
 kubectl api-resources
-└── GET /apis（Accept: apidiscovery v2）→ aggregated resourceDiscoveryManager (:533)
+└── GET /apis（Accept: apidiscovery v2）→ aggregated resourceDiscoveryManager
+     │   `staging/src/k8s.io/apiserver/pkg/endpoints/discovery/aggregated/handler.go` · `resourceDiscoveryManager.serveHTTP` `+0`
      └── 聚合所有 group/version 的 APIResourceList → 一次返回
           └── kubectl 解析资源列表（name、verbs、kind、namespaced）
 （client-go RESTMapper 也用 discovery 构造 GVK→resource 映射）
@@ -108,9 +109,9 @@ kubectl api-resources
 
 | 保证 | 锚点 | 为什么必须保持 |
 |---|---|---|
-| 层级化 discovery | root→group→version 三层 handler | 客户端按层级发现 API |
-| 聚合 discovery | `resourceDiscoveryManager.ServeHTTP+0`（:533） | 减少客户端往返 |
-| OpenAPI 双版本 | `DefaultOpenAPIConfig+0`/`DefaultOpenAPIV3Config+0` | v2 兼容 + v3 精确 |
+| 层级化 discovery | root→group→version 三层 handler（`discovery/root.go` / `group.go` / `version.go`） | 客户端按层级发现 API |
+| 聚合 discovery | `staging/src/k8s.io/apiserver/pkg/endpoints/discovery/aggregated/handler.go` · `resourceDiscoveryManager.serveHTTP` `+0` | 减少客户端往返 |
+| OpenAPI 双版本 | `staging/src/k8s.io/apiserver/pkg/server/config.go` · `DefaultOpenAPIConfig` `+0` / `DefaultOpenAPIV3Config` `+0` | v2 兼容 + v3 精确 |
 | CRD 动态并入 | apiextensions openapi controller | CR 也出现在 discovery/OpenAPI |
 
 ---
@@ -119,11 +120,13 @@ kubectl api-resources
 
 ### 6.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `782c049` 上复核：
-- discovery：`NewRootAPIsHandler+0`（root.go:69）、`s.ServeHTTP+0`（:134）、`NewAPIGroupHandler+0`（group.go:38）、`s.ServeHTTP+0`（:71）、`NewAPIVersionHandler+0`（version.go:50）、`s.ServeHTTP+0`（:80）
-- aggregated：`NewResourceManager+0`（aggregated/handler.go:168）、`resourceDiscoveryManager.ServeHTTP+0`（:533）
-- OpenAPI：`DefaultOpenAPIConfig+0`（config.go:522）、`DefaultOpenAPIV3Config+0`（:543）、`OpenAPIV3Config` 字段（:221）
-- storageversionhash：`discovery/storageversionhash.go`（storage version hash）
+本专题所有「符号+偏移」均在基准 `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4` 上用 MCP `codegraph_explore` 回核：
+- discovery 顶层 `/apis`：`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/root.go` · `NewRootAPIsHandler` `+0`；`rootAPIsHandler.ServeHTTP` `+0`（返回 `APIGroupList`）
+- discovery 组级：`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/group.go` · `NewAPIGroupHandler` `+0`；`APIGroupHandler.ServeHTTP` `+0`（返回 `APIGroup`）
+- discovery 版本级：`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/version.go` · `NewAPIVersionHandler` `+0`；`APIVersionHandler.ServeHTTP` `+0`（返回 `APIResourceList`）
+- aggregated discovery：`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/aggregated/handler.go` · `NewResourceManager` `+0`；`resourceDiscoveryManager.serveHTTP` `+0`
+- OpenAPI v2/v3：`staging/src/k8s.io/apiserver/pkg/server/config.go` · `DefaultOpenAPIConfig` `+0` / `DefaultOpenAPIV3Config` `+0`；`Field:Config.OpenAPIV3Config`
+- storageversionhash：`staging/src/k8s.io/apiserver/pkg/endpoints/discovery/storageversionhash.go` · `StorageVersionHash` `+0`
 
 ### 6.2 生产实测
 
