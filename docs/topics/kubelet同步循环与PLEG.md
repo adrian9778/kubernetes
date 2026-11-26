@@ -4,7 +4,7 @@
 
 > **层级**：跨篇机制纵深专题——把 kubelet 的**主循环（syncLoop）、per-Pod 串行 worker（podWorkers）、PLEG 容器状态探测**讲透：三源 PodConfig 合并、syncLoop 事件分派、per-Pod 串行化、PLEG Relist 生成容器事件。
 >
-> **代码基准**：`adrian@6bf0bfd5`（2026-11-26，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
+> **代码基准**：`adrian@6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`（2026-11-26，工作区干净），Go 1.27.4。所有「符号+偏移」均在该基准上复核。
 >
 > **锚点记法**：函数内偏移以函数声明行为 **+0**，如 `kl.syncLoop+0`。
 >
@@ -191,13 +191,13 @@ Relist(ctx)                                    g.Relist+0
 
 ### 7.1 代码回核
 
-本专题所有「符号+偏移」均在 HEAD `6bf0bfd5` 上复核（读者用 `offset` 子命令取实时行号）：
+本专题所有「符号+偏移」均在 HEAD `6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4` 上复核（读者用 `offset` 子命令取实时行号）：
 - `kl.Run+0`、`kl.syncLoop+0`、`kl.syncLoopIteration+0`、`kl.SyncPod+0`、`kl.SyncTerminatedPod+0`（均 kubelet.go）
 - `p.UpdatePod+0`、`p.podWorkerLoop+0`、`p.completeWork+0`、`p.allowPodStart+0`（均 pod_workers.go，签名 `podWorkerLoop` 含 `podUpdates <-chan struct{}`）
 - `g.Relist+0`、`g.Relist+17`（GetPods）、`g.reconcilePodRecord+0`、`NewGenericPLEG+0`（均 generic.go）
 - `NewEventedPLEG+0`（evented.go）
 
-**本次基准漂移（`782c049`→`6bf0bfd5`）核对结论：**
+**本次基准漂移（`782c049`→`6bf0bfd51d78d1b3cb0917dc7001cd2aaf5549d4`）核对结论：**
 - `syncLoopIteration` 新增 `volumeSyncCh` 分支（卷状态就绪触发 `HandlePodSyncs`），已补入 §3.2；并订正 DELETE 实际走 `HandlePodUpdates`（非 Removes）。
 - `podWorkerLoop` 分派按 `WorkType` 走 Sync/Terminating/Terminated 三态，`UpdatePod` 现取分配态 `GetAllocatedPod` 并透传 `AllocatedGeneration`；`SyncPod`/`SyncTerminatedPod` 相应变化见 §4.3。已补入 §4。
 - `status_manager.go` 漂移集中在 Pod resize condition 的 `ObservedGeneration` 语义与 `DynamicNodeLocalEphemeralVolumes`，属 §7.3 既有「statusManager 未深挖」缺口，本篇不展开。
